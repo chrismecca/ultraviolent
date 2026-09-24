@@ -24,7 +24,7 @@ astronautics on day one.
 │   ├── ENGINEERING.adoc
 │   ├── AGENTIC-BUILD.adoc
 │   ├── ROADMAP.adoc
-│   ├── RC-ALPHA.adoc
+│   ├── RC-IP27.adoc
 │   ├── IP27-TARGET.adoc
 │   ├── TESTING.adoc
 │   ├── CLEANROOM.adoc
@@ -164,7 +164,7 @@ working directory.
 
 Do not start by inventing a large configuration language.
 
-RC-ALPHA may use command-line options plus a small, boring declarative machine config if
+RC-IP27 may use command-line options plus a small, boring declarative machine config if
 needed.
 
 Configuration describes topology and paths. It does not script hardware behavior.

@@ -132,7 +132,7 @@ requires it.
 
 == Network development
 
-RC-ALPHA networking uses a Linux TAP backend.
+RC-IP27 networking uses a Linux TAP backend.
 
 Creating TAP/bridge interfaces may require root or appropriate capabilities. Keep the
 network backend testable without root through synthetic packet injection.
@@ -141,7 +141,7 @@ Do not require privileged networking for ordinary unit tests.
 
 == Host dependencies
 
-Keep RC-ALPHA runtime dependencies intentionally small.
+Keep RC-IP27 runtime dependencies intentionally small.
 
 The core should initially depend on the C++ standard library and host OS facilities.
 

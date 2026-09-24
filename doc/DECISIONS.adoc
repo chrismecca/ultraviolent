@@ -27,7 +27,7 @@ Status: accepted
 
 Linux/x86-64 is the reference host.
 
-Portability is designed in where cheap, but does not constrain RC-ALPHA.
+Portability is designed in where cheap, but does not constrain RC-IP27.
 
 == ADR-003: Interpreter is permanent
 
@@ -37,7 +37,7 @@ The interpreter is the correctness oracle.
 
 A JIT is an additional execution engine, never a replacement for the reference path.
 
-== ADR-004: No JIT before RC-ALPHA
+== ADR-004: No JIT before RC-IP27
 
 Status: accepted
 
@@ -95,14 +95,14 @@ No proprietary IRIX/SGI source is used as implementation source.
 
 Proprietary firmware/media remain private user inputs and are not distributed.
 
-== ADR-011: RC-ALPHA means remote login
+== ADR-011: RC-IP27 means remote login
 
 Status: accepted
 
 First public release requires telnet from outside the emulator into an installed,
 unmodified IRIX system and successful login.
 
-== ADR-012: No graphics before RC-ALPHA
+== ADR-012: No graphics before RC-IP27
 
 Status: accepted
 

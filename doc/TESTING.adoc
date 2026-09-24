@@ -150,7 +150,7 @@ Every trace format must be versioned.
 
 == Performance tests
 
-After RC-ALPHA, maintain benchmarks for:
+After RC-IP27, maintain benchmarks for:
 
 * guest instructions/second;
 * memory translation throughput;

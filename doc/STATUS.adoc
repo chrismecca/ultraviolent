@@ -10,7 +10,7 @@ M0 - Clean core boots itself
 
 Minimal one-node IP27 / Origin 2000, defined in `IP27-TARGET.adoc`.
 
-== RC-ALPHA definition
+== RC-IP27 definition
 
 Remote telnet login to an unmodified, installed IRIX guest.
 

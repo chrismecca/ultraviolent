@@ -167,7 +167,7 @@ Do not optimize from intuition.
 
 Profile first.
 
-Before RC-ALPHA, correctness and observability outrank raw guest speed unless slowness
+Before RC-IP27, correctness and observability outrank raw guest speed unless slowness
 prevents meaningful testing.
 
 Allowed early optimizations are those proven by profiling and semantically transparent,

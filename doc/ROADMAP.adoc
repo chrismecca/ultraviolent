@@ -174,15 +174,15 @@ Acceptance:
 * host and guest can exchange IP traffic;
 * guest can reach another system through a Linux bridge/TAP topology.
 
-== RC-ALPHA
+== RC-IP27
 
-RC-ALPHA is defined in `RC-ALPHA.adoc`.
+RC-IP27 is defined in `RC-IP27.adoc`.
 
 The release gate is remote network login to unmodified installed IRIX.
 
-== After RC-ALPHA
+== After RC-IP27
 
-Only after RC-ALPHA:
+Only after RC-IP27:
 
 === Performance baseline
 

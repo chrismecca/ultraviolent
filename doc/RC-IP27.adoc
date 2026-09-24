@@ -1,13 +1,13 @@
-= RC-ALPHA Release Contract
+= RC-IP27 Release Contract
 
-RC-ALPHA is the first intended public release of Ultraviolent.
+RC-IP27 is the first intended public release of Ultraviolent.
 
 It is deliberately defined by an end-to-end observable result rather than by a percentage
 of emulated hardware.
 
 == Required guest
 
-The canonical RC-ALPHA demonstration uses an unmodified IRIX 6.5.x installation compatible
+The canonical RC-IP27 demonstration uses an unmodified IRIX 6.5.x installation compatible
 with the selected IP27/Origin 2000 configuration. The project target is IRIX 6.5.30 where
 the user's legally held media provides it.
 
@@ -49,7 +49,7 @@ authenticated shell
 
 == Release gate
 
-RC-ALPHA requires all of the following.
+RC-IP27 requires all of the following.
 
 === Firmware
 
@@ -127,9 +127,9 @@ The release notes must record:
 
 == Performance
 
-No minimum guest speed is required for RC-ALPHA.
+No minimum guest speed is required for RC-IP27.
 
-RC-ALPHA may be substantially slower than a physical R10000.
+RC-IP27 may be substantially slower than a physical R10000.
 
 Correctness is the release criterion.
 
@@ -153,7 +153,7 @@ None of these alone qualify:
 
 == Public-repository hygiene
 
-Before RC-ALPHA is published:
+Before RC-IP27 is published:
 
 * verify the repository contains no SGI/IRIX firmware/media;
 * verify tests contain no proprietary binary excerpts;

@@ -9,13 +9,13 @@ IP27 is the first Ultraviolent machine because:
 * the architecture is complex enough to validate the framework;
 * public SGI documentation describes the node, Hub, XIO/XBOW, Bridge, IO6/BaseIO, SCSI,
   serial, and Ethernet architecture;
-* the IO6 provides the storage, console, and network capabilities required for RC-ALPHA;
+* the IO6 provides the storage, console, and network capabilities required for RC-IP27;
 * success produces a useful server-class IRIX system without requiring graphics.
 
 IP35/Origin 3000 is intentionally later. It is a different machine generation and should
 test whether the framework is truly reusable.
 
-== Canonical RC-ALPHA configuration
+== Canonical RC-IP27 configuration
 
 Use one deliberately boring machine.
 
@@ -82,7 +82,7 @@ Conceptually:
                      disk   CD-ROM
 ----
 
-Not every internal transaction needs full timing fidelity for RC-ALPHA, but the topology
+Not every internal transaction needs full timing fidelity for RC-IP27, but the topology
 must not be flattened in a way that prevents future faithful routing.
 
 == CPU target
@@ -121,7 +121,7 @@ Do not let the file backend understand IRIX partitions or XFS.
 
 == Ethernet
 
-The network path is part of RC-ALPHA, not a post-release convenience.
+The network path is part of RC-IP27, not a post-release convenience.
 
 IRIX must use the device it believes exists on the machine.
 
@@ -163,7 +163,7 @@ Do not "help" firmware by patching checksums, branches, tables, or discovery res
 Only model system-controller/MSC behavior to the degree required by the selected
 single-module machine and verified guest behavior.
 
-Do not make full rack management a prerequisite for RC-ALPHA unless original firmware
+Do not make full rack management a prerequisite for RC-IP27 unless original firmware
 requires it.
 
 Preserve an architectural seam so a richer system controller can be added later.
