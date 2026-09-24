@@ -1,3 +1,13 @@
+++++
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="doc/img/uv-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="doc/img/uv-light.png">
+    <img alt="Ultraviolent" src="doc/img/uv-light.png" width="520">
+  </picture>
+</p>
+++++
+
 = Ultraviolent
 :toc:
 :toclevels: 2
