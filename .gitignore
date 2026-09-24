@@ -1,0 +1,23 @@
+# Build trees
+/build/
+/cmake-build-*/
+
+# Private/proprietary/local assets and runtime state
+/local/
+/run/
+/state/
+
+# Editor/OS noise
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Generated docs
+*.html
+
+# Profiling/debug outputs
+perf.data
+perf.data.old
+core
+core.*
