@@ -1,6 +1,10 @@
+# bugprone-easily-swappable-parameters is disabled: nearly every emulator function takes
+# several integers (register numbers, addresses, values), so it reports almost everything and
+# trains contributors to ignore diagnostics (DEVELOPMENT "Static analysis").
 Checks: >
   -*,
   bugprone-*,
+  -bugprone-easily-swappable-parameters,
   clang-analyzer-*,
   performance-*,
   portability-*,
@@ -8,4 +12,4 @@ Checks: >
   modernize-use-override,
   readability-duplicate-include
 WarningsAsErrors: ''
-HeaderFilterRegex: '^(include|src)/'
+HeaderFilterRegex: '.*/(include/ultraviolent|src)/.*'

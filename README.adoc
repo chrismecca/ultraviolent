@@ -78,6 +78,9 @@ Start here, in order:
 
 . `doc/VISION.adoc`
 . `doc/ARCHITECTURE.adoc`
+. `doc/CORE.adoc`
+. `doc/MIPS.adoc`
+. `doc/IP27.adoc`
 . `doc/IP27-TARGET.adoc`
 . `doc/ROADMAP.adoc`
 . `doc/RC-IP27.adoc`

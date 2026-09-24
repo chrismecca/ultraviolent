@@ -19,5 +19,10 @@
 # Profiling/debug outputs
 perf.data
 perf.data.old
-core
-core.*
+/core
+/core.[0-9]*
+# User-supplied proprietary assets and manuals (CLEANROOM.adoc). Only the asset README is
+# tracked; firmware, media, disks, and PDF manuals never enter Git.
+/assets/*
+!/assets/README.adoc
+/doc/*.pdf

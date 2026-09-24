@@ -7,7 +7,8 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_CXX_COMPILER": "clang++"
       }
     },
     {
@@ -17,6 +18,14 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "ULTRAVIOLENT_ENABLE_ASAN": "OFF",
         "ULTRAVIOLENT_ENABLE_UBSAN": "OFF"
+      }
+    },
+    {
+      "name": "gcc",
+      "inherits": "dev",
+      "displayName": "Debug build with GCC (secondary compiler)",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "g++"
       }
     },
     {
@@ -40,6 +49,7 @@
   ],
   "buildPresets": [
     { "name": "dev", "configurePreset": "dev" },
+    { "name": "gcc", "configurePreset": "gcc" },
     { "name": "asan", "configurePreset": "asan" },
     { "name": "release", "configurePreset": "release" }
   ],
@@ -47,6 +57,11 @@
     {
       "name": "dev",
       "configurePreset": "dev",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "gcc",
+      "configurePreset": "gcc",
       "output": { "outputOnFailure": true }
     },
     {

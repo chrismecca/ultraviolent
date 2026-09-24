@@ -34,6 +34,58 @@ Unit tests cover pure or narrow semantics such as:
 
 Unit tests should not require proprietary assets.
 
+=== Harness
+
+Tests use the in-house harness in `tests/support/test.hpp` (ADR-016). A case is a named
+function registered at static-initialization time:
+
+[source,c++]
+----
+const test::Registration fires_in_order{"scheduler.fires_in_order", [](test::Context& t) {
+    t.check(condition, "what should hold");
+    t.check_equal(actual, expected);
+}};
+----
+
+* Name cases `area.behavior`. The runner executes them in name order.
+* A failed check records file and line and the case continues. Guard dependent steps with
+  `if (!t.check(...)) return;`.
+* `check_equal` prints both values when they are formattable with `std::format`.
+* Each test binary accepts substring filters and `--list`:
+
+[source,shell]
+----
+build/dev/core_tests scheduler
+build/dev/core_tests --list
+----
+
+* One executable per area (`core_tests`, `mips_tests`, ...), each registered with CTest.
+
+=== CPU tests
+
+`mips_tests` runs synthetic programs on a bare `mips::Cpu`. The fixture in
+`tests/arch/mips/system.hpp` provides RAM and no machine. Programs are built with the encoders
+in `tests/arch/mips/assembler.hpp`. After adding or changing an encoder, run:
+
+[source,shell]
+----
+tools/check_mips_encodings.sh
+----
+
+It compares every encoder with GNU as (`-march=r10000`) and skips cleanly when no MIPS
+cross assembler is installed.
+
+=== Machine tests
+
+`machine_tests` covers the IP27 personality with synthetic PROM images: image decoding,
+reset mode bits, address windows, the reset fetch, virtual time, determinism, and each
+modeled Hub register (`tests/machines/`).
+
+`scripts/ip27-prom-checkpoint.sh` is the private end-to-end check. It runs the user's PROM
+(`ULTRAVIOLENT_IP27_PROM`) and prints the LED sequence and the first unmodeled Hub read.
+* Invariant failures abort the process; the harness has no death tests. An invariant's
+  presence is covered by review, and the behavior around it by ordinary tests.
+
 == Subsystem tests
 
 Subsystem tests connect a few components:

@@ -1,0 +1,153 @@
+= Core Mechanics
+
+This note specifies the contracts in `include/ultraviolent/core/`. Nothing here knows about a
+concrete machine. The tests in `tests/core/` are the executable form of this document.
+
+== Invariants
+
+`invariant(condition, message)` (`core/invariant.hpp`) checks internal consistency in every
+build type and aborts with the source location on failure (ADR-017).
+
+An invariant failure is an emulator bug. Guest-triggerable conditions are never invariants;
+they are reported as values (`std::expected`, fault enums) so the hardware model can decide
+what the guest observes.
+
+== Virtual time
+
+`core/virtual_time.hpp`, `core/virtual_clock.hpp`.
+
+* `VirtualTime` is nanoseconds since machine power-on, unsigned 64-bit (ADR-015).
+* `VirtualDuration` is a span of virtual time in nanoseconds.
+* Arithmetic that would overflow, or a negative duration, is an invariant failure.
+* `VirtualClock` holds the current time. Anything may read it; only `Scheduler` advances it.
+  Time never moves backwards, including across resets.
+
+=== Clock domains
+
+A guest-visible counter with frequency `f` (CPU cycle counter, real-time clock, baud
+generator) converts through:
+
+----
+cycles_at(t, f)       = floor(t * f / 10^9)      cycles completed at time t
+time_at_cycles(n, f)  = ceil(n * 10^9 / f)       earliest time at which n cycles completed
+----
+
+Both are exact in 64-bit arithmetic for `f` up to 10 GHz. Counters derive their value from
+absolute virtual time rather than accumulating increments, so they never drift. A counter
+the guest can write stores an offset from `cycles_at(now)`.
+
+Frequencies describe what the guest observes, not host speed (ADR-013).
+
+== Scheduler
+
+`core/scheduler.hpp`.
+
+* Components register named events once (`add_event`), usually at construction, and keep
+  the returned `EventId`.
+* An event is idle or pending at exactly one deadline. `schedule_at` or `schedule_after`
+  sets or replaces the deadline. `cancel` makes it idle.
+* Dispatch order is total: earlier deadline first; equal deadlines in the order they were
+  (re)scheduled. Rescheduling gives an event a new position. Nothing depends on host
+  behavior, heap layout, or registration order.
+* `advance_to(limit)` fires every event due at or before `limit`, setting the clock to each
+  event's deadline before its callback runs. Events that callbacks schedule inside the window
+  also fire. The clock ends at `limit`.
+* An event is idle when its callback runs, so a periodic event reschedules itself.
+* Scheduling in the past, advancing backwards, and calling `advance_to` from a callback are
+  invariant failures.
+* Every dispatch emits a `scheduler` trace record `fire <name>`, which gives determinism
+  tests a normalized event trace.
+
+This is the mechanism behind the ARCHITECTURE event model. An MMIO write changes device state
+and schedules an event; the event later performs the DMA, completion, and interrupt.
+
+How CPU execution advances time is decided with the execution engine (M1/M2). The intended
+shape is that the machine runs the CPU until `next_deadline()`, then advances the scheduler
+to the time the CPU reached.
+
+== Addresses
+
+`core/address.hpp`.
+
+* `Address<Domain>` is a zero-cost strong type. `PhysicalAddress` and `VirtualAddress` do not
+  convert into each other or from integers implicitly. Further domains (Xtalk, PCI) are added
+  beside the fabric that uses them.
+* Address arithmetic wraps modulo 2^64.
+* `AddressRange` is `[base, base + size)`, non-empty, and may not wrap. `last()` is inclusive
+  so a range can end at the top of the domain.
+
+== Byte order
+
+`core/byte_order.hpp`. `load_unsigned` and `store_unsigned` convert between 1 to 8 bytes and
+an integer in big- or little-endian order.
+
+== Memory and the CPU physical address space
+
+`core/memory_block.hpp`, `core/address_space.hpp`.
+
+=== MemoryBlock
+
+Host storage for RAM or ROM contents. It has no address. It starts zeroed for determinism;
+real DRAM power-on contents are undefined. It cannot be copied or moved, because mappings refer
+to its storage.
+
+=== AddressSpace
+
+Decodes CPU physical addresses to memory and MMIO. Per ADR-009, it is not a universal bus:
+DMA, PCI, and Xtalk transactions get their own paths when those milestones arrive.
+
+* The byte order is fixed at construction and chosen by the machine.
+* An access is 1, 2, 4, or 8 bytes (`AccessWidth`) and carries an integer value.
+* Byte-lane convention: an access of width W at address A carries the integer formed by the
+  bytes at `[A, A + W)` in the space's byte order. In a big-endian space, a 32-bit access at
+  offset 0 of a 64-bit register carries the register's upper half.
+* A misaligned access returns `AccessFault::misaligned` without reaching any target. The CPU
+  normally raises its own address error first; the fault exists so no path silently splits an
+  access.
+* An unmapped access returns `AccessFault::unmapped`. A write to a read-only mapping returns
+  `AccessFault::read_only` and changes nothing. A target may refuse an access with
+  `AccessFault::unsupported`. The issuer of the access decides what the guest sees, such as a
+  bus error. The address space never invents data.
+* Mappings are 8-byte aligned in base and size and never overlap, so no access straddles
+  two mappings. Violations are reported as `MapError`, a machine-construction error.
+* One `MemoryBlock` may be mapped several times (aliases).
+* An `MmioTarget` receives window-relative offsets and the access width. A write value or MMIO read
+  result wider than the access is an invariant failure.
+
+Open questions:
+
+* Partial-word bus transactions (for example uncached `SWL`/`SWR`) are not representable.
+  Add byte-enable accesses only when the CPU model or a device needs them and the behavior is
+  sourced.
+* Whether a ROM write is ignored or faults on real hardware is decided per machine, with a
+  source.
+
+== Interrupt lines
+
+`core/interrupt.hpp`.
+
+* `InterruptLine` is a level-sensitive wire from one source to one input of an
+  `InterruptSink`.
+* The line holds its level. The sink is called only on changes. Connecting an asserted line
+  delivers the level immediately.
+* Wired-OR sharing of one input by several sources is the sink's concern, handled when a
+  real device requires it.
+
+== Reset kinds
+
+`core/reset.hpp` defines `ResetKind::power_on`, `cold`, and `warm`. Each component documents,
+with a source, what it preserves under each kind. Persistent state (NVRAM, flash, disks) is
+never reinitialized by any reset kind. Device-local resets are operations of the device.
+
+== Tracing
+
+`core/trace.hpp`.
+
+* Categories are those listed in ENGINEERING "Logging".
+* `Tracer` belongs to a machine; there is no global logger. It stamps records with virtual
+  time, so a deterministic run gives a deterministic trace.
+* `Tracer::log` formats only when the category is enabled and a sink is attached. A
+  disabled category costs one bit test.
+* `TraceSink` is where records go. Terminal and file sinks, and the bounded flight recorder
+  described in TESTING, are host-side sinks added when the executable needs them.
+* No behavior may depend on tracing.

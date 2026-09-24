@@ -63,6 +63,17 @@ cmake --build --preset release
 ctest --preset release
 ----
 
+== GCC build
+
+The secondary compiler has its own preset:
+
+[source,shell]
+----
+cmake --preset gcc
+cmake --build --preset gcc
+ctest --preset gcc
+----
+
 == Sanitizer build
 
 [source,shell]
@@ -76,9 +87,10 @@ A TSan preset should be enabled when host threading begins.
 
 == Compiler policy
 
-Clang is the primary compiler.
+Clang is the primary compiler. The `dev`, `asan`, and `release` presets select `clang++`.
 
-GCC is a required secondary CI compiler once public CI is established.
+GCC is a required secondary compiler. The `gcc` preset builds the dev configuration with
+`g++`. It becomes a CI gate once public CI is established.
 
 Code that only compiles because of a Clang extension is a bug unless explicitly justified.
 
@@ -124,7 +136,7 @@ Render documentation locally with:
 [source,shell]
 ----
 asciidoctor README.adoc
-asciidoctor docs/ARCHITECTURE.adoc
+asciidoctor doc/ARCHITECTURE.adoc
 ----
 
 Generated HTML does not belong in source control unless a publication workflow explicitly
@@ -150,6 +162,9 @@ requires them.
 
 == Ccache
 
-CMake presets may use `ccache` when available.
+`cmake/Ccache.cmake` uses `ccache` as the compiler launcher when it is installed.
 
-A missing cache must never make the build fail.
+A missing cache must never make the build fail; the build then uses the compiler directly.
+
+Disable it with `-DULTRAVIOLENT_USE_CCACHE=OFF`. An explicit
+`CMAKE_CXX_COMPILER_LAUNCHER` always takes precedence.

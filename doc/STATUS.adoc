@@ -4,7 +4,16 @@ Update this file at the end of every significant development session.
 
 == Current milestone
 
-M0 - Clean core boots itself
+M2 - Minimal IP27 reset machine (in progress)
+
+* The unmodified user PROM executes from the reset vector. It passes its Config self-check,
+  performs its Hub local-reset handshake, and reports LEDs 0x01 INITCPU and 0x02 TESTCP1.
+  Deterministic; no PC-specific code. Specification: `IP27.adoc`.
+
+* M1 - Reference R1x000 interpreter: deliverables implemented; `mips_tests` (77 cases) pass on
+  every preset; no dependency on any machine (2026-09-24). Specification: `MIPS.adoc`.
+* M0 - Clean core boots itself: deliverables implemented; acceptance commands pass on the
+  reference Debian 13 host for the `dev`, `gcc`, `asan`, and `release` presets (2026-09-24).
 
 == Canonical target
 
@@ -19,13 +28,29 @@ Remote telnet login to an unmodified, installed IRIX guest.
 * The previous prototype demonstrated that original IP27 PROM execution is reachable with
   a software R10000/IP27 model.
 * The prototype is a behavioral reference, not the architecture to copy mechanically.
+* M0 core contracts (see `CORE.adoc`) are implemented and covered by 34 unit cases in
+  `core_tests`: virtual time and clock-domain conversion, deterministic scheduler, typed
+  addresses, byte order, RAM/ROM/MMIO address space, interrupt lines, reset kinds, tracing.
+* Clang 19 and GCC 14 both build the tree warning-free with the project warning set; ASan and
+  UBSan report nothing.
+* The R10000 model (`MIPS.adoc`) implements the MIPS IV integer and FPU instruction sets,
+  CP0, the 64-entry TLB, exceptions, interrupts, Count/Compare, LL/SC, watch, reset, and
+  both byte orders, from the R10000 User's Manual v2.0 and MIPS IV ISA rev 3.2. Test
+  encodings match GNU as for 173 instructions (`tools/check_mips_encodings.sh`).
+* IP27 (`IP27.adoc`): the reset fetch reaches the flash at HSPEC `0x1fc00000`; the flash
+  also appears at the base of LBOOT; the CPU's reset Config is the flash `ip27conf` mode word;
+  CAC, UNCAC, and UALIAS reach memory; the Hub registers are at IALIAS. The PROM needs
+  PI_CPU_NUM, PI_RT_COUNT, and the "Rst0" local-reset handshake.
+* Mutation checks: deliberately broken endian lane selection, refill-vector selection,
+  delay-slot EPC, XContext layout, FPU rounding mode, NaN sense, fused multiply-add,
+  flush-to-zero, and sticky flags each fail at least one test.
 
 == Known unknown
 
-Populate during rebuild.
-
-Examples:
-
+* partial-word bus transactions (uncached `SWL`/`SWR` and similar): not representable in
+  `AddressSpace` yet; see `CORE.adoc`;
+* the R10000 behaviors listed in `MIPS.adoc` "Hypothesis checklist";
+* how the machine loop interleaves CPU cycles with scheduler events (M2);
 * exact chosen CPU revision/reset fields;
 * exact canonical IO6/XBOW widget mapping;
 * exact firmware image expectations;
@@ -34,25 +59,57 @@ Examples:
 
 == Current blocker
 
-Clean repository bootstrap and core contracts have not yet been implemented.
+None. Housekeeping left from M0:
+
+* `src/core/virtual_time.cpp` (empty translation unit) and `tests/core/core_test.cpp` (the
+  original single-assertion test, CTest `core_test`) are superseded bootstrap placeholders.
+  They still build and pass. Delete them and their `CMakeLists.txt` entries.
 
 == Next task
 
-Implement M0 only:
+Continue M2 with the observation loop in `IP27.adoc` "Observation log".
 
-. compile/test scaffold;
-. typed time/address primitives;
-. deterministic event queue;
-. memory-region/address-space interfaces;
-. unit tests.
+Current position: MD_MEMORY_CONFIG (`0x200018`), read right after LED `0x0e` SPEEDUP at 32 s
+of virtual time. The PROM first spends 26 s timing out on its missing system controller
+(ELSC), which it tolerates (IP27.adoc "Junk bus").
 
-Do not begin IP27 device porting until M0 invariants are tested.
+MD_MEMORY_CONFIG is the start of memory configuration (PRM LEDs `0x4a` MDIRINIT, `0x4b`
+MDIRCONFIG "probe and configure memory size"). The IRIX-derived `sn0/hubmd.h` gives its field
+layout, bank-size codes (MD_SIZE_*), and reset value (MMC_RESET_DEFAULTS). The PROM sizes
+memory in software, so modeling it means making RAM decode depend on the programmed bank
+sizes and on the installed DIMMs: memory placement becomes Hub MD behavior, not a fixed
+window. Specify from `hubmd.h` and the PROM's observed accesses before implementing.
+
+The evidence trail after memory, toward booting the CD: Hub II link, XBOW widget ID/status,
+Bridge widget and PCI config, IOC3 PCI config and console UART, then the ISP1020 probe.
+"Loading BASEIO prom" needs the user's `io6prom.img` behind Bridge (M3).
+
+Loop mechanics: `ULTRAVIOLENT_IP27_PROM=assets/firmware/ip27prom.img
+scripts/ip27-prom-checkpoint.sh`, `--trace hub,firmware,exception`, `--probe PC`. Record
+evidence with its source class (`SOURCES.adoc`), model only the observed behavior, and add a
+unit test.
+
+Performance: about 12 M instructions per second (release). The TLB last-match cache and the
+address-space last-hit cache were profile-driven and are transparent (callgrind). perf needs
+`kernel.perf_event_paranoid` at or below 2.
+
+Private assets are in the repository's `assets/` (firmware: `ip27prom.img`, `io6prom.img`,
+`mmscfw.bin`; IRIX 6.5 and 6.5.30 media) and are ignored by Git. Two copies of the R10000
+User's Manual are in `doc/*.pdf`, also ignored. The user-supplied PRM PDF is kept
+outside the repository.
 
 == Best known boot command
 
-Not yet applicable to clean rebuild.
+[source,shell]
+----
+cmake --build --preset dev
+ULTRAVIOLENT_IP27_PROM=assets/firmware/ip27prom.img \
+    scripts/ip27-prom-checkpoint.sh 2000000
+----
 
-When available, keep the exact canonical command here.
+Expected: LEDs through `0x4c` I2CINIT within 6 ms; `0x4d` I2CDONE at about 5.006 s; `0x0e`
+SPEEDUP at about 32 s, then the MD_MEMORY_CONFIG stop. 32 s is about 5.8 G cycles, about 8
+minutes with the release binary: `ULTRAVIOLENT_BINARY=build/release/ultraviolent`.
 
 == Regression checkpoints
 
@@ -61,12 +118,28 @@ When available, keep the exact canonical command here.
 |Checkpoint |State |Notes
 
 |clean.build
-|pending
-|Clang dev/release/ASan presets
+|pass
+|2026-09-24: `dev` (Clang), `gcc`, `asan` (ASan+UBSan), `release` configure, build, test
 
 |ip27.reset.first_fetch
-|pending
-|
+|pass
+|2026-09-24: user PROM executes from the reset vector; synthetic test `ip27.reset.first_fetch`
+
+|ip27.prom.led_testcp1
+|pass
+|2026-09-24: LED 0x02 TESTCP1 after the Hub local reset (checkpoint script)
+
+|ip27.prom.led_main
+|pass
+|2026-09-24: LED 0x2b MAIN / 0x0d INMAIN, 5.8 ms
+
+|ip27.prom.led_i2cdone
+|pass
+|2026-09-24: LED 0x4d I2CDONE after the 5 s system-controller timeout
+
+|ip27.prom.led_speedup
+|pass
+|2026-09-24: LED 0x0e SPEEDUP at 32 s, after the ELSC retries give up
 
 |ip27.prom.serial_banner
 |pending
@@ -116,3 +189,86 @@ Unknowns:
 Best checkpoint:
 Next step:
 ----
+
+== Session log
+
+----
+Date: 2026-09-24
+Milestone: M0
+Hypothesis: the M0 substrate can be built from the standard library alone, with
+  deterministic behavior provable by unit tests.
+Evidence: ROADMAP M0 deliverables; ARCHITECTURE virtual time, event, and address-space rules.
+Changed: presets select Clang, with a gcc preset for the secondary compiler; ccache
+  launcher; clang-tidy header filter fixed; .gitignore no longer ignores core/ directories;
+  doc paths corrected (docs/ -> doc/); core library (invariant, virtual time/clock,
+  scheduler, trace, address, byte order, memory block, address space, interrupt, reset);
+  in-house test harness; CORE.adoc; ADR-015..017.
+Tests: core_tests, 34 cases; all presets green; clang-tidy clean.
+Newly proven: dispatch order is stable across identical runs (trace comparison); clock
+  conversions exact at 195 MHz across a simulated year.
+Disproven: the old .clang-tidy HeaderFilterRegex never matched project headers, because
+  clang-tidy matches absolute paths.
+Unknowns: partial-word bus accesses; CPU progress to time mapping.
+Best checkpoint: clean.build
+Next step: M1 first slice.
+----
+
+----
+Date: 2026-09-24
+Milestone: M1
+Hypothesis: the R10000 architectural contract can be implemented from the public UM v2.0 and
+  MIPS IV ISA without a machine, and verified with synthetic programs.
+Evidence: UM chapters 14-17 (CP0, FPU, memory management, exceptions), ISA appendix A/B.
+Changed: arch/mips (Cpu, Tlb, Interpreter, FPU), test assembler with GNU as cross-check,
+  mips_tests (77 cases), MIPS.adoc, ADR-018..020, .clang-tidy drops
+  easily-swappable-parameters.
+Tests: all presets green; clang-tidy clean; encoding check 173/173.
+Newly proven: XContext is PTEBase 63:37 / R 36:35 / BadVPN2 34:4 on the R10000 (UM 14.17),
+  not the R4400 layout; LLAddr is a scratch register (UM 14.15); only reads take bus
+  errors; refill vector selection follows the address's region, not the current mode.
+Disproven: the working assumption that R10000 multiply-add is fused (UM: multiplier pass
+  then adder pass).
+Unknowns: the MIPS.adoc hypothesis checklist.
+Best checkpoint: clean.build
+Next step: M2 (see Next task).
+----
+
+----
+Date: 2026-09-24
+Milestone: M2
+Hypothesis: the PROM's first dependencies are a small set of Hub registers, discoverable by
+  running the unmodified image and tracing unmodeled accesses.
+Evidence: PRM 108-0170-001 (address classes, LEDs, flash layout); LINUX sn0 headers
+  (IALIAS, Hub register offsets, RTC rate); observation of the user's image.
+Changed: ADR-019 revised (bit 59 marks uncached requests); machines/ip27 (Ip27Machine, Hub,
+  promgen decoding, ip27conf mode bits); stream trace sink; ultraviolent CLI;
+  machine_tests (14); scripts/ip27-prom-checkpoint.sh; IP27.adoc.
+Tests: all presets green.
+Newly proven: IP27 Config comes from the flash ip27conf mode word (PROM self-check); the
+  flash is visible at LBOOT base; the PROM runs mapped at 0xc00000001fc0xxxx through the TLB
+  early; the "Rst0" local-reset handshake.
+Disproven: ADR-019's first encoding (attribute only), which could not tell cached references
+  from HSPEC; the guessed Config 0x6c01a603.
+Unknowns: LLP/XIO link state, NI_STATUS_REV_ID values, the rest of LBOOT decoding, the junk
+  bus.
+Best checkpoint: ip27.prom.led_testcp1
+Next step: IIO_ILCSR (see Next task).
+----
+
+----
+Date: 2026-09-24 (continued)
+Milestone: M2
+Changed: .gitignore protects assets/ and doc/*.pdf; Hub: ILCSR, NI_STATUS_REV_ID,
+  CALIAS, CPU present/enable, interrupt controller (PEND/MASK, IP2/IP3), II and NI
+  scratch, MD perf, MD_SLOTID_USTAT, NI_PROTECTION, remote-Hub alias; devices::Pcf8584
+  (junk-bus I²C); --probe diagnostic; transparent TLB and address-space caches (7 to 12
+  MIPS); source classes in SOURCES.adoc (IRIX-derived public header).
+Tests: 5 suites green on all presets.
+Newly proven: the PROM runs as an SN0 node from this image; the junk-bus UREG0 pair is a
+  PCF8584; the PROM talks to an ELSC over I²C and tolerates its absence after about 21 s.
+Disproven: nothing.
+Unknowns: memory configuration and sizing; ELSC protocol; LED 0x80 meaning.
+Best checkpoint: ip27.prom.led_speedup
+Next step: MD_MEMORY_CONFIG (see Next task).
+----
+
