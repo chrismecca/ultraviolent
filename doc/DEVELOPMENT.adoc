@@ -1,0 +1,155 @@
+= Development Environment
+
+== Reference host
+
+The first-class host is Linux/x86-64.
+
+The reference development distribution is Debian 13 ("trixie").
+
+Debian versions will evolve; avoid depending on an exact compiler minor version unless a
+real compiler bug requires it.
+
+== Debian packages
+
+On a clean Debian 13 workstation:
+
+[source,shell]
+----
+sudo apt update
+sudo apt install \
+  build-essential \
+  clang \
+  clang-format \
+  clang-tidy \
+  lld \
+  llvm \
+  cmake \
+  ninja-build \
+  ccache \
+  gdb \
+  git \
+  pkg-config \
+  python3 \
+  python3-venv \
+  python3-pip \
+  asciidoctor \
+  linux-perf \
+  valgrind
+----
+
+`valgrind` is supplemental; sanitizers are the primary memory/UB debugging mechanism.
+
+LLVM development libraries are not required until a JIT backend is actually started.
+Do not add them to the core build merely because LLVM may be used later.
+
+== Configure
+
+[source,shell]
+----
+git clone <your-repository-url> ultraviolent
+cd ultraviolent
+
+cmake --preset dev
+cmake --build --preset dev
+ctest --preset dev
+----
+
+== Release build
+
+[source,shell]
+----
+cmake --preset release
+cmake --build --preset release
+ctest --preset release
+----
+
+== Sanitizer build
+
+[source,shell]
+----
+cmake --preset asan
+cmake --build --preset asan
+ctest --preset asan
+----
+
+A TSan preset should be enabled when host threading begins.
+
+== Compiler policy
+
+Clang is the primary compiler.
+
+GCC is a required secondary CI compiler once public CI is established.
+
+Code that only compiles because of a Clang extension is a bug unless explicitly justified.
+
+== Warnings
+
+Development builds use aggressive warnings.
+
+Treat project warnings as errors in CI.
+
+Do not globally turn third-party warnings into errors if dependencies are added later.
+
+== Formatting
+
+`clang-format` defines mechanical formatting.
+
+Do not mix large formatting churn with semantic changes.
+
+== Static analysis
+
+Use `clang-tidy` for selected checks that produce actionable results.
+
+Do not enable hundreds of cosmetic checks that train contributors to ignore diagnostics.
+
+== Profiling
+
+Use Linux `perf` for low-level profiling.
+
+Do not optimize until a profile identifies the bottleneck.
+
+Useful examples later:
+
+[source,shell]
+----
+perf stat build/release/ultraviolent ...
+perf record -g build/release/ultraviolent ...
+perf report
+----
+
+== AsciiDoc
+
+Render documentation locally with:
+
+[source,shell]
+----
+asciidoctor README.adoc
+asciidoctor docs/ARCHITECTURE.adoc
+----
+
+Generated HTML does not belong in source control unless a publication workflow explicitly
+requires it.
+
+== Network development
+
+RC-ALPHA networking uses a Linux TAP backend.
+
+Creating TAP/bridge interfaces may require root or appropriate capabilities. Keep the
+network backend testable without root through synthetic packet injection.
+
+Do not require privileged networking for ordinary unit tests.
+
+== Host dependencies
+
+Keep RC-ALPHA runtime dependencies intentionally small.
+
+The core should initially depend on the C++ standard library and host OS facilities.
+
+Do not add LLVM, Vulkan, SDL, GUI frameworks, or large utility libraries before a milestone
+requires them.
+
+== Ccache
+
+CMake presets may use `ccache` when available.
+
+A missing cache must never make the build fail.

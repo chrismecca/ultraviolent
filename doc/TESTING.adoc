@@ -1,0 +1,162 @@
+= Testing and Validation
+
+== Test pyramid
+
+Ultraviolent uses four levels.
+
+----
+unit
+  |
+subsystem
+  |
+machine checkpoint
+  |
+end-to-end guest
+----
+
+A later level does not replace an earlier one.
+
+== Unit tests
+
+Unit tests cover pure or narrow semantics such as:
+
+* instruction decode;
+* arithmetic edge cases;
+* CP0 behavior;
+* TLB match/probe/write;
+* exception EPC/BD rules;
+* endian helpers;
+* address-space overlap/mapping;
+* event-queue ordering;
+* interrupt lines;
+* register lane behavior;
+* SCSI CDB parsing.
+
+Unit tests should not require proprietary assets.
+
+== Subsystem tests
+
+Subsystem tests connect a few components:
+
+* CPU + memory;
+* Bridge + PCI config;
+* HBA + SCSI target + RAM DMA;
+* IOC3 + interrupt sink;
+* scheduler + asynchronous completion.
+
+Prefer synthetic transactions over firmware when the behavior can be tested directly.
+
+== Machine checkpoints
+
+Firmware is a black-box integration test.
+
+Keep named checkpoints, for example:
+
+----
+ip27.reset.first_fetch
+ip27.prom.serial_banner
+ip27.prom.prompt
+ip27.scsi.discovery
+ip27.irix.kernel_entry
+ip27.irix.root_mounted
+ip27.irix.multiuser
+ip27.irix.network_up
+----
+
+A checkpoint records sufficient trace context to explain what "reached" means.
+
+Do not make tests depend on long copyrighted strings from PROM or IRIX output.
+
+Use short identifiers, register states, event markers, or hashes of locally generated
+normalized traces.
+
+== End-to-end tests
+
+Private end-to-end tests may require locally held firmware/media.
+
+They are not run by public CI unless a legally redistributable fixture exists.
+
+Provide scripts that skip cleanly with a clear message when assets are absent.
+
+== Differential interpreter tests
+
+When a JIT is added:
+
+. initialize CPU/memory state;
+. execute one block in the interpreter;
+. execute the same block in the JIT from identical state;
+. compare architectural state and permitted memory effects;
+. repeat with randomized/fuzzed inputs.
+
+The interpreter defines correctness unless a hardware/architecture test proves the
+interpreter itself wrong.
+
+== Determinism tests
+
+Run the same machine input twice and compare normalized event traces.
+
+Sources of intentionally external nondeterminism must be injected as explicit events.
+
+Do not read host time, random devices, or asynchronous host network input directly from
+the core during deterministic tests.
+
+== Sanitizers
+
+Maintain presets for:
+
+* AddressSanitizer + UndefinedBehaviorSanitizer;
+* ThreadSanitizer once host threading exists.
+
+Sanitizer failures are test failures.
+
+== Fuzzing
+
+Good fuzz targets include:
+
+* instruction decoder;
+* TLB operations;
+* MMIO access widths/offsets;
+* PCI config transactions;
+* SCSI command parsing;
+* future packet/descriptor parsing.
+
+Do not fuzz proprietary firmware blobs as part of public CI.
+
+== Flight recorder
+
+Maintain a bounded in-memory diagnostic recorder.
+
+Useful event classes:
+
+* PC/basic-block transitions at selected granularity;
+* exceptions;
+* CP0/TLB changes;
+* IRQ assert/deassert;
+* MMIO;
+* DMA;
+* SCSI;
+* PCI/XIO routing;
+* network descriptors.
+
+On fatal invariant failure, optionally dump the recorder.
+
+== Golden traces
+
+Golden traces must describe project-generated observations, not embed private binaries.
+
+Normalize unstable host details out of traces.
+
+Every trace format must be versioned.
+
+== Performance tests
+
+After RC-ALPHA, maintain benchmarks for:
+
+* guest instructions/second;
+* memory translation throughput;
+* hot basic blocks;
+* device/DMA overhead;
+* network throughput;
+* boot wall time.
+
+Performance tests never weaken correctness assertions.

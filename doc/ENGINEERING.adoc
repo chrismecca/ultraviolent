@@ -1,0 +1,187 @@
+= Engineering Style
+
+== Philosophy
+
+Ultraviolent uses a systems-programming style: concrete mechanisms, few layers, explicit
+ownership, and abstractions that correspond to real machine or execution concepts.
+
+Think "Bell Labs systems code with C++23 tools", not enterprise object architecture.
+
+== C++ dialect
+
+Use C++23.
+
+Use modern features where they improve correctness or legibility:
+
+* RAII;
+* `std::span`;
+* `std::optional`;
+* `std::variant`;
+* `std::expected`;
+* `constexpr`;
+* scoped enums;
+* strong value types;
+* `std::unique_ptr` for real ownership;
+* templates when they remove repetition without obscuring control flow.
+
+Use ranges and concepts sparingly. A reader should be able to follow the machine without
+decoding template metaprogramming.
+
+== Avoid
+
+Do not introduce:
+
+* manager/provider/factory layers without a concrete need;
+* universal base classes for unrelated hardware;
+* service locators;
+* dependency-injection frameworks;
+* event/message brokers for simple hardware connections;
+* pervasive `shared_ptr`;
+* hidden global mutable state;
+* reflection frameworks;
+* dynamic allocation in hot paths without evidence it is needed;
+* exceptions as normal control flow in the emulator core.
+
+Language exceptions may remain enabled, but core code should normally return explicit
+status/`std::expected` values at fallible boundaries.
+
+== Interfaces
+
+Prefer narrow capability interfaces where runtime substitution is real.
+
+Good examples:
+
+----
+BlockBackend
+EthernetBackend
+ConsoleBackend
+InterruptSink
+DmaTarget
+----
+
+Do not create `Device` merely because Hub, RAM, UART, and SCSI "are all devices".
+
+Composition is preferred to taxonomy.
+
+== Naming
+
+* namespaces: `ultraviolent`, then functional subnamespace;
+* types: `PascalCase`;
+* functions: `snake_case`;
+* variables: `snake_case`;
+* files: `snake_case.hpp` / `snake_case.cpp`;
+* scoped enum values: `snake_case`;
+* macros, if unavoidable: `ULTRAVIOLENT_UPPER_CASE`.
+
+Prefer complete names over abbreviations except for established hardware names such as
+TLB, DMA, PCI, XIO, and CP0.
+
+== Headers
+
+Public headers belong under `include/ultraviolent/`.
+
+Keep headers narrow.
+
+Do not expose host-only implementation details through guest architectural interfaces.
+
+Forward-declare where it materially reduces coupling, but do not contort code solely to
+minimize includes.
+
+== Invariants
+
+Make invariants visible.
+
+Use assertions for impossible internal states.
+
+Do not silently coerce invalid guest transactions into plausible behavior unless real
+hardware does so.
+
+Unexpected guest accesses should be traceable and, in debug/reference modes, conspicuous.
+
+== Logging
+
+Logging is diagnostic output, not machine behavior.
+
+Use structured categories:
+
+----
+cpu
+exception
+tlb
+memory
+hub
+xtalk
+xbow
+bridge
+pci
+ioc3
+scsi
+ethernet
+irq
+scheduler
+firmware
+machine
+----
+
+Hot-path logging must be compiled or gated so that disabled logs are cheap.
+
+Never require log output for correctness.
+
+== Errors
+
+Differentiate:
+
+* host configuration errors;
+* missing/invalid private assets;
+* guest-visible hardware errors;
+* internal invariant violations.
+
+Do not collapse all four into "failed".
+
+== Comments
+
+Comments explain hardware facts, invariants, or non-obvious reasons.
+
+Bad:
+
+[source,c++]
+----
+// increment i
+++i;
+----
+
+Good:
+
+[source,c++]
+----
+// The PROM performs a 32-bit access here even though the register is naturally
+// 64-bit. The upper lane remains unaffected on real hardware.
+----
+
+For obscure hardware behavior, cite the document number/section or a reproducible
+observation in the comment.
+
+== Optimization
+
+Do not optimize from intuition.
+
+Profile first.
+
+Before RC-ALPHA, correctness and observability outrank raw guest speed unless slowness
+prevents meaningful testing.
+
+Allowed early optimizations are those proven by profiling and semantically transparent,
+for example a faster RAM lookup or removal of accidental logging overhead.
+
+== Forbidden compatibility shortcuts
+
+Do not:
+
+* patch PROM code;
+* patch the IRIX kernel;
+* special-case known guest PCs;
+* return fake discovery data because "IRIX expects it";
+* skip hardware stages in the canonical boot;
+* make behavior depend on a particular installation-media instruction sequence.
+
+Implement the hardware contract.

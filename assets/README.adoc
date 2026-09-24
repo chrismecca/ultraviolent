@@ -1,0 +1,55 @@
+= Private Assets
+
+This directory documents required asset roles. It does not contain SGI or IRIX binaries.
+
+Do not place private assets here if there is any chance of accidentally committing them.
+
+Use the repository-ignored `local/` directory or an external path.
+
+== Suggested local layout
+
+----
+local/
+├── firmware/
+│   ├── ip27/
+│   └── io6/
+├── media/
+│   └── irix-6.5.30/
+├── disks/
+├── state/
+└── traces-private/
+----
+
+== Likely RC-IP27 inputs
+
+The selected IP27 configuration will likely require some subset of:
+
+* IP27 system PROM image;
+* IO6/BaseIO firmware/PROM image if executed by the model;
+* any system-controller firmware only if the canonical machine actually requires it;
+* IRIX 6.5.30 installation media owned by the user;
+* blank writable virtual SCSI disk;
+* persistent flash/NVRAM files initialized by Ultraviolent or from a documented seed.
+
+Do not require firmware that the emulated configuration does not execute.
+
+== IRIX media
+
+For a full IRIX 6.5.30 installation, keep the user's original media privately.
+
+Exact disc requirements depend on installation selection, but the common installation set
+includes Foundation media plus Installation Tools/Overlays media.
+
+Ultraviolent must not redistribute, auto-download, or silently fetch these images.
+
+== Integrity
+
+Use SHA-256 to identify local assets during reproducible testing:
+
+[source,shell]
+----
+sha256sum local/firmware/ip27/*
+sha256sum local/media/irix-6.5.30/*
+----
+
+Keep private asset paths out of portable test expectations.

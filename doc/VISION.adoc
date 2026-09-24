@@ -1,0 +1,122 @@
+= Vision
+
+== Mission
+
+Ultraviolent makes the hardware boundary durable.
+
+Instead of porting IRIX forward to each generation of modern hardware, Ultraviolent makes
+modern hardware impersonate the machines IRIX already knows.
+
+The long-range goal is that original SGI software can continue to run unchanged while the
+host implementation evolves independently.
+
+== End-state examples
+
+The architecture must permit, without changing the guest contract:
+
+----
+Unmodified IRIX 6.5.x
+        |
+machine personality
+        |
++-------+------------------+------------------+
+|                          |                  |
+JIT CPU                host storage       guest device
+|                          |                  |
+x86-64/arm64           NVMe/files        Vulkan / FPGA
+----
+
+Possible future systems include:
+
+* very fast virtual Origin 2000 and Origin 3000/3800 systems;
+* multiple independent virtual SGI systems on a Proxmox/Linux server;
+* large virtual NUMA machines whose apparent SGI hardware exceeds historical speed;
+* workstation personalities with faithful graphics hardware models;
+* accelerated graphics backends that preserve the guest-visible device contract;
+* physical FPGA implementations of SGI-compatible devices connected to a virtual machine;
+* historically plausible or deliberately fictional SGI-class machines assembled from
+  compatible components.
+
+== What is preserved
+
+Ultraviolent attempts to preserve:
+
+* guest instruction-set semantics;
+* guest firmware behavior;
+* guest-visible device registers and state;
+* interrupt and exception semantics;
+* MMU/TLB behavior;
+* required ordering and coherence semantics;
+* firmware/device discovery topology;
+* persistent machine state;
+* operating-system and application binaries.
+
+== What is not sacred
+
+Ultraviolent does not require the host implementation to preserve:
+
+* physical transistor implementation;
+* historical DRAM latency;
+* historical disk rotational latency;
+* historical network line rate;
+* CPU pipeline structure;
+* physical cache implementation;
+* router hop timing where software cannot observe it;
+* host implementation language behind external backend protocols.
+
+The architectural effect is the contract. Historical implementation detail is modeled only
+when it is guest-visible, required for correctness, or useful in a reference mode.
+
+== Two modes, eventually
+
+The design should support two broad execution personalities without becoming two projects.
+
+=== Reference mode
+
+Reference mode favors:
+
+* determinism;
+* the interpreter;
+* tracing;
+* strict event ordering;
+* diagnostic assertions;
+* differential tests;
+* detailed device behavior.
+
+=== Fast mode
+
+Fast mode may later use:
+
+* JIT translation;
+* host-parallel vCPUs;
+* direct-mapped guest RAM;
+* optimized TLB paths;
+* shared-memory virtual fabrics;
+* accelerated storage/network backends;
+* Vulkan or physical-device backends.
+
+Reference and fast modes must share the same guest-visible architectural model.
+
+== The anti-goal
+
+Ultraviolent must not become a pile of boot-path exceptions.
+
+Never encode:
+
+----
+if guest_pc == known_prom_address:
+    pretend_hardware_worked()
+----
+
+Fix or implement the hardware behavior that explains the observation.
+
+Compatibility quirks are allowed only at the correct hardware boundary and must be
+documented as such.
+
+== Success
+
+The ultimate success case is not a screenshot.
+
+It is an old SGI machine, a physical workstation, or an unchanged IRIX installation
+interacting with virtual SGI systems and having no reason to know that the "rack in the
+basement" is software running on a modern Linux host.

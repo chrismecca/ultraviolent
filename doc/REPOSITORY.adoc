@@ -1,0 +1,182 @@
+= Repository Structure
+
+== Target tree
+
+The repository should grow toward this shape, not be created with empty architecture
+astronautics on day one.
+
+----
+.
+├── README.adoc
+├── CMakeLists.txt
+├── CMakePresets.json
+├── .clang-format
+├── .clang-tidy
+├── .gitignore
+├── assets/
+│   └── README.adoc
+├── cmake/
+│   ├── Sanitizers.cmake
+│   └── Warnings.cmake
+├── docs/
+│   ├── VISION.adoc
+│   ├── ARCHITECTURE.adoc
+│   ├── ENGINEERING.adoc
+│   ├── AGENTIC-BUILD.adoc
+│   ├── ROADMAP.adoc
+│   ├── RC-ALPHA.adoc
+│   ├── IP27-TARGET.adoc
+│   ├── TESTING.adoc
+│   ├── CLEANROOM.adoc
+│   ├── DEVELOPMENT.adoc
+│   ├── REPOSITORY.adoc
+│   ├── DECISIONS.adoc
+│   ├── STATUS.adoc
+│   └── SOURCES.adoc
+├── include/
+│   └── ultraviolent/
+│       ├── core/
+│       ├── arch/
+│       │   └── mips/
+│       ├── fabric/
+│       ├── devices/
+│       ├── backends/
+│       └── machines/
+│           └── ip27/
+├── src/
+│   ├── core/
+│   ├── arch/
+│   │   └── mips/
+│   ├── fabric/
+│   ├── devices/
+│   ├── backends/
+│   ├── machines/
+│   │   └── ip27/
+│   └── main.cpp
+├── tests/
+│   ├── core/
+│   ├── arch/
+│   ├── devices/
+│   ├── machines/
+│   └── support/
+├── tools/
+└── scripts/
+----
+
+`build/`, `local/`, `run/`, and persistent machine state are not tracked.
+
+== Namespace ownership
+
+=== `core/`
+
+General execution mechanics:
+
+* virtual time;
+* event queue;
+* scheduler;
+* interrupt primitives;
+* address spaces;
+* memory regions;
+* tracing;
+* result/error fundamentals.
+
+Nothing in `core/` knows what an IP27 is.
+
+=== `arch/mips/`
+
+MIPS/R1x000 architectural CPU state and execution:
+
+* registers;
+* CP0;
+* TLB;
+* FPU;
+* decoder;
+* interpreter;
+* future Ultraviolent IR;
+* future JITs.
+
+Nothing here includes `machines/ip27/...`.
+
+=== `fabric/`
+
+Reusable transaction/interconnect implementations such as:
+
+* PCI;
+* Xtalk/XIO;
+* future NUMAlink generations.
+
+Do not put an abstraction here until at least one real machine needs it.
+
+=== `devices/`
+
+Concrete guest-visible hardware:
+
+* Bridge;
+* IOC3;
+* ISP1020;
+* future graphics hardware.
+
+A device may implement a narrow fabric endpoint interface but does not know the entire
+machine.
+
+=== `backends/`
+
+Host integration:
+
+* console/PTY;
+* block files;
+* TAP;
+* future Vulkan;
+* future physical-device/FPGA transport.
+
+Backends must not contain guest machine policy.
+
+=== `machines/ip27/`
+
+IP27-specific composition and IP27-only ASIC behavior, principally Hub and machine wiring.
+
+If a component is genuinely reusable by a later machine, move it only when the second use
+proves the common abstraction.
+
+== Generated/build data
+
+Never commit:
+
+* CMake build trees;
+* compiler databases generated inside build directories unless a developer symlink points
+  to them;
+* guest state;
+* logs;
+* private traces;
+* disk images;
+* firmware/media.
+
+== State layout
+
+Runtime state is outside the source tree by default.
+
+For local development, `local/state/<machine-name>/` is acceptable.
+
+The emulator should make state paths explicit rather than guessing from the current
+working directory.
+
+== Configuration
+
+Do not start by inventing a large configuration language.
+
+RC-ALPHA may use command-line options plus a small, boring declarative machine config if
+needed.
+
+Configuration describes topology and paths. It does not script hardware behavior.
+
+== Scripts
+
+Scripts automate reproducible operator tasks:
+
+* create blank disk;
+* configure TAP;
+* launch canonical machine;
+* run private integration tests;
+* normalize traces.
+
+Scripts must not implement guest hardware semantics.

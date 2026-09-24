@@ -1,0 +1,164 @@
+= RC-ALPHA Release Contract
+
+RC-ALPHA is the first intended public release of Ultraviolent.
+
+It is deliberately defined by an end-to-end observable result rather than by a percentage
+of emulated hardware.
+
+== Required guest
+
+The canonical RC-ALPHA demonstration uses an unmodified IRIX 6.5.x installation compatible
+with the selected IP27/Origin 2000 configuration. The project target is IRIX 6.5.30 where
+the user's legally held media provides it.
+
+No IRIX or SGI proprietary binary is distributed with Ultraviolent.
+
+== Canonical success path
+
+A clean demonstration must perform:
+
+----
+new/blank persistent state
+        |
+power on virtual IP27
+        |
+original PROM
+        |
+original installation environment
+        |
+original IRIX installer
+        |
+virtual SCSI system disk
+        |
+cold reboot
+        |
+installed IRIX
+        |
+multiuser
+        |
+IOC3 Ethernet
+        |
+Linux TAP/bridge
+        |
+remote telnet
+        |
+IRIX login:
+        |
+authenticated shell
+----
+
+== Release gate
+
+RC-ALPHA requires all of the following.
+
+=== Firmware
+
+* original PROM executes;
+* firmware reaches stable boot flow;
+* firmware discovers the configured boot storage;
+* no firmware patching;
+* no guest-PC shortcuts.
+
+=== Installation
+
+* installation starts from original user-supplied media;
+* IRIX itself labels/partitions/writes the system disk;
+* installation completes far enough to produce a bootable system disk.
+
+=== Boot
+
+* installed IRIX boots from the virtual disk;
+* normal startup reaches multiuser state;
+* serial console remains usable for diagnosis.
+
+=== Persistence
+
+* disk changes survive emulator restart;
+* persistent firmware/NVRAM state survives where hardware semantics require it;
+* clean guest shutdown followed by cold start is reproducible.
+
+=== Networking
+
+* IRIX loads and uses its original Ethernet driver;
+* Ethernet connects to a Linux TAP backend;
+* guest can answer network traffic from another host or network namespace;
+* the test must not rely only on loopback.
+
+=== Login
+
+From outside the emulator process:
+
+[source,shell]
+----
+telnet <guest-address>
+----
+
+must produce the guest's IRIX login service.
+
+A valid account must authenticate and receive an IRIX shell.
+
+The operator then demonstrates at least:
+
+[source,shell]
+----
+uname -a
+hinv
+id
+pwd
+date
+df -k
+----
+
+Exact output is machine/configuration dependent.
+
+== Reproducibility
+
+The release notes must record:
+
+* Ultraviolent commit/tag;
+* compiler/version;
+* host distribution/kernel;
+* machine configuration;
+* SHA-256 hashes of required private assets, without redistributing them;
+* disk size;
+* exact launch command;
+* network setup;
+* known limitations.
+
+== Performance
+
+No minimum guest speed is required for RC-ALPHA.
+
+RC-ALPHA may be substantially slower than a physical R10000.
+
+Correctness is the release criterion.
+
+A performance baseline should be captured so post-release JIT work has a reproducible
+starting point.
+
+== Not sufficient
+
+None of these alone qualify:
+
+* PROM prompt;
+* sash/standalone shell;
+* IRIX kernel banner;
+* installer UI;
+* single-user shell;
+* serial-only login;
+* synthetic host-created root filesystem;
+* patched guest;
+* bypassed PROM;
+* a custom kernel.
+
+== Public-repository hygiene
+
+Before RC-ALPHA is published:
+
+* verify the repository contains no SGI/IRIX firmware/media;
+* verify tests contain no proprietary binary excerpts;
+* verify traces do not embed proprietary binaries;
+* document every third-party source dependency and license;
+* choose and add the intended source license;
+* run a history scan, not only a working-tree scan, for accidentally committed private
+  assets.

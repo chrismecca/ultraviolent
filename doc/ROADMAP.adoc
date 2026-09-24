@@ -1,0 +1,242 @@
+= Roadmap
+
+The roadmap is capability-gated, not calendar-gated.
+
+No milestone is complete because code exists. It is complete when its acceptance criteria
+are reproducible.
+
+== M0 - Clean core boots itself
+
+Goal: establish the repository and deterministic execution substrate.
+
+Deliverables:
+
+* C++23 project builds with Clang and GCC;
+* CMake/Ninja presets;
+* unit-test harness;
+* virtual clock;
+* event queue/scheduler;
+* typed addresses;
+* RAM/ROM/MMIO mapping;
+* interrupt-line primitive;
+* reset model;
+* logging/trace categories.
+
+Acceptance:
+
+----
+cmake --preset dev
+cmake --build --preset dev
+ctest --preset dev
+----
+
+all succeed on the reference Debian host, including sanitizer presets.
+
+== M1 - Reference R1x000 interpreter
+
+Goal: correct architectural CPU execution independent of IP27.
+
+Implement and test:
+
+* integer registers and PC;
+* MIPS III/IV instructions required by R10000;
+* branch/delay-slot semantics;
+* exceptions and precise EPC/BD behavior;
+* CP0;
+* TLB;
+* endian behavior;
+* LL/SC semantics;
+* FPU architecture required by PROM/IRIX.
+
+Acceptance:
+
+* synthetic instruction tests pass;
+* exception/TLB tests pass;
+* execution has no dependency on `Ip27Machine`.
+
+== M2 - Minimal IP27 reset machine
+
+Goal: compose one legitimate machine.
+
+Implement:
+
+* one CPU;
+* RAM;
+* Hub reset-visible state;
+* PROM mapping;
+* machine reset sequence;
+* serial path required to observe firmware.
+
+Acceptance:
+
+* original PROM begins executing from reset;
+* execution is deterministic;
+* no PC-specific special cases.
+
+== M3 - Stable PROM environment
+
+Goal: reach a repeatable usable PROM environment.
+
+Implement the hardware behavior PROM actually probes:
+
+* Hub PI/MD/IIO portions as required;
+* Xtalk/XIO topology seam;
+* XBOW topology sufficient for the selected system;
+* Bridge discovery/configuration;
+* IOC3 serial;
+* NVRAM/flash behavior required by PROM.
+
+Acceptance:
+
+* PROM reaches a stable command environment;
+* reset/reboot is repeatable;
+* firmware inventory is internally consistent;
+* unknown accesses are accounted for or documented.
+
+== M4 - Storage path
+
+Goal: load software from original media.
+
+Implement:
+
+* PCI transactions needed by IO6;
+* ISP1020 behavior;
+* SCSI bus;
+* disk target;
+* CD-ROM target;
+* DMA;
+* completion/interrupt scheduling.
+
+Acceptance:
+
+* PROM discovers expected SCSI devices;
+* standalone loader can read original installation media;
+* a kernel image is loaded without modifying media or firmware.
+
+== M5 - IRIX kernel
+
+Goal: move from firmware correctness into OS correctness.
+
+Focus:
+
+* CP0/TLB/exception edge cases;
+* timer behavior;
+* interrupts;
+* DMA ordering;
+* memory aliases/cache-control architectural effects;
+* hardware graph discovery.
+
+Acceptance:
+
+* unmodified IRIX kernel reaches progressively documented checkpoints;
+* early VM initialization succeeds;
+* device discovery succeeds;
+* root/install filesystem mounts.
+
+== M6 - Installation
+
+Goal: install IRIX using the original installation workflow.
+
+Acceptance:
+
+* installation runs from user-supplied IRIX media;
+* target virtual disk is partitioned/labeled by IRIX;
+* filesystems are created by IRIX;
+* installation completes without host-side filesystem construction;
+* the installed disk cold-boots.
+
+== M7 - Multiuser system
+
+Goal: make the installed system a usable IRIX host.
+
+Acceptance:
+
+* init reaches normal multiuser operation;
+* serial login succeeds;
+* filesystem writes persist across clean shutdown/reboot;
+* common shell/process/filesystem smoke tests pass.
+
+== M8 - Ethernet
+
+Goal: place the guest on a real host network.
+
+Implement:
+
+* guest-visible IOC3 Ethernet behavior needed by IRIX;
+* DMA descriptors and interrupts;
+* Ethernet backend interface;
+* Linux TAP backend;
+* deterministic packet injection hooks for tests.
+
+Acceptance:
+
+* IRIX configures the interface through its original driver;
+* host and guest can exchange IP traffic;
+* guest can reach another system through a Linux bridge/TAP topology.
+
+== RC-ALPHA
+
+RC-ALPHA is defined in `RC-ALPHA.adoc`.
+
+The release gate is remote network login to unmodified installed IRIX.
+
+== After RC-ALPHA
+
+Only after RC-ALPHA:
+
+=== Performance baseline
+
+* profile interpreter;
+* establish benchmark corpus;
+* remove accidental bottlenecks;
+* design Ultraviolent IR.
+
+=== JIT
+
+* differential execution against interpreter;
+* tier-1 fast compiler or direct emitter;
+* optional optimizing tier later;
+* keep interpreter permanently.
+
+=== SMP IP27
+
+* two CPUs per node;
+* deterministic reference scheduling;
+* correct guest memory ordering and atomic behavior.
+
+=== Multi-node Origin 2000
+
+* routers/NUMAlink generation appropriate to IP27;
+* distributed memory topology;
+* guest-visible directory/coherence semantics;
+* partition/topology work as required.
+
+=== IP35 / Origin 3000 family
+
+IP35 is a new machine personality, not an enlarged IP27.
+
+Add Bedrock/C-brick/R-brick/I-brick/NUMAlink 3 concepts without modifying the general CPU,
+scheduler, backend, or tracing architecture merely to accommodate the new machine.
+
+=== Workstation personalities
+
+Add workstation chipsets and graphics only after the server reference architecture is
+proven.
+
+=== Graphics acceleration
+
+Potential backends:
+
+----
+faithful frontend -> software
+                  -> Vulkan
+                  -> FPGA
+----
+
+High-level GL interception may exist as an optional acceleration mode, but must not be
+required for the faithful machine path.
+
+=== Multi-machine orchestration
+
+Support many independent Ultraviolent instances on Linux/Proxmox, shared virtual
+networking, snapshots, and eventually specialized virtual interconnect services.

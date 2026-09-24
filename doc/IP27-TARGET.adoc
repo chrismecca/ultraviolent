@@ -1,0 +1,190 @@
+= First Machine: Minimal Origin 2000 / IP27
+
+== Why IP27 first
+
+IP27 is the first Ultraviolent machine because:
+
+* the existing prototype already reaches real PROM execution and therefore provides a
+  reference oracle;
+* the architecture is complex enough to validate the framework;
+* public SGI documentation describes the node, Hub, XIO/XBOW, Bridge, IO6/BaseIO, SCSI,
+  serial, and Ethernet architecture;
+* the IO6 provides the storage, console, and network capabilities required for RC-ALPHA;
+* success produces a useful server-class IRIX system without requiring graphics.
+
+IP35/Origin 3000 is intentionally later. It is a different machine generation and should
+test whether the framework is truly reusable.
+
+== Canonical RC-ALPHA configuration
+
+Use one deliberately boring machine.
+
+Recommended configuration:
+
+----
+Machine:        SGI Origin 2000 / IP27 personality
+Nodes:          1
+CPUs:           1
+CPU:            R10000 architectural personality
+Memory:         512 MiB initially
+Hub:            1
+XIO fabric:     minimal faithful topology
+XBOW:           represented explicitly
+Base I/O:       one IO6/BaseIO path
+PCI bridge:     Bridge
+Serial:         IOC3 path
+Ethernet:       IOC3/BaseIO Ethernet path
+SCSI HBA:       ISP1020-compatible path
+SCSI ID 1:      system disk
+SCSI CD-ROM:    installation media
+Firmware:       original user-supplied IP27/IO6 firmware as required
+Graphics:       none
+SMP:            disabled
+Additional nodes: none
+----
+
+The exact SCSI IDs and firmware mapping become constants only after confirmed against the
+chosen reference configuration and public documentation.
+
+== Why 512 MiB
+
+The first target does not need to mimic the smallest historical memory configuration.
+
+512 MiB is large enough to be comfortable for IRIX installation/use while small enough to
+keep memory traces and host resource use simple.
+
+Memory size is a machine-configuration parameter, not an architectural constant.
+
+== Hardware graph
+
+Conceptually:
+
+----
+             R10000
+                |
+               Hub
+          /      |      \
+       memory   XIO    NUMA/router seam
+                 |
+               XBOW
+                 |
+               IO6
+                 |
+               Bridge
+                 |
+                PCI
+          +------+------+
+          |             |
+        IOC3         ISP1020
+      /      \           |
+ serial   Ethernet      SCSI
+                        /   \
+                     disk   CD-ROM
+----
+
+Not every internal transaction needs full timing fidelity for RC-ALPHA, but the topology
+must not be flattened in a way that prevents future faithful routing.
+
+== CPU target
+
+Start with the R10000 configuration already best understood by the prototype.
+
+The CPU is an architectural model, not a pipeline simulation.
+
+Required correctness includes:
+
+* MIPS instruction semantics used by PROM/IRIX;
+* CP0;
+* TLB;
+* exceptions;
+* delay slots;
+* LL/SC;
+* FPU behavior required by guest software;
+* interrupt observation;
+* Count/Compare semantics as applicable to the chosen CPU model.
+
+Do not encode host execution rate into the guest CPU clock.
+
+== Storage
+
+The canonical system disk is a raw block image owned by the user.
+
+IRIX must create its own on-disk structures.
+
+The host backend only provides block reads/writes/flush semantics.
+
+The SCSI frontend owns SCSI-visible behavior.
+
+The HBA owns DMA/mailbox/interrupt behavior.
+
+Do not let the file backend understand IRIX partitions or XFS.
+
+== Ethernet
+
+The network path is part of RC-ALPHA, not a post-release convenience.
+
+IRIX must use the device it believes exists on the machine.
+
+The host side initially uses Linux TAP.
+
+Keep:
+
+----
+guest Ethernet frontend
+        !=
+Linux TAP backend
+----
+
+so future backends can include packet capture/replay, shared-memory switching, physical
+interfaces, or distributed orchestration.
+
+== Console
+
+Serial console is the diagnostic truth path.
+
+Interactive host terminal handling is a backend.
+
+The IOC3 serial model must consume/produce guest serial bytes independently of whether the
+host backend is stdin, PTY, socket, or logfile.
+
+== Firmware
+
+Ultraviolent never bundles firmware.
+
+Firmware images are local user inputs.
+
+The loader validates size/hash where a local manifest is configured and maps bytes exactly
+as the machine personality specifies.
+
+Do not "help" firmware by patching checksums, branches, tables, or discovery results.
+
+== System controller
+
+Only model system-controller/MSC behavior to the degree required by the selected
+single-module machine and verified guest behavior.
+
+Do not make full rack management a prerequisite for RC-ALPHA unless original firmware
+requires it.
+
+Preserve an architectural seam so a richer system controller can be added later.
+
+== Acceptance progression
+
+The IP27 personality is considered healthy only if each earlier checkpoint remains
+reproducible while later subsystems are added:
+
+----
+reset
+-> first PROM instructions
+-> serial output
+-> stable PROM
+-> IO6/Bridge discovery
+-> SCSI discovery
+-> standalone loader
+-> IRIX kernel
+-> install filesystem
+-> installed disk
+-> multiuser
+-> Ethernet
+-> remote login
+----

@@ -1,0 +1,129 @@
+= Architecture Decision Ledger
+
+This file records decisions that should not be casually reopened by agentic drift.
+
+Change a decision only with new evidence and document the replacement.
+
+== ADR-001: C++23 core
+
+Status: accepted
+
+Ultraviolent core and in-process device models use C++23.
+
+Reason:
+
+* excellent systems/host API access;
+* natural fit for JIT/executable-memory work;
+* mature LLVM integration if chosen later;
+* zero-cost strong types and RAII;
+* direct control of memory layout/atomics;
+* strong Linux tooling.
+
+Rust remains a valid language for external tools/backends but is not the core language.
+
+== ADR-002: Linux/x86-64 first
+
+Status: accepted
+
+Linux/x86-64 is the reference host.
+
+Portability is designed in where cheap, but does not constrain RC-ALPHA.
+
+== ADR-003: Interpreter is permanent
+
+Status: accepted
+
+The interpreter is the correctness oracle.
+
+A JIT is an additional execution engine, never a replacement for the reference path.
+
+== ADR-004: No JIT before RC-ALPHA
+
+Status: accepted
+
+Correctness, determinism, and guest network login precede dynamic translation.
+
+Transparent profiler-driven optimizations are allowed.
+
+== ADR-005: Virtual time is authoritative
+
+Status: accepted
+
+Guest-visible time and asynchronous device behavior use core virtual time/events.
+
+Host wall clock may pace but does not define guest semantics.
+
+== ADR-006: Machine personalities own topology
+
+Status: accepted
+
+IP27 is the first personality.
+
+IP35 is a separate later personality, not "large IP27".
+
+General CPU/core code may not depend on a concrete machine.
+
+== ADR-007: Guest device != host backend
+
+Status: accepted
+
+Device frontends implement what the guest sees.
+
+Backends implement files, TAP, Vulkan, FPGA transports, and similar host integration.
+
+== ADR-008: No universal device hierarchy
+
+Status: accepted
+
+Use narrow capability interfaces and composition.
+
+Do not create enterprise-style base classes merely to force unrelated components into one
+taxonomy.
+
+== ADR-009: AddressSpace is not a universal bus
+
+Status: accepted
+
+CPU memory accesses, DMA, PCI, XIO, and future NUMAlink transactions remain semantically
+distinct even when they resolve to common storage.
+
+== ADR-010: Clean-room/public provenance
+
+Status: accepted
+
+No proprietary IRIX/SGI source is used as implementation source.
+
+Proprietary firmware/media remain private user inputs and are not distributed.
+
+== ADR-011: RC-ALPHA means remote login
+
+Status: accepted
+
+First public release requires telnet from outside the emulator into an installed,
+unmodified IRIX system and successful login.
+
+== ADR-012: No graphics before RC-ALPHA
+
+Status: accepted
+
+The first machine is server-class IP27.
+
+Workstation and graphics work follows proof of the reusable core.
+
+== ADR-013: Hardware identity and execution speed are separate
+
+Status: accepted
+
+A guest may believe it owns a historically plausible CPU clock while a future JIT executes
+workloads much faster than the physical machine.
+
+Do not tie host wall-clock throughput to the guest-reported CPU frequency.
+
+== ADR-014: No guest patches in the canonical path
+
+Status: accepted
+
+PROM, kernel, installer, and userland remain unmodified.
+
+Debug-only experimental patches may exist outside the canonical path only if clearly
+separated and never become required for success.

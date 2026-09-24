@@ -1,0 +1,70 @@
+= Source and Evidence Index
+
+This is a provenance index, not a mirror of third-party material.
+
+Do not commit proprietary manuals or binaries unless redistribution is clearly permitted.
+
+== Primary SGI material for IP27
+
+Useful public document identifiers/titles include:
+
+* 007-3439-002 — _Origin and Onyx2 Theory of Operations Manual_
+* 007-3430-003 — _Origin2000 and Onyx2 Performance Tuning and Optimization Guide_
+* 007-3456-003 — _Origin2000 Rackmount Owner's Guide_
+* 007-3410-001 — _Origin and Onyx2 Programmer's Reference Manual_
+* 007-3862-008 — _IRIX 6.5 Installation Instructions_
+
+Record section/page references in subsystem notes when behavior is implemented.
+
+== CPU
+
+Maintain references for:
+
+* R10000 architecture/user manual;
+* MIPS III/MIPS IV ISA material;
+* CP0/TLB exception behavior;
+* floating-point architecture.
+
+Use the most primary source available.
+
+== Chips and fabrics
+
+Create subsection notes as implementation starts for:
+
+* Hub;
+* Xtalk/XIO;
+* XBOW;
+* Bridge;
+* IOC3;
+* ISP1020;
+* SCSI;
+* PCI.
+
+Do not import undocumented assumptions from the old prototype without reclassifying them
+as observations or hypotheses.
+
+== Observational evidence
+
+Private local observations may be indexed without embedding proprietary data.
+
+Example:
+
+----
+OBS-IP27-0001
+Source: physical/reference machine cold boot
+Question: Hub register reset value
+Capture: private trace path
+Conclusion: ...
+Confidence: observed once / reproduced N times
+----
+
+== Confidence labels
+
+Use:
+
+* `documented` — primary public documentation;
+* `observed` — reproducible hardware/guest observation;
+* `inferred` — strongest model consistent with evidence;
+* `hypothesis` — not yet verified.
+
+Code comments should not present `hypothesis` as `documented`.

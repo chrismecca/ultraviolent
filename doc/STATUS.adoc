@@ -1,0 +1,118 @@
+= Project Status
+
+Update this file at the end of every significant development session.
+
+== Current milestone
+
+M0 - Clean core boots itself
+
+== Canonical target
+
+Minimal one-node IP27 / Origin 2000, defined in `IP27-TARGET.adoc`.
+
+== RC-ALPHA definition
+
+Remote telnet login to an unmodified, installed IRIX guest.
+
+== Known true
+
+* The previous prototype demonstrated that original IP27 PROM execution is reachable with
+  a software R10000/IP27 model.
+* The prototype is a behavioral reference, not the architecture to copy mechanically.
+
+== Known unknown
+
+Populate during rebuild.
+
+Examples:
+
+* exact chosen CPU revision/reset fields;
+* exact canonical IO6/XBOW widget mapping;
+* exact firmware image expectations;
+* reset defaults not explicitly documented;
+* interrupt timing/order edge cases.
+
+== Current blocker
+
+Clean repository bootstrap and core contracts have not yet been implemented.
+
+== Next task
+
+Implement M0 only:
+
+. compile/test scaffold;
+. typed time/address primitives;
+. deterministic event queue;
+. memory-region/address-space interfaces;
+. unit tests.
+
+Do not begin IP27 device porting until M0 invariants are tested.
+
+== Best known boot command
+
+Not yet applicable to clean rebuild.
+
+When available, keep the exact canonical command here.
+
+== Regression checkpoints
+
+[cols="1,1,3"]
+|===
+|Checkpoint |State |Notes
+
+|clean.build
+|pending
+|Clang dev/release/ASan presets
+
+|ip27.reset.first_fetch
+|pending
+|
+
+|ip27.prom.serial_banner
+|pending
+|
+
+|ip27.prom.prompt
+|pending
+|
+
+|ip27.scsi.discovery
+|pending
+|
+
+|ip27.irix.kernel_entry
+|pending
+|
+
+|ip27.irix.root_mounted
+|pending
+|
+
+|ip27.irix.multiuser
+|pending
+|
+
+|ip27.irix.network_up
+|pending
+|
+
+|rc_alpha.remote_login
+|pending
+|
+|===
+
+== Session log template
+
+----
+Date:
+Milestone:
+Hypothesis:
+Evidence:
+Changed:
+Tests:
+Newly proven:
+Disproven:
+Unknowns:
+Best checkpoint:
+Next step:
+----

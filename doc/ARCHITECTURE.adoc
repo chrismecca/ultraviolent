@@ -1,0 +1,249 @@
+= Architecture
+
+== Core decomposition
+
+Ultraviolent is organized around four layers.
+
+----
++------------------------------------------------------+
+|                  guest software                      |
+|        PROM / standalone / IRIX / applications       |
++-------------------------+----------------------------+
+                          |
++-------------------------v----------------------------+
+|                 machine personality                  |
+| IP27 now; IP35 and workstation personalities later  |
++-------------------------+----------------------------+
+                          |
++-------------------------v----------------------------+
+|                    core mechanics                    |
+| CPU state | memory | time | events | IRQ | tracing   |
++-------------------------+----------------------------+
+                          |
++-------------------------v----------------------------+
+|                     host backends                    |
+| console | file/block | TAP | renderer | FPGA | ...   |
++------------------------------------------------------+
+----
+
+The layers may communicate only through explicit contracts.
+
+== Ownership rules
+
+The machine owns the components that constitute that machine.
+
+Prefer:
+
+[source,c++]
+----
+class Ip27Machine {
+    Scheduler scheduler_;
+    PhysicalMemory memory_;
+    R10000 cpu_;
+    Hub hub_;
+    Xbow xbow_;
+    Bridge bridge_;
+    Ioc3 ioc3_;
+    Isp1020 scsi_;
+};
+----
+
+Connections are non-owning references, typed handles, or narrow interfaces.
+
+Avoid `std::shared_ptr` in the machine graph.
+
+`std::unique_ptr` is allowed where runtime-sized ownership is genuinely required, such as a
+collection of CPUs or plug-in backends.
+
+== The CPU is not the interpreter
+
+The architectural CPU model owns guest-visible state and semantics.
+
+----
+R1x000 architectural state
+    |
+    +-- reference interpreter
+    +-- fast interpreter       [future]
+    +-- tier-1 JIT             [future]
+    +-- optimizing JIT         [future]
+----
+
+No execution engine may own canonical CPU state in a representation unavailable to the
+others.
+
+The interpreter remains permanently supported and is used as the correctness oracle.
+
+== Virtual time
+
+Guest-visible time never derives directly from host wall-clock execution duration.
+
+The core owns a monotonically increasing virtual time domain.
+
+----
+CPU progress
+     |
+Scheduler/EventQueue
+     |
++----+--------+---------+----------+
+|             |         |          |
+CP0 time    SCSI      DMA       interrupts
+----
+
+Wall clock may pace a guest for interactive use. It may not define correctness.
+
+A slow host and a fast host must execute the same deterministic test identically.
+
+== Event model
+
+Asynchronous devices schedule work.
+
+A command write must be allowed to produce:
+
+----
+MMIO write
+-> device state transition
+-> future event
+-> DMA
+-> completion state
+-> interrupt assertion
+----
+
+Do not complete every device operation synchronously inside the initiating MMIO write.
+
+== Address spaces are not universal buses
+
+`AddressSpace` decodes an address domain. It is not a generic replacement for every
+transaction type.
+
+Keep separate semantic concepts for:
+
+* CPU physical loads/stores;
+* MMIO;
+* DMA;
+* PCI configuration transactions;
+* PCI memory/I/O transactions;
+* Xtalk/XIO transactions;
+* future NUMAlink transactions.
+
+Different transactions may eventually resolve to the same memory object, but they do not
+necessarily have the same width, ordering, error, or routing semantics.
+
+== Typed addresses
+
+Do not represent every address as an unqualified `uint64_t`.
+
+Prefer zero-cost strong types:
+
+[source,c++]
+----
+struct VirtualAddress  { std::uint64_t value; };
+struct PhysicalAddress { std::uint64_t value; };
+struct XtalkAddress    { std::uint64_t value; };
+----
+
+Use explicit conversion functions where domains cross.
+
+== Devices and backends
+
+A guest-visible device is distinct from the host implementation that services it.
+
+Examples:
+
+----
+ISP1020 frontend --> SCSI bus --> disk target --> FileBlockBackend
+IOC3 Ethernet   --> EthernetBackend --> Linux TAP
+V12 frontend    --> GraphicsBackend --> software/Vulkan/FPGA
+----
+
+IRIX interacts with the frontend.
+
+The frontend must not know whether the backend is a host file, a kernel TAP interface, a
+GPU API, or a physical card.
+
+== Machine personality
+
+A machine personality answers:
+
+* what hardware exists;
+* how components are connected;
+* which address ranges are mapped;
+* which interrupt lines connect where;
+* what reset state is exposed;
+* what firmware is loaded;
+* what topology firmware and the OS discover.
+
+It does not implement device internals.
+
+`machines/ip27/` may depend on general R1x000, Xtalk, PCI, and device components.
+
+Those components must not depend on `Ip27Machine`.
+
+== Host boundary
+
+The in-process core is C++23.
+
+External or physical integrations should prefer a stable C ABI or explicit wire/shared-
+memory protocol rather than exposing C++ object layouts.
+
+A future FPGA service should receive transactions through a versioned protocol, not link
+against private C++ class internals.
+
+== Reset semantics
+
+Model reset types explicitly.
+
+At minimum distinguish:
+
+* construction/power-on;
+* cold reset;
+* warm/system reset;
+* device-local reset where hardware supports it.
+
+Persistent state must not be accidentally reinitialized by a warm reset.
+
+== Determinism
+
+Default reference-mode behavior is deterministic given:
+
+* machine configuration;
+* input assets and their hashes;
+* persistent state;
+* explicit external input event stream.
+
+Host scheduling must not alter guest architectural results.
+
+== Future JIT architecture
+
+Do not emit LLVM IR directly from the MIPS decoder.
+
+The intended future path is:
+
+----
+MIPS
+ |
+decoder
+ |
+Ultraviolent IR
+ |             \
+reference       JIT backend(s)
+interpreter      |
+                 +-- direct host emitter
+                 +-- LLVM ORC or another optimizing tier
+----
+
+The IR must express guest semantics, not host compiler accidents.
+
+Do not build it before the reference interpreter is sufficiently stable to define those
+semantics.
+
+== Performance principle
+
+Emulate the architectural result, not unnecessary historical machinery.
+
+For example, a future Origin NUMA model may use host shared memory and atomics to realize
+guest coherence rather than simulate each physical cache-line packet, provided every
+guest-visible ordering, directory, exception, and device effect required by software is
+correct.
+
+Cycle-accurate timing may exist as a specialized mode later. It is not the default design
+center.

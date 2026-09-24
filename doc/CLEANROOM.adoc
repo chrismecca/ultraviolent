@@ -1,0 +1,144 @@
+= Clean-Room and Asset Policy
+
+This is an engineering provenance policy, not legal advice.
+
+Its purpose is to keep Ultraviolent independently implementable, reviewable, and safe to
+publish.
+
+== Public repository rule
+
+The public repository contains only material that the project is entitled to distribute.
+
+Do not commit:
+
+* IRIX installation media;
+* SGI PROM images;
+* firmware blobs;
+* copied proprietary source code;
+* installed IRIX disk images;
+* NVRAM/flash dumps containing non-redistributable material;
+* proprietary documentation that is not distributable;
+* large binary excerpts from any of the above hidden inside tests.
+
+== Proprietary source
+
+Do not use non-public IRIX or SGI proprietary source code as an implementation reference
+for Ultraviolent core/device behavior.
+
+If a contributor has access to such source, that access must not be used to provide copied
+or implementation-derived code to this project.
+
+Prefer public architecture/hardware documentation and observable black-box behavior.
+
+== Allowed evidence
+
+Appropriate evidence includes:
+
+* publicly available SGI hardware manuals;
+* public MIPS/R10000 documentation;
+* public bus/chip specifications;
+* observations from lawfully possessed physical hardware;
+* black-box behavior of lawfully possessed firmware/OS images;
+* the project's own traces;
+* public open-source implementations, subject to license/provenance discipline.
+
+Do not copy third-party implementation code merely because it is viewable.
+
+If code is intentionally reused later, document its license, provenance, and compatibility
+with Ultraviolent's chosen license before integration.
+
+== Facts versus code
+
+A hardware fact is not the same thing as an implementation.
+
+Record facts in project documentation in neutral terms, then implement them independently.
+
+Example:
+
+----
+Fact:
+Writing CP0 Compare clears the timer interrupt.
+
+Implementation:
+Ultraviolent's independently written CP0 model performs that state transition.
+----
+
+== Local assets
+
+Use a local directory excluded from Git.
+
+Recommended:
+
+----
+local/
+  firmware/
+    ip27/
+    io6/
+  media/
+    irix/
+  disks/
+  state/
+  traces-private/
+----
+
+The repository's `assets/` directory contains documentation only.
+
+`local/` is ignored wholesale.
+
+== Asset manifest
+
+Allow users to create a local manifest containing:
+
+* logical asset role;
+* filename;
+* byte size;
+* SHA-256 hash.
+
+The manifest may be shared only if the filenames/hashes themselves are appropriate to
+publish. Never assume that a hash makes the underlying asset redistributable.
+
+== Runtime configuration
+
+The emulator should accept explicit asset paths through configuration or CLI options.
+
+Do not require assets at hard-coded repository-relative paths.
+
+Useful future pattern:
+
+----
+ultraviolent run \
+  --machine ip27 \
+  --firmware-ip27 /srv/private/sgi/ip27prom.img \
+  --firmware-io6 /srv/private/sgi/io6prom.img \
+  --disk local/disks/system.img \
+  --cdrom /srv/private/sgi/irix/install.iso
+----
+
+Exact CLI names may evolve.
+
+== Old prototype
+
+The pre-Ultraviolent prototype may be retained privately or archived as a behavioral
+reference.
+
+For the clean architecture rebuild:
+
+* copy knowledge, not accidental structure;
+* preserve useful traces/tests;
+* re-derive component ownership from the new architecture;
+* avoid mechanical source-file migration.
+
+If prototype code is copied, treat that as a normal provenance decision and review whether
+the code still satisfies the new invariants.
+
+== Publication checklist
+
+Before a public release:
+
+* scan current tree for private assets;
+* scan Git history;
+* inspect test fixtures;
+* inspect generated release archives;
+* inspect CI artifacts;
+* verify documentation does not instruct users to download unauthorized copies;
+* state clearly that users supply their own firmware and operating-system media.

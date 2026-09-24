@@ -1,0 +1,221 @@
+= Agentic Build Protocol
+
+This document defines how human and agentic contributors work on Ultraviolent.
+
+The purpose is to prevent rapid autonomous development from turning the emulator into an
+opaque set of fixes that only boot one image.
+
+== Mandatory reading order
+
+Before changing code, an agent reads:
+
+. `README.adoc`
+. `docs/VISION.adoc`
+. `docs/ARCHITECTURE.adoc`
+. `docs/IP27-TARGET.adoc`
+. `docs/ROADMAP.adoc`
+. `docs/STATUS.adoc`
+. the relevant hardware/source notes for the subsystem being changed.
+
+An agent must know the current milestone before choosing work.
+
+== The formula
+
+Every substantive change follows:
+
+----
+OBSERVE
+  ->
+SPECIFY
+  ->
+TEST
+  ->
+IMPLEMENT
+  ->
+COMPARE
+  ->
+DOCUMENT
+  ->
+COMMIT
+----
+
+=== Observe
+
+Gather evidence before coding.
+
+Evidence may be:
+
+* a public SGI hardware manual;
+* a MIPS/R10000 architecture manual;
+* a black-box observation from legally held firmware or an actual machine;
+* a trace produced by the old prototype;
+* a failing regression test;
+* a publicly documented bus or device specification.
+
+Record uncertainty. Do not convert guesses into facts.
+
+=== Specify
+
+Write down the guest-visible behavior being implemented.
+
+Examples:
+
+----
+"When CP0 Compare is written, the timer interrupt is cleared."
+"Bridge config-space byte accesses affect these lanes."
+"ISP completion occurs after a scheduled event and then asserts IRQ N."
+----
+
+The specification should be small enough to test.
+
+=== Test
+
+Add or update a focused test before or with the implementation whenever practical.
+
+For hardware discoveries, preserve the discovery as a fixture or documented trace so it
+does not need to be rediscovered.
+
+=== Implement
+
+Make the smallest change that implements the specified behavior at the correct layer.
+
+Do not broaden scope opportunistically.
+
+If a CPU bug can be fixed in CP0, do not add an IP27 workaround.
+
+If a Bridge behavior belongs in Bridge, do not add a PROM-specific branch in the machine.
+
+=== Compare
+
+Run the narrow test first, then the relevant subsystem tests, then the boot checkpoint.
+
+For CPU/JIT work later, compare complete architectural state against the reference
+interpreter.
+
+=== Document
+
+Update at least one of:
+
+* `docs/STATUS.adoc`;
+* a subsystem design note;
+* `docs/DECISIONS.adoc`;
+* a source comment with a document/observation reference.
+
+A solved mystery must become durable project knowledge.
+
+=== Commit
+
+A commit should represent one coherent fact or mechanism.
+
+Do not mix refactoring, new hardware behavior, formatting, and unrelated fixes.
+
+== Agent stop conditions
+
+An agent must stop expanding a line of work and document the situation when:
+
+* the observed behavior contradicts the current architecture;
+* the only apparent fix is a guest-PC special case;
+* two public sources materially disagree;
+* a proprietary source would be needed to continue;
+* a change would violate determinism;
+* the change would couple a general component to a specific machine;
+* the current milestone does not require the proposed subsystem.
+
+Stopping and recording a well-defined unknown is better than inventing behavior.
+
+== Evidence hierarchy
+
+Prefer, in rough order:
+
+. public primary hardware/architecture documentation;
+. reproducible measurements from real hardware;
+. reproducible black-box firmware/OS behavior;
+. public standards and chip manuals;
+. public source code used only with provenance and license awareness;
+. secondary descriptions;
+. conjecture.
+
+Conjecture must be labeled and should become a test target.
+
+== No "make it boot" commits
+
+The phrase "makes PROM get farther" is not a sufficient explanation.
+
+A boot-progress change should state the actual corrected mechanism, for example:
+
+----
+"Implement Hub PI interrupt pending/enable behavior; PROM now observes the timer IRQ."
+----
+
+Boot progress is evidence of correctness, not the specification itself.
+
+== Current-work discipline
+
+An agent should maintain a short work note containing:
+
+----
+Hypothesis:
+Evidence:
+Expected behavior:
+Test:
+Implementation:
+Observed result:
+New unknowns:
+----
+
+This may live in an issue, commit message, or temporary working note. Important conclusions
+move into repository documentation.
+
+== Trace discipline
+
+Do not turn on full instruction logging by default.
+
+Prefer targeted trace categories and a bounded flight recorder containing recent:
+
+* PCs/basic blocks;
+* exceptions;
+* CP0/TLB operations;
+* MMIO transactions;
+* interrupt transitions;
+* DMA operations;
+* SCSI operations;
+* network descriptor activity.
+
+A failure should be diagnosable without producing gigabytes of logs.
+
+== Refactoring rule
+
+Refactor when one of these is true:
+
+* ownership is wrong;
+* a machine-specific dependency has leaked into a general component;
+* two implementations reveal a real common abstraction;
+* testing is impossible because responsibilities are mixed;
+* profiling identifies a structural bottleneck.
+
+Do not refactor merely to introduce a fashionable pattern.
+
+== Performance work
+
+Performance changes require:
+
+. a benchmark or profile;
+. a stated bottleneck;
+. unchanged reference tests;
+. unchanged guest-visible behavior;
+. before/after measurements.
+
+JIT work additionally requires differential execution against the interpreter.
+
+== End-of-session update
+
+Before ending a significant agentic session, update `docs/STATUS.adoc` with:
+
+* current milestone;
+* newly proven facts;
+* newly disproven assumptions;
+* remaining blocker;
+* exact command to reproduce the best boot;
+* expected next step.
+
+The next agent should not need conversational memory to resume work.
