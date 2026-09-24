@@ -18,12 +18,18 @@ Record section/page references in subsystem notes when behavior is implemented.
 
 == CPU
 
-Maintain references for:
+In use (cited as UM and ISA in `MIPS.adoc` and in source comments):
 
-* R10000 architecture/user manual;
-* MIPS III/MIPS IV ISA material;
-* CP0/TLB exception behavior;
-* floating-point architecture.
+* _MIPS R10000 Microprocessor User's Manual_, Version 2.0, January 29, 1997. Covers CP0,
+  TLB, exceptions, address spaces, FPU implementation details, and the uncached attribute.
+  Public copies are available from archive.org and SGI TechPubs mirrors.
+* _MIPS IV Instruction Set_, Revision 3.2, September 1995, Charles Price. Covers
+  instruction semantics and the FPU (appendix B).
+
+Tool used as a cross-check, not as a semantic source:
+
+* GNU as 2.44 (`binutils-mips64-linux-gnuabi64`, `-march=r10000`), to check the test
+  assembler's instruction encodings (`tools/check_mips_encodings.sh`).
 
 Use the most primary source available.
 
@@ -57,6 +63,28 @@ Capture: private trace path
 Conclusion: ...
 Confidence: observed once / reproduced N times
 ----
+
+== Source classes
+
+Every cited fact names its source class. Classes are listed from strongest to weakest:
+
+SGI hardware manual:: SGI or chip-vendor documentation of the hardware (for example the IP27
+PROM Technical Reference Manual, the R10000 User's Manual). Supports `documented`.
+IRIX-derived public header:: public source headers, mainly Linux `arch/mips/include/asm/sn/`,
+that state they derive from IRIX headers (for example "Derived from IRIX
+<sys/SN/SN0/hubio.h>, Revision 1.80"). They give SGI's own register names, offsets, and
+field layouts, but not reset values or corner cases. Supports `inferred`, and counts as
+strong evidence for layouts and encodings.
+Public driver source:: other public drivers and emulators, read only for facts such as
+register bits (for example Linux `i2c-algo-pcf.h` for the PCF8584). Supports `inferred`.
+Observed PROM behavior:: what the user's unmodified firmware does when run: its accesses,
+the values it tests, the paths it takes. This includes disassembly of the lawfully held
+image to see which bits it examines. Supports `observed`.
+Real hardware:: readings from a physical machine, for example POD register dumps. Supports
+`observed` and confirms everything above.
+
+When classes disagree, record the conflict and prefer the stronger class unless a real-hardware
+observation settles it.
 
 == Confidence labels
 

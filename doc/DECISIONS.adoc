@@ -127,3 +127,101 @@ PROM, kernel, installer, and userland remain unmodified.
 
 Debug-only experimental patches may exist outside the canonical path only if clearly
 separated and never become required for success.
+
+== ADR-015: Virtual time counts nanoseconds
+
+Status: accepted
+
+`VirtualTime` is an unsigned 64-bit count of nanoseconds since machine power-on.
+
+Reason:
+
+* about 584 years of range, so a long-running virtual server cannot overflow;
+* finer than any guest-visible clock period that matters for RC-IP27;
+* guest counters convert exactly from absolute time (`cycles_at`, `time_at_cycles`), so
+  frequencies that do not divide 10^9 do not accumulate error.
+
+Picoseconds were rejected because 64 bits would overflow after about 213 days of uptime.
+
+== ADR-016: In-house unit-test harness
+
+Status: accepted
+
+Unit tests use the small harness in `tests/support/`, not an external framework.
+
+Reason:
+
+* DEVELOPMENT keeps dependencies to the standard library and host OS until a milestone
+  needs more;
+* the required features are small: registration, checks with source locations, name
+  filtering, and a nonzero exit on failure;
+* no network fetch or extra Debian package is needed to build tests.
+
+Revisit if tests need fixtures, parameterization, or death tests that the harness cannot
+express simply.
+
+== ADR-017: Invariants stay enabled in release builds
+
+Status: accepted
+
+`invariant()` checks run in every build type and abort on failure.
+
+Reason: the reference machine prefers stopping conspicuously to continuing with corrupt state.
+The cost is a predictable branch. If profiling shows a hot-path invariant to be expensive,
+handle that specific check deliberately, with the measurement recorded.
+
+== ADR-018: One R10000 instruction per processor cycle
+
+Status: accepted
+
+Each execution-engine step is one processor cycle: it retires one instruction or takes one
+exception. Count advances every other cycle (UM 14.8). The machine turns cycles into virtual
+time with the configured processor clock.
+
+Reason: no guest-visible contract depends on the R10000's real issue rate, and a fixed rate
+keeps Count, Random, and all derived timing deterministic and simple to test. This is not a
+statement about real R10000 throughput. A future engine must preserve the same cycle
+accounting at every point where the guest can observe time.
+
+== ADR-019: System addresses carry the request kind and the uncached attribute
+
+Status: accepted (revised 2026-09-24, same session: bit 59 added)
+
+The CPU presents `PhysicalAddress` values with:
+
+* the physical address in bits 39:0;
+* bit 59 set for uncached (double/single/partial-word) requests and clear for cached ones;
+* for uncached requests, the 2-bit uncached attribute in bits 58:57 (UM 6.23, driven on
+  SysAD[59:58]).
+
+Reason: the Origin Hub decodes the request kind and the attribute as well as the address.
+Physical address 0x1fc00000 is main memory when cached (CAC), the boot PROM when uncached
+with attribute 0 (HSPEC/LBOOT), and memory again with attribute 3 (UNCAC) (IP27 PROM
+Technical Reference Manual §1.2.2, Table 3-4; `IP27.adoc`). Encoding all three in the address
+lets the machine map each window with the existing `AddressSpace`, without a CPU-specific
+transaction type in `core`.
+
+The first version carried only the attribute. It could not tell a cached reference from an
+uncached attribute-0 reference, which is how the IP27 reset fetch reaches the PROM. Bit 59
+fixes that.
+
+Revisit if a transaction needs more than an address can reasonably carry.
+
+== ADR-020: FPU arithmetic uses host IEEE 754 hardware
+
+Status: accepted
+
+MIPS binary32/binary64 arithmetic runs on the host's IEEE 754 hardware under the guest
+rounding mode, with host exception flags mapped to FCSR. MIPS-specific rules (signaling-NaN
+sense, default NaNs, flush-to-zero, unimplemented cases, trap rules) are applied in
+Ultraviolent code around each operation.
+
+Reason: IEEE 754 fully defines basic arithmetic, square root, and conversions for each
+rounding mode, so correctly rounded host results are exact matches. The reference host
+(x86-64 SSE2) implements this deterministically. The translation unit is compiled with
+`-frounding-math -ffp-contract=off` and passes values through volatile objects so the
+compiler cannot move operations across rounding-mode changes.
+
+Revisit with a software floating-point implementation if a supported host lacks IEEE 754
+conformance or deterministic flags, or if a differential test finds a discrepancy.
+

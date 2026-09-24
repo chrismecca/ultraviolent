@@ -1,0 +1,335 @@
+= MIPS R10000 Architectural Model
+
+This note specifies the CPU model in `include/ultraviolent/arch/mips/` and
+`src/arch/mips/`. The tests in `tests/arch/mips/` are its executable form.
+
+The model is architectural (VISION "What is not sacred"): it reproduces what software can
+observe, not the R10000's out-of-order pipeline, caches, or branch prediction.
+
+== Sources
+
+UM:: MIPS R10000 Microprocessor User's Manual, Version 2.0, January 29, 1997. R10000
+specifics: CP0 (chapter 14), FPU (15), address spaces (16), exceptions (17).
+ISA:: MIPS IV Instruction Set, Revision 3.2, September 1995 (Charles Price). Instruction
+semantics, including the FPU (appendix B).
+
+Confidence labels follow `SOURCES.adoc`. Unless marked otherwise, statements here are
+`documented` in the section cited. Items marked `hypothesis` are choices made where the
+sources are silent or say UNPREDICTABLE. Each one is a test target and belongs in the
+checklist in <<hypotheses>>.
+
+== Structure
+
+----
+Cpu            architectural state + shared semantics (modes, translation, memory access,
+               CP0, TLB, exceptions, interrupts, FPU registers)
+Interpreter    reference execution engine: fetch, decode, execute; keeps no state
+execute_fpu    COP1/COP1X semantics, called by the interpreter
+Tlb            64-entry joint TLB
+----
+
+Engines read and write `Cpu::state()` (GPRs, HI, LO, PC, delay-slot state, LL bit) and
+`Cpu::fpu()` directly. Everything else goes through `Cpu` methods, so a future engine shares
+the same translation, CP0, and exception code (ARCHITECTURE "The CPU is not the
+interpreter").
+
+`Cpu` depends only on `core`: an `AddressSpace` for system-interface transactions, a `Tracer`,
+and the `InterruptSink` interface for its five external interrupt inputs. It knows nothing
+about IP27.
+
+== Execution and time
+
+* An engine step is one processor cycle. It retires one instruction, or it takes one
+  exception instead: a pending interrupt, a delayed watch, or a fault from the instruction.
+  `Cpu::cycles()` counts steps since construction. `hypothesis`: one instruction per cycle
+  is an architectural simplification (ADR-018). The R10000 issues up to four per cycle, but
+  no software-visible contract depends on the exact rate.
+* Count increments every other cycle (UM 14.8). Count is derived from `cycles()`: a write
+  to Count stores an offset, so the value never drifts.
+* Timer: IP[7] is set when Count becomes equal to Compare and cleared by writing Compare
+  (UM 14.8, 17 "Interrupt Exception"). The performance-counter overflow source of IP[7] is
+  not modeled.
+* Random decrements whenever an instruction graduates, from 63 down to Wired, then wraps to
+  63. It is set to 63 at reset and whenever Wired is written (UM 14.2).
+* The machine turns cycles into virtual time using the processor clock frequency
+  (`core/virtual_time.hpp`, `cycles_at` / `time_at_cycles`). The CPU never reads host time.
+
+== Delay slots
+
+`IntegerState` holds `pc`, `next_pc`, and `delay_slot`:
+
+* A branch or jump executes its delay slot whether or not it is taken.
+* A branch-likely that is not taken nullifies its delay slot.
+* An exception in a delay slot sets EPC to the branch and Cause.BD (UM 14.12).
+* ERET has no delay slot (UM 14.30).
+* `hypothesis`: a branch inside a delay slot is UNPREDICTABLE. The model applies the second
+  branch after its own delay slot, which is deterministic but not a contract.
+
+== Operating modes
+
+Kernel mode when EXL or ERL is set or KSU=0; Supervisor when KSU=1; User when KSU is 2 or 3
+(UM 14.10: KSU=3 is implemented as User).
+
+* 64-bit operations: always in Kernel mode. In Supervisor mode they need SX, in User mode
+  UX. Otherwise they are Reserved Instruction (UM 16.1, 17).
+* MIPS IV: always in Kernel and Supervisor mode. In User mode it needs XX (UM 14.10, 17.4).
+  Integer MIPS IV instructions (MOVN, MOVZ, MOVF, MOVT, PREF) and COP1X are Reserved
+  Instruction when disabled. FPU MIPS IV functions are Unimplemented Operation
+  (UM Table 17-4).
+* CP0 is always usable in Kernel mode; otherwise CU0 is required. CP1 requires CU1.
+  Coprocessor 2 does not exist: its instructions are Coprocessor Unusable without CU2 and
+  Reserved Instruction with it (UM 17.7).
+* BC0x, RFE, and undefined COP0 functions are Reserved Instruction (UM 14.25, 17.5).
+  `hypothesis`: undefined COP0 functions are "undefined" in the UM; Reserved Instruction is
+  the chosen behavior.
+
+== Address translation
+
+UM 16.2, Figure 16-3, Table 16-2. R10000 virtual addresses are 44 bits; physical addresses
+are 40 bits.
+
+[cols="2,3"]
+|===
+|Mode / region |Behavior
+
+|User, UX=0
+|useg `0`–`7fffffff`, mapped. Instruction fetches fault if any of bits 63:31 is set. Data
+references clear bits 63:32 before the check (Table 16-2 note).
+
+|User, UX=1
+|xuseg below 2^44, mapped.
+
+|Supervisor
+|suseg and sseg with SX=0 (sign-extended 32-bit addresses). xsuseg (limited by UX), xsseg,
+and csseg with SX=1.
+
+|Kernel, KX=0
+|Sign-extended 32-bit addresses only. kuseg is mapped, or unmapped and uncached when ERL is
+set. kseg0 is `pa = va - 0x80000000`, cached per Config.K0. kseg1 is `pa = va - 0xa0000000`,
+uncached. ksseg and kseg3 are mapped.
+
+|Kernel, KX=1
+|xkuseg: 16 TB only when UX=1 and ERL=0, otherwise the 2 GB kuseg rules. xksseg needs SX.
+xkphys: see below. xkseg `c0000000_00000000`–`c0000fff_ffffffff` is mapped. The
+compatibility segments are at `ffffffff_80000000` and above. Everything else is an address
+error.
+|===
+
+xkphys (UM 16.2, Figure 16-4): bits 61:59 give the cache algorithm, and bits 39:0 are the
+physical address. For uncached algorithms (2, 7), bits 58:57 are the uncached attribute and
+bits 56:40 must be zero. For all others, bits 58:40 must be zero.
+
+=== System address and the uncached attribute
+
+For uncached references the R10000 drives a 2-bit uncached attribute on SysAD[59:58]. It
+comes from VA[58:57] in xkphys, or from the TLB UC field for mapped pages (UM 6.23). The
+Origin memory system uses it to select address spaces.
+
+The `PhysicalAddress` the CPU presents to its `AddressSpace` (ADR-019,
+`mips::system_address`) has:
+
+* bits 39:0: the physical address;
+* bit 59: set for uncached requests (kseg1, uncached xkphys, uncached TLB pages, kseg0 with
+  an uncached K0, kuseg with ERL set);
+* bits 58:57: the uncached attribute of uncached requests. kseg1 and ERL kuseg carry 0.
+
+The machine decodes all three by mapping windows. A machine whose memory ignores the request
+kind maps the same memory in each window.
+
+=== TLB
+
+UM 14.3–14.9, 14.34–14.37, 16.3.
+
+* 64 entries. Each maps an even/odd page pair of 4 KiB to 16 MiB (PageMask bits 24:13).
+* An entry matches when R (VA 63:62) is equal, VPN2 (VA 43:13) is equal outside the mask,
+  and either G is set or the ASID equals EntryHi.ASID.
+* A write stores PageMask, EntryHi with the masked VPN2 bits cleared, and both EntryLo
+  registers. G is the AND of the two G bits. FrameMask clears EntryLo bits 33:18. PFN bits
+  below the page size are forced to zero, so TLBR may not return what was written.
+* Before the write, any other entry that could match an address the new entry matches is
+  invalidated, and Status.TS reports whether that happened. `hypothesis`: an invalidated
+  entry stops matching entirely.
+* TLBP sets Index or its P bit. With several matches the result is unspecified; the model
+  returns the lowest index.
+* Power-on contents are undefined. The model starts with every entry disabled.
+
+TLB exceptions (UM 17):
+
+* No match: refill, TLBL/TLBS. With EXL clear it uses the refill vectors. XTLB (offset
+  0x080) is chosen when the extended addressing bit of the address's region is set: UX for
+  R=0, SX for R=1, KX for R=3 (including sseg/ksseg, UM 17.3). Otherwise offset 0x000.
+  With EXL set it uses the general vector.
+* V clear: TLBL/TLBS through the general vector. A store to a page with D clear: Mod.
+* All three write BadVAddr, Context.BadVPN2 (VA 31:13), XContext R (bits 36:35) and
+  BadVPN2 (VA 43:13, bits 34:4), and EntryHi R/VPN2. The ASID is kept.
+
+== Memory references
+
+* Loads and stores need natural alignment; otherwise AdEL/AdES. LWL/LWR/LDL/LDR/SWL/SWR/
+  SDL/SDR use ISA semantics in both byte orders.
+* A read that the address space refuses takes a bus error: IBE for fetches, DBE for data.
+  A refused write takes no exception, because R10000 bus errors arise only from read
+  responses (UM 17 "Bus Error Exception"). The loss is traced under `memory`.
+* Partial-word stores (SWL, SWR, SDL, SDR) are issued as individual byte writes of the
+  bytes that change. `hypothesis`: the R10000 issues a partial-word write with byte enables,
+  which `AddressSpace` cannot express yet (CORE.adoc). The results are identical for memory
+  and may differ for devices.
+* LL sets the LL bit; SC stores only while it is set and returns it; ERET clears it
+  (UM 14.30). LLAddr is a plain read/write register on the R10000 (UM 14.15).
+  `hypothesis`: other processors and DMA do not clear the LL bit yet. That matters once the
+  machine has coherent I/O.
+* Watch (UM 17 "Watch Exception"): loads and stores to the physical doubleword in
+  WatchLo/WatchHi, enabled by R/W, never instruction fetches. With EXL or ERL set the
+  reference completes and the exception is delivered once both are clear. Writing WatchLo
+  cancels a delayed watch.
+
+=== Byte order
+
+Config.BE gives the memory byte order and must match the bus. The constructor enforces this.
+In User mode, Status.RE reverses it (UM 14.10). A reference in the opposite order to the bus
+selects the mirrored byte lanes within the doubleword: address XOR `(8 - width) & 7`, value
+unchanged. Instruction fetches follow the same rule. `inferred` from the bi-endian lane
+model of a 64-bit bus.
+
+== Exceptions
+
+* General vector offset 0x180. Refill offsets 0x000 and 0x080 apply when EXL is clear. The
+  base is `ffffffff_80000000`, or `ffffffff_bfc00200` when BEV is set (UM Table 17-1).
+* With EXL clear, EPC and Cause.BD are written; with EXL set they are not (UM 14.12).
+* Cause.ExcCode is always written. Cause.CE is written on every exception, with the unit
+  number for Coprocessor Unusable and zero otherwise (the UM leaves CE undefined for other
+  exceptions).
+* Interrupts are taken at an instruction boundary when IE is set, EXL and ERL are clear, and
+  Cause.IP AND Status.IM is nonzero. EPC is the instruction not yet executed.
+* A delayed watch outranks an interrupt at the boundary (UM Table 17-3).
+* Integer overflow (ADD, ADDI, SUB, DADD, DADDI, DSUB), trap, syscall, and breakpoint follow
+  UM 17 and the ISA. Destinations are not written.
+
+=== Reset
+
+* Cold reset and power-on (`ResetKind::power_on`, `cold`): Status gets ERL and BEV, with SR,
+  TS, and NMI clear. Config comes from `CpuConfig`, Random is 63, Wired and FrameMask are
+  0, ErrorEPC gets the PC, and pending external interrupts are cleared. The PC goes to
+  `ffffffff_bfc00000` (UM 17 "Cold Reset Exception"). `hypothesis`: registers the UM calls
+  undefined start at zero, the TLB starts disabled, and Count starts at zero.
+* Soft reset (`ResetKind::warm`) keeps all state except ErrorEPC (gets the PC), Status
+  ERL/SR/BEV set with TS/NMI clear, pending external interrupts cleared, and the PC.
+* NMI is the same as soft reset except it sets Status.NMI and leaves pending interrupts.
+
+== CP0 registers
+
+UM 14. MFC0 sign-extends bit 31. MTC0 to a 64-bit register sign-extends bit 31. DMFC0 of a
+32-bit register zero-extends, and DMTC0 to one writes the low 32 bits (UM Table 14-26). The
+64-bit registers are EntryLo0/1, Context, BadVAddr, EntryHi, EPC, XContext, Diagnostic, and
+ErrorEPC.
+
+[cols="1,3"]
+|===
+|Register |Writable part
+
+|Index |bits 5:0. P is set only by TLBP.
+|Random, BadVAddr, PRId |read-only
+|EntryLo0/1 |UC 63:62, PFN 33:6, C, D, V, G
+|Context |PTEBase 63:23
+|PageMask |MASK 24:13
+|Wired |bits 5:0. Writing it sets Random to 63.
+|Count, Compare |32 bits. Writing Compare clears the timer interrupt.
+|EntryHi |R 63:62, VPN2 43:13, ASID 7:0
+|Status |all but bits 24:23
+|Cause |IP[1:0] only
+|Config |`hypothesis`: K0 only. The rest are latched mode bits.
+|LLAddr |32-bit scratch
+|WatchLo / WatchHi |PAddr0, R, W / PAddr1. Writing WatchLo cancels a delayed watch.
+|XContext |PTEBase 63:37
+|FrameMask |bits 15:0
+|Diagnostic, TagLo, TagHi, ErrorEPC, ECC |stored. Diagnostic effects are not modeled.
+|Performance counters (25), CacheErr (27), reserved (7, 23, 24, 31) |not modeled: read zero, writes ignored, both traced under `cpu`
+|===
+
+== Caches
+
+Caches are not modeled. Memory is always coherent, so cached and uncached references reach
+the same data. CACHE needs CP0 to be usable and otherwise has no effect. Consequences that a
+guest could observe: Index Load Tag does not return tag contents, and Hit Invalidate does not
+discard dirty data. `hypothesis`: firmware does not depend on either. Reopen this if PROM
+cache diagnostics show otherwise.
+
+== Floating point
+
+ISA appendix B; UM chapter 15.
+
+* Registers: with FR=1 there are 32 64-bit registers. Single and word results clear the
+  upper half, and so do MTC1 and LWC1 (UM 15.5). With FR=0, odd logical registers are the
+  upper halves of the even ones for moves, loads, and stores, and arithmetic register
+  numbers have their low bit forced to zero (UM 15.3). `hypothesis`: with FR=0 a single
+  result leaves the odd half unchanged.
+* FCSR: Cause is written by every arithmetic instruction, including compares. Flags are
+  sticky. An exception is taken when a Cause bit has its Enable bit set, or for E
+  (unimplemented), which is always enabled. When it is taken, the destination and Flags are
+  not written. A CTC1 that sets a Cause bit and its Enable writes FCSR and then traps
+  (UM 15.4). Bits 22:18 read as zero. Only control registers 0 (FIR, from
+  `CpuConfig::fpu_id`) and 31 exist.
+* NaNs use the MIPS legacy sense: a set fraction MSB marks a signaling NaN. The default NaNs
+  are `7fbfffff` and `7ff7ffff_ffffffff`, and the invalid fixed-point results are
+  `7fffffff` and `7fffffff_ffffffff` (ISA Tables B-2, B-3). A signaling NaN operand to
+  arithmetic is invalid and gives the default NaN. A quiet NaN operand is returned
+  unchanged, fs before ft. `hypothesis`: when both are quiet NaNs, fs is returned.
+  MOV, MOVF, MOVT, MOVZ, and MOVN copy NaNs without signaling.
+* Tiny results: with FS=0 a denormal or underflowing result takes an Unimplemented Operation
+  exception. With FS=1 it is replaced by a zero of the same sign, and neither underflow nor
+  inexact is flagged (UM 15.4 "Flush (FS) bit"). `hypothesis`: denormal operands are
+  computed normally.
+* Conversions: W results out of range, infinite, or NaN are invalid (`7fffffff`). L
+  conversions are limited to 51 bits and take E otherwise (UM 15.5). `hypothesis`: NaN,
+  infinity, and L-to-float sources beyond 51 bits also take E. `hypothesis`: converting a
+  quiet NaN between S and D gives the destination's default NaN.
+* MADD, MSUB, NMADD, and NMSUB round the product before the add. The R10000 makes one pass
+  through the multiplier and then one through the adder (UM chapter 2, floating-point queue).
+  NMADD and NMSUB negate a non-NaN result.
+* RECIP and RSQRT. `hypothesis`: RECIP is the correctly rounded 1/x; RSQRT is 1/sqrt(x)
+  rounded after each step.
+* The L format and doubleword moves need MIPS III: L is Unimplemented, while DMFC1/DMTC1 are
+  Reserved Instruction (UM 17.6). Undefined COP1 opcodes (bits 25:24 = 0 or 1) are Reserved
+  Instruction; undefined formats are Unimplemented.
+* Arithmetic uses host IEEE 754 binary32/binary64 under the FCSR rounding mode (ADR-020).
+  `src/arch/mips/fpu.cpp` is compiled with `-frounding-math -ffp-contract=off`, and passes
+  operands through volatile objects so the compiler cannot move an operation across the
+  rounding-mode change or the flag read.
+
+== Integer results the ISA leaves UNPREDICTABLE
+
+* DIV, DIVU, DDIV, DDIVU with a zero divisor: `hypothesis`: HI and LO are unchanged. No
+  exception, as the ISA requires.
+* Most-negative dividend divided by -1: LO is the dividend and HI is 0, with no exception.
+* 32-bit operations on registers that are not sign-extended use the low 32 bits.
+* LWR that does not load bit 31: `hypothesis`: bits 63:32 are unchanged. The ISA allows
+  either this or copying the unloaded bit 31 (ISA LWR notes).
+
+[[hypotheses]]
+== Hypothesis checklist
+
+Every `hypothesis` above, as a list for anyone with an R10000 system to confirm:
+
+. one instruction per cycle, and Count at half of that;
+. branches in delay slots;
+. undefined COP0 functions are Reserved Instruction;
+. TLB entries invalidated by a conflicting write stop matching;
+. partial-word stores as byte writes;
+. DMA and other agents do not clear the LL bit;
+. Config writable bits (K0 only);
+. undefined reset state is zero, and the TLB starts disabled;
+. CACHE has no observable effect;
+. FR=0 single results keep the odd half;
+. both-quiet-NaN operands return fs;
+. denormal operands compute normally;
+. NaN, infinity, and wide L-to-float conversions take E;
+. S/D conversion of a quiet NaN gives the default NaN;
+. RECIP/RSQRT rounding;
+. divide by zero keeps HI/LO;
+. partial LWR keeps bits 63:32.
+
+== Not modeled
+
+Performance counters, cache and ECC error exceptions, cache tag access through CACHE, the
+ITLB (it is transparent to software, UM 16.3), branch prediction and the Diagnostic
+register's effects, and uncached-accelerated gathering.

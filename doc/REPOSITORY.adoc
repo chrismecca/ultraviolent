@@ -16,11 +16,15 @@ astronautics on day one.
 ├── assets/
 │   └── README.adoc
 ├── cmake/
+│   ├── Ccache.cmake
 │   ├── Sanitizers.cmake
 │   └── Warnings.cmake
-├── docs/
+├── doc/
 │   ├── VISION.adoc
 │   ├── ARCHITECTURE.adoc
+│   ├── CORE.adoc
+│   ├── MIPS.adoc
+│   ├── IP27.adoc
 │   ├── ENGINEERING.adoc
 │   ├── AGENTIC-BUILD.adoc
 │   ├── ROADMAP.adoc

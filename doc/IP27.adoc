@@ -1,0 +1,309 @@
+= IP27 Machine Personality
+
+This note records the IP27 (Origin 200/2000 node) facts the `machines/ip27` personality
+relies on, and what it deliberately leaves unmodeled. It grows milestone by milestone.
+`IP27-TARGET.adoc` defines the target configuration; this file is the hardware-facts record
+for it.
+
+== Sources
+
+PRM:: _Origin200/2000 IP27 PROM Technical Reference Manual_, 108-0170-001, 1997. A copy
+supplied locally by the user. SGI-copyrighted, not committed; only facts with section
+citations are recorded here.
+Source classes follow `SOURCES.adoc`: PRM is an SGI hardware manual; LINUX headers are
+IRIX-derived public headers; IMAGE is observed PROM behavior.
+
+LINUX:: Linux kernel public headers `arch/mips/include/asm/sn/addrs.h`,
+`sn/sn0/addrs.h`, `sn/sn0/hubmd.h`, `sn/sn0/hubpi.h`, `sn/sn0/hubio.h`, `sn/sn0/hubni.h`
+(torvalds/linux master, retrieved 2026-09-24). Used for facts (names, offsets) only, with no
+code copied (CLEANROOM "Allowed evidence"). A secondary source: facts from it are
+`inferred` unless PRM or observation confirms them.
+UM:: _MIPS R10000 Microprocessor User's Manual_, Version 2.0 (see `MIPS.adoc`).
+IMAGE:: Observations of the user's `ip27prom.bin` (912,848 bytes, SHA-256
+`0dbd5d5f7027e380383ce81523e1f614d58343ca82e07ec48bb4740b287eba0e`). The image
+identifies itself as "SGI Version 6.156 built 11:27:56 AM Nov 18, 2003".
+
+== Node address space
+
+* Software addresses on IP27 select an address class with their top byte (PRM §3.3.1.5,
+  Table 3-4; §1.2.2): `documented`.
++
+[cols="1,1,3"]
+|===
+|Top byte |Class |Meaning (PRM)
+
+|`0x90` |HSPEC |PROMs, back-door directory memory
+|`0x92` |IO |I/O windows, including Hub and Bridge registers
+|`0x94` |MSPEC |(not described)
+|`0x96` |UNCAC |bank 0 memory, uncached
+|`0xa8` |CAC |bank 0 memory, cached
+|===
++
+These are R10000 xkphys addresses (UM 16.2). `0xa8` is cache algorithm 5, cached. `0x90` to
+`0x96` are cache algorithm 2, uncached, with uncached attributes 0 to 3 in VA[58:57]. The
+Hub therefore tells HSPEC, IO, MSPEC, and UNCAC apart by the uncached attribute, and memory
+from HSPEC by the request kind. In system-address terms (ADR-019): CAC is a cached request;
+HSPEC, IO, MSPEC, and UNCAC are uncached requests with attributes 0, 1, 2, and 3. `inferred`
+from PRM Table 3-4 and UM 16.2, 6.23.
+* The node ID (NASID) occupies physical address bits 39:32, and node IDs are 0 to 255 (PRM
+  §1.2.1, §1.2.2, Table 3-4 `n:` examples): `documented`. Before node IDs are assigned they
+  are all zero (PRM §1.2.3). The single-node target has NASID 0 throughout.
+* Memory banks are 512 MB apart: `b:#` adds bank × 512 MB (PRM Table 3-4). `documented`.
+
+=== HSPEC (uncached, attribute 0)
+
+From LINUX `addrs.h` (`inferred`):
+
+[cols="1,1,3"]
+|===
+|Offset |Name |Behavior
+
+|`0x00000000`–`0x0fffffff` |UALIAS |uncached references to the node's own memory. The bottom
+128 KB is flipped by address bit 16 for CPU B, so each CPU has private low memory.
+|`0x10000000`–`0x1fffffff` |LBOOT |the local Hub's boot PROM and other directory-bus devices
+(PRM names `h:256m` = `0x9000000010000000` LBOOT: `documented`)
+|`0x30000000`– |RBOOT |remote boot PROM
+|upper half of node space |back door |directory and ECC memory (PRM Table 3-4 `L:`, `H:`,
+`P:`, `E:`)
+|===
+
+The R10000 reset vector `0xffffffffbfc00000` is an uncached attribute-0 reference to physical
+`0x1fc00000` (UM 17.2, 16.2). That lies in LBOOT.
+
+=== IO (uncached, attribute 1)
+
+* I/O space is divided into 16 MB "small windows", one per widget: offset = widget << 24
+  (LINUX `SWIN_SIZE_BITS`; PRM Table 3-4 `w:` "sets bit 24, adds widget", example
+  `i:(16m+32)` = `0x9200000001000020`). `inferred`, consistent with PRM.
+* Widget 1's window starts with the local Hub's own registers: IALIAS, 8 MB at
+  `0x92000000_01000000` (LINUX `HUB_REGISTER_WIDGET`, `IALIAS_BASE`). `inferred`.
+* Hub register sections within IALIAS (LINUX; names `documented` in PRM §3.4): PI
+  (processor interface) `0x000000`, MD (memory/directory) `0x200000`, MD junk bus
+  `0x220000` (LEDs `MD_LED0` `0x220050` for CPU A and `MD_LED1` `0x220058` for CPU B), II/IIO
+  (I/O interface) `0x400000`, NI (network interface) `0x600000`.
+
+== Boot PROM
+
+* The IP27 Flash PROM is an AMD 29F080: 1 MB in 16 pages of 64 KB. Pages 0–13 hold the
+  IP27PROM code; pages 14–15 hold the PROM log (environment variables, lists, error log),
+  which persists (PRM chapter 5): `documented`.
+* IP27PROM images are distributed in `promgen` format with the extension `.img`
+  (PRM §2.4): `documented`. The user's `ip27prom.bin` has this layout (IMAGE, `observed`):
++
+[cols="1,3"]
+|===
+|Offset |Content
+
+|`0x40` |ASCII `JFKSWCSM`
+|`0x50` |u64 total file size (912,848)
+|`0x80` |ASCII `ip27prom`
+|`0x98` |u64 header size (4,096)
+|`0xa0`, `0xa8` |u64 `0xc00000001fc00000`
+|`0xb0`, `0xd0` |u64 payload size (908,752 = file size − header size)
+|===
++
+The payload begins with a table of jump/NOP pairs, consistent with the R10000 exception
+vectors at `0xbfc00000` + 0x000/0x200/0x280/0x300/0x380 (UM Table 17-1). The prototype
+executed the payload from `0x1fc00000` coherently. `observed`.
+* The flash is visible at the base of LBOOT: the PROM reads its `ip27conf` block at HSPEC
+  `0x10000060`–`0x1000008f` (`observed`). It is also visible at HSPEC `0x1fc00000`, where the
+  reset vector points. `hypothesis`: those are the only two 1 MB windows. Where the rest of
+  LBOOT decodes (mirrors, other directory-bus devices) is unknown.
+* `hypothesis`: flash bytes the image does not provide read as `0xff` (erased NOR flash).
+  The PROM log pages start erased until a persistent flash backing exists (M3).
+* Flash writes and AMD command sequences are not modeled in M2. Writes are refused and
+  traced.
+
+== Memory
+
+* `hypothesis`: installed memory is contiguous from physical 0 (bank 0 first, banks 512 MB
+  apart per PRM). It is reached by cached references (CAC), uncached attribute-3 references
+  (UNCAC), and uncached attribute-0 references within UALIAS (first 256 MB).
+* The CPU B UALIAS flip is not modeled, because the target has one CPU (slice A).
+
+== Processor
+
+* R10000 (IMAGE: build flags `-DR10000 -mips4`). The build flags also include
+  `IP27_CONFIG_SN0_1MB_90MHZ`, `-DDISABLE_JUNKUART`, and `-DIOC3_UART` (IMAGE, `observed`).
+
+=== Reset mode bits
+
+The flash carries a configuration block (IMAGE, `observed`):
+
+[cols="1,3"]
+|===
+|Flash offset |Content in the user's image
+
+|`0x64` |R10000 mode word `0x1211a785`
+|`0x68` |ASCII `ip27conf`
+|`0x74` |180,000,000 (processor clock, Hz)
+|`0x7c` |90,000,000 (Hub clock, Hz)
+|`0x84` |1,250,000 (real-time counter clock, Hz; matches LINUX `NSEC_PER_CYCLE` 800)
+|===
+
+Early in reset the PROM loads the word at LBOOT + `0x64` into Config and compares Config's
+bits 15:0 and 24:16 with it. On a mismatch it stores failure code `0xb4` and leaves the normal
+path (`observed`). The CPU's Config at reset is therefore bits 24:0 of this word (UM 8.5), plus
+the hardwired 32 KB primary cache fields: `0x6c11a785`. `inferred`: the node presents this
+word as the R10000 mode bits. Decoded (UM Table 8-1): K0 = 5, PrcReqMax = 3, SysClkDiv code
+3 (divide by 2), SCBlkSize = 32 words, big-endian, SCSize = 1 MB, SCClkDiv code 2.
+`Ip27Config::cpu.config` applies only to images without this block.
+
+The processor clock defaults to 180 MHz, consistent with the block.
+
+== Machine loop and time
+
+* After every CPU step, the machine advances the scheduler to the virtual time of the CPU's
+  completed cycles: `time_at_cycles(cycles, processor clock)`. Devices therefore see the time
+  at the start of the instruction that accesses them, and events fire at the first cycle
+  boundary at or after their deadline. Deterministic by construction (ADR-005, ADR-018).
+
+== Hub
+
+`machines/ip27/hub.cpp` models only registers the PROM has been observed to depend on. Each
+one lists its evidence. Only doubleword accesses are modeled. Any other access is refused
+(reads take a bus error; writes are lost) and traced under `hub`.
+
+The Hub answers at IALIAS (widget 1 window, first 8 MB) and at the remote-Hub alias for this
+node (widget 1 window + `0x800000`, LINUX `REMOTE_HUB_ADDR`). `observed`: the PROM addresses
+its own NASID 0 through the alias.
+
+[cols="1,1,3"]
+|===
+|Offset |Name (LINUX) |Behavior and evidence
+
+|`0x000020` |PI_CPU_NUM |Reads the requesting CPU's slice: 0 for CPU A. Writes have no
+effect. `inferred`: the PROM's first Hub access reads it to index per-CPU registers, and its
+early exception handler stores Cause/EPC/BadVAddr here and continues.
+|`0x000028` |PI_CALIAS_SIZE |Storage, bits 3:0. The cached-alias remapping is not modeled
+(`hypothesis`). The PROM writes 1 (4 KB).
+|`0x000040`, `0x000048` |PI_CPU_PRESENT_A/B |1 and 0: one CPU, in slice A. Read-only. The
+PROM's local arbitration (LED `0x24`) reads both.
+|`0x000050`, `0x000058` |PI_CPU_ENABLE_A/B |Bit 0 storage. Reset to the present bits
+(`hypothesis` from PRM 3.1: the PROM disables a failing CPU by clearing it).
+|`0x000090` |PI_INT_PEND_MOD |Write `0x100` \| level to set, level alone to clear, pending
+interrupt `level` (0–127). See "Hub interrupts".
+|`0x000098`, `0x0000a0` |PI_INT_PEND0/1 |Pending interrupt bits 0–63 and 64–127.
+|`0x0000a8`–`0x0000c0` |PI_INT_MASK0/1_A/B |Per-CPU masks.
+|`0x000108`, `0x000110` |PI_RT_COMPARE_A/B |Storage. The PROM writes early boot and failure
+codes (`0x5e`, `0x5f`, `0x60`, `0xb4`) here per CPU (`observed`). The compare interrupt is
+not modeled.
+|`0x000160` |PI_RT_LOCAL_CTRL |Storage only (`hypothesis`).
+|`0x000418`, `0x000420` |PI_ERR_STACK_ADDR_A/B |Storage that survives a Hub local reset.
+See "Hub local reset".
+|`0x030100` |PI_RT_COUNT |Real-time counter: 1.25 MHz from virtual time, 52 bits
+(`inferred`: LINUX `ip27-timer.c`, flash block). Writes set the count. The PROM's
+microsecond clock is `count * 8 / 10` (`observed`).
+|`0x210000`–`0x210038` |MD_PERF_SEL, MD_PERF_CNT0–5 |Storage. Event counting is not
+modeled.
+|`0x220000`, `0x220008` |MD_UREG0_0/1 |The junk-bus PCF8584 I²C controller's S0 and S1. See
+"Junk bus".
+|`0x220048` |MD_SLOTID_USTAT |FPROMRDY (bit 4) = 1; I2CINTR (bit 3) = PCF8584 interrupt
+output; SN0 slot ID (2:0) = 0 (`hypothesis`); other bits 0 (`hypothesis`).
+|`0x220050`, `0x220058` |MD_LED0/1 |Eight-bit progress LEDs for CPU A/B (PRM 3.1). Traced
+under `firmware` as `led A 0x..`. `hypothesis`: they read back their last value.
+|`0x400128` |IIO_ILCSR |LLP control/status. Link status (bits 13:12) reads
+LNK_STAT_WORKING (2), giving IIO_LLP_CSR_IS_UP (`0x2000`), because the target Hub is cabled
+to a Crossbow. The documented control fields (max_burst, max_retry, bm8, llp_en, wrm_reset,
+null_to) are stored. `inferred` from the IRIX-derived `hubio.h`. The PROM sets wrm_reset
+during LED `0x5d` (`observed`).
+|`0x400150`, `0x400158` |IIO_SCRATCH_REG0/1 |Scratch storage.
+|`0x600000` |NI_STATUS_REV_ID |Node ID 0 (PRM 1.2.3, `documented`); chip ID 0 = Hub and
+revision from `Ip27Config::hub_revision`, default 6 = Hub 2.4 (IRIX-derived `sn0/hub.h`;
+the revision is a `hypothesis`); link down, reason "never came out of reset" (`hypothesis`:
+no CrayLink cable). The PROM reads the node ID with mask `0x1ff00` (`observed`).
+|`0x600008` |NI_PORT_RESET |LOCALRESET (bit 0) performs a Hub local reset after the
+requesting store completes. PORTRESET (bit 7) has no link to reset on one node.
+|`0x600010` |NI_PROTECTION |Storage (`hypothesis`: no effect on one node).
+|`0x600100`, `0x600108` |NI_SCRATCH_REG0/1 |Scratch storage.
+|===
+
+`hypothesis`: undocumented reset values are zero.
+
+=== Hub interrupts
+
+From the IRIX-derived `asm/sn/intr.h` (`inferred`):
+
+* Writing `0x100 | level` to PI_INT_PEND_MOD sets pending interrupt `level`; writing `level`
+  clears it. Levels 0–63 are INT_PEND0 bits, 64–127 INT_PEND1 bits.
+* Each CPU slice has INT_MASK0/1. CPU A's `INT_PEND0 & INT_MASK0_A` drives R10000 IP2, and
+  `INT_PEND1 & INT_MASK1_A` drives IP3 ("L2 = INT_PEND0, L3 = INT_PEND1"). The machine
+  connects them to CPU interrupt inputs 0 and 1.
+* L4 (RTC), L5 (profiling timer), and L6 (Hub errors) are not modeled yet.
+
+The PROM sets level 113 (`IP27_INTR_4`, "reserved for PROM use") during its first barrier
+(LED `0x28`) and reads it back from INT_PEND1 (`observed`).
+
+=== Hub local reset
+
+The PROM reads PI_ERR_STACK_ADDR_B early in its reset path and compares it with
+`0x52737430` (ASCII "Rst0"). If they differ, it writes "Rst0" there and writes `0x81`
+(PORTRESET | LOCALRESET) to NI_PORT_RESET. If they match, it continues without resetting
+(`observed`). The marker must therefore survive the reset.
+
+Model (`hypothesis` for the CPU reset kind): the reset event reinitializes the Hub's modeled
+registers except PI_ERR_STACK_ADDR_A/B, and gives the CPU a cold reset.
+
+=== Junk bus
+
+`observed`: the PROM initializes MD_UREG0_1/MD_UREG0_0 with `0x80`, `0x7f`, `0xa0`, `0x1c`,
+`0xc0`. That is the PCF8584 I²C controller's sequence: select own address, write `0x7f`,
+select clock, 12 MHz / 90 kHz, enable serial output. It then reads the own address back
+(LED `0x4c` I2CINIT; PRM Table 3-1 names the PCF8584). So UREG0_0 is S0 and UREG0_1 is S1.
+
+`devices::Pcf8584` models the chip from the public Linux driver definitions. Nothing is
+attached to its I²C bus: an addressed byte is never acknowledged, and a byte takes nine SCL
+periods of virtual time.
+
+`observed`: after I2CINIT the PROM waits up to 5 s (timeout `0x4c4b40` µs) for S0 to
+change. With nothing on the bus it times out at 5.006 s of virtual time, reports LED `0x4d`
+I2CDONE, and continues.
+
+The I²C peer is the system controller. The PROM's strings name it ELSC ("Switching to ELSC
+UART", "ELSC not responding.", "Can't talk to elsc!", "System controller response timeout",
+"Timed out getting ELSC lock"), and it has `i2c_master_xmit`/`i2c_master_recv` routines
+(`observed`). After I2CDONE it calls a master transmit that first waits up to 1 s
+(`0xf4240` µs) for the bus, and it retries once per second (`observed` with `--probe`).
+
+`observed`: the PROM tolerates a missing system controller. It stops retrying after about
+21 s (at 26 s of virtual time) and continues with the MSC probe (LED `0x1a`). No public
+source documents the ELSC protocol, so modeling one would need new evidence: SGI
+documentation, a real ELSC's traffic, or its firmware. Without one, every boot spends about
+26 virtual seconds here.
+
+== Machine type
+
+`observed`: the PROM decides between SN0 (Origin 2000) and SN00 (Origin 200) from the word
+at LBOOT + `0x90`. It is 0 in the user's image, so the PROM configures itself as an SN0 node.
+That matches IP27-TARGET.adoc's Origin 2000 personality. The flash is not altered.
+
+== Observation log (user's PROM image)
+
+Reproduce with `scripts/ip27-prom-checkpoint.sh` (set `ULTRAVIOLENT_IP27_PROM`). Virtual
+times are from power-on.
+
+. Reads PI_CPU_NUM, stores `0x5e` in PI_RT_COMPARE_A, checks Config against the flash mode
+  word, initializes the PCF8584, and performs the "Rst0" Hub local reset.
+. LED `0x01` INITCPU, `0x02` TESTCP1, `0x5d` Hub I/O reset (ILCSR warm reset), `0x03`
+  RUNTLB, `0x35`/`0x36` RTCINIT, `0x04`/`0x05` cache tests, `0x0a`–`0x0c` invalidate
+  caches, `0x2a` MAKESTACK, `0x2b` MAIN, `0x0d` INMAIN (about 5.8 ms).
+. Reads NI_STATUS_REV_ID, clears the MD performance counters, LED `0x24` LOCALARB (CPU
+  present/enable), `0x28` BARRIER (Hub interrupt level 113), `0x38`, `0x00`, `0x4c` I2CINIT.
+. Waits 5 s for the system controller; LED `0x4d` I2CDONE at 5.006 s. Writes
+  NI_PROTECTION.
+. Calls `i2c_master_xmit` to the ELSC; waits 1 s for the bus and retries every second.
+. Gives up at 26 s: LED `0x1a` MSCPROBE, `0x1c` DONEPROBE, `0x1d`/`0x1e` UART init, `0x80`
+  about once per second for five seconds, then `0x0e` SPEEDUP ("about to increase PROM
+  access speed") at 32 s.
+. Reads MD_MEMORY_CONFIG (`0x200018`). **Current stop**: unmodeled, so the read takes a bus
+  error. POD mode follows (LEDs `0x53`/`0x54` CONSOLE_GET, a CacheErr read).
+
+=== Diagnostics
+
+`ultraviolent --probe PC` traces a0–a3, ra, and v0 whenever execution reaches `PC`. It is
+the cheap way to see a PROM routine's arguments without an instruction trace.
+
+== Not yet modeled
+
+The rest of the Hub (the RTC, profiling and error interrupts, directory, BTE), XIO/Crossbow,
+BaseIO, the module system controller.

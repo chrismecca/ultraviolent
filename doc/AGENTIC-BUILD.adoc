@@ -10,11 +10,11 @@ opaque set of fixes that only boot one image.
 Before changing code, an agent reads:
 
 . `README.adoc`
-. `docs/VISION.adoc`
-. `docs/ARCHITECTURE.adoc`
-. `docs/IP27-TARGET.adoc`
-. `docs/ROADMAP.adoc`
-. `docs/STATUS.adoc`
+. `doc/VISION.adoc`
+. `doc/ARCHITECTURE.adoc`
+. `doc/IP27-TARGET.adoc`
+. `doc/ROADMAP.adoc`
+. `doc/STATUS.adoc`
 . the relevant hardware/source notes for the subsystem being changed.
 
 An agent must know the current milestone before choosing work.
@@ -96,9 +96,9 @@ interpreter.
 
 Update at least one of:
 
-* `docs/STATUS.adoc`;
+* `doc/STATUS.adoc`;
 * a subsystem design note;
-* `docs/DECISIONS.adoc`;
+* `doc/DECISIONS.adoc`;
 * a source comment with a document/observation reference.
 
 A solved mystery must become durable project knowledge.
@@ -209,7 +209,7 @@ JIT work additionally requires differential execution against the interpreter.
 
 == End-of-session update
 
-Before ending a significant agentic session, update `docs/STATUS.adoc` with:
+Before ending a significant agentic session, update `doc/STATUS.adoc` with:
 
 * current milestone;
 * newly proven facts;
