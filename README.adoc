@@ -42,14 +42,14 @@ or an FPGA later. IRIX must continue to see the same hardware contract.
 
 RC-IP27 targets one deliberately small IP27 machine:
 
-* one IP27 node;
-* one R10000-class CPU;
-* one Hub;
-* enough Xtalk/XIO/XBOW topology to represent the real machine correctly;
-* one IO6/BaseIO path;
-* Bridge/PCI;
-* IOC3 serial and Ethernet;
-* ISP1020/SCSI;
-* one system disk and installation CD-ROM;
-* persistent NVRAM/flash where required;
+* one IP27 node
+* one R10000-class CPU
+* one Hub
+* enough Xtalk/XIO/XBOW topology to represent the real machine correctly
+* one IO6/BaseIO path
+* Bridge/PCI
+* IOC3 serial and Ethernet
+* ISP1020/SCSI
+* one system disk and installation CD-ROM
+* persistent NVRAM/flash where required
 * original PROMs and unmodified IRIX supplied locally by the user.
