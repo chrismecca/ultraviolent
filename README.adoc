@@ -13,7 +13,7 @@
 :toclevels: 2
 :source-highlighter: highlight.js
 
-Ultraviolet is a clean-room virtual hardware platform for SGI-class systems.
+Ultraviolent is a clean-room virtual hardware platform for SGI-class systems.
 
 Its purpose is to run original, unmodified guest firmware and operating systems against
 hardware-compatible machine personalities while allowing the implementation beneath
@@ -22,7 +22,7 @@ hardware.
 
 The first machine personality is a minimal SGI Origin 2000 / IP27 system. The first
 public release, *RC-IP27*, is earned when unmodified IRIX can be installed, booted,
-networking, and logged into over telnet from another host.
+networked, and logged into over telnet from another host.
 
 Ultraviolent is not an IRIX port. It is not an application compatibility layer. It is not
 a cycle-accurate R10000 simulator. It is a virtual machine whose contract is the
@@ -63,7 +63,7 @@ The initial execution engine is an interpreter.
 
 == Build host
 
-Linux/x86-64 is the first-class host and initial development was done on Debian GNU/Linux 13.
+Linux/x86-64 is the first-class host. Debian GNU/Linux 13 is the reference development environment.
 Other hosts may work later, but they must not distort the core design.
 
 See `doc/DEVELOPMENT.adoc`.
