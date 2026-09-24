@@ -33,6 +33,11 @@ guest-visible hardware.
 ----
 The guest changes as little as possible.
 The future underneath it may change completely.
+
+Machines own topology.
+Devices own behavior.
+The core owns execution mechanics.
+Backends own host integration.
 ----
 
 A physical SGI device may be represented by software today, a Vulkan backend tomorrow,
@@ -52,4 +57,49 @@ RC-IP27 targets one deliberately small IP27 machine:
 * ISP1020/SCSI
 * one system disk and installation CD-ROM
 * persistent NVRAM/flash where required
-* original PROMs and unmodified IRIX supplied locally by the user.
+* original PROMs and unmodified IRIX supplied locally by the user
+
+The initial execution engine is an interpreter.
+
+== Build host
+
+Linux/x86-64 is the first-class host and initial development was done on Debian GNU/Linux 13.
+Other hosts may work later, but they must not distort the core design.
+
+See `doc/DEVELOPMENT.adoc`.
+
+== Repository map
+
+See `doc/REPOSITORY.adoc` for the intended tree.
+
+== Documentation
+
+Start here, in order:
+
+. `doc/VISION.adoc`
+. `doc/ARCHITECTURE.adoc`
+. `doc/IP27-TARGET.adoc`
+. `doc/ROADMAP.adoc`
+. `doc/RC-IP27.adoc`
+. `doc/ENGINEERING.adoc`
+. `doc/AGENTIC-BUILD.adoc`
+. `doc/TESTING.adoc`
+. `doc/CLEANROOM.adoc`
+. `doc/DEVELOPMENT.adoc`
+. `doc/REPOSITORY.adoc`
+. `doc/DECISIONS.adoc`
+. `doc/STATUS.adoc`
+. `doc/SOURCES.adoc`
+
+== Private assets
+
+No SGI firmware, IRIX installation media, installed disk image, NVRAM dump, or other
+proprietary binary belongs in the public repository.
+
+Ultraviolent accepts user-supplied paths to local assets. The recommended local layout is
+documented in `assets/README.adoc`.
+
+== Name
+
+"Ultraviolent" is a deliberate play on the SGI color/optics lineage: IRIS, Indigo,
+ultraviolet. The name is not intended to imply compatibility with or endorsement by SGI.
