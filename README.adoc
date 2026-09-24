@@ -27,3 +27,29 @@ networking, and logged into over telnet from another host.
 Ultraviolent is not an IRIX port. It is not an application compatibility layer. It is not
 a cycle-accurate R10000 simulator. It is a virtual machine whose contract is the
 guest-visible hardware.
+
+== Foundation
+
+----
+The guest changes as little as possible.
+The future underneath it may change completely.
+----
+
+A physical SGI device may be represented by software today, a Vulkan backend tomorrow,
+or an FPGA later. IRIX must continue to see the same hardware contract.
+
+== Initial scope
+
+RC-IP27 targets one deliberately small IP27 machine:
+
+* one IP27 node;
+* one R10000-class CPU;
+* one Hub;
+* enough Xtalk/XIO/XBOW topology to represent the real machine correctly;
+* one IO6/BaseIO path;
+* Bridge/PCI;
+* IOC3 serial and Ethernet;
+* ISP1020/SCSI;
+* one system disk and installation CD-ROM;
+* persistent NVRAM/flash where required;
+* original PROMs and unmodified IRIX supplied locally by the user.
