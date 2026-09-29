@@ -1,140 +1,236 @@
 = Ultraviolent IR
 
-Status: design (Performance baseline milestone, 2026-09-28). Nothing here is implemented yet.
+Status: design, reviewed with the user (2026-09-28). Stage A (this document and the
+boundary tests) is implemented; stages B-H are not.
 
 This document designs the representation between the MIPS decoder and the fast execution
-engines (ARCHITECTURE "The CPU is not the interpreter", "Future JIT architecture"). It
-answers four questions: what a unit of translated code is, what an IR operation means,
-how translated code stays exactly equivalent to the reference interpreter, and in which
-order the engines arrive.
+engines (ARCHITECTURE "The CPU is not the interpreter", "Future JIT architecture"): what a
+unit of decoded code is, what executing it must preserve, how decoded code stays exactly
+equivalent to the reference interpreter, and the order in which it is built.
+
+== Performance objective
+
+* **First target:** at least the configured guest clock in modeled guest cycles per host
+  second on the representative workloads (`scripts/bench.py`: prom, boot, cpu, fs). For the
+  180 MHz R10000 that is 180 M cycles/s; the reference interpreter runs 58-74 M (STATUS
+  "Performance baseline").
+* **Constraint:** every optimization preserves the benchmark digests and byte-identical
+  snapshots taken at the same guest cycle.
+* Tier 0 is not required to reach the target by itself. Its measured result decides whether
+  the next work is further tier-0 overhead removal or tier 1 (the JIT).
+* The reference interpreter is measured after stage B, and a material regression is
+  investigated, but correctness and the oracle's simplicity come before keeping the
+  reference engine the fastest interpreter.
 
 == Why
 
-Measured on the benchmark set (`scripts/bench.py`, PERFORMANCE in STATUS): the reference
-interpreter spends most of each guest instruction on work that does not depend on the
-instruction's operands. It fetches through the host page cache, decodes the same word
-again, dispatches through two or three switches, and returns a 32-byte
-`std::expected<Control, Exception>` through memory. An engine that decodes each instruction
-once and runs straight-line code without re-deciding per-instruction bookkeeping removes
-that work. A JIT removes the dispatch as well; both need the same decoded form.
+Measured (STATUS "Performance baseline"): the reference interpreter spends most of each
+guest instruction on work that does not depend on the instruction's operands. It fetches
+through the host page cache, decodes the same word again, dispatches through two or three
+switches, and returns a 32-byte `std::expected<Control, Exception>` through memory. An
+engine that decodes each instruction once removes the repeated fetch and decode; a JIT
+removes the dispatch as well. Both need the same decoded form.
 
-== Invariants every engine keeps
+== Execution rules every engine keeps
 
 These are the reference interpreter's observable behavior. An engine that breaks one is
-wrong, however fast.
+wrong, however fast. Stage A's tests pin the reference behavior they name.
 
 . **Architectural state is `Cpu`'s.** Engines read and write `Cpu::state()` and
   `Cpu::fpu()`, and everything else through `Cpu` methods (MIPS.adoc "Structure"). No
-  engine keeps a private copy of guest state across an exit.
-. **One instruction per cycle (ADR-018).** After an engine returns, `Cpu::cycles()`,
-  Count, Random, and every register equal what the reference interpreter would have after
-  the same number of cycles. Blocks do not change the cycle a guest can observe anything
-  at.
-. **Precise exceptions.** A faulting instruction leaves the state of the instructions before
-  it and none of its own, with PC, EPC, BD, and delay-slot state as the interpreter would
-  set them. Interrupts and delayed watch exceptions are taken at the same instruction
-  boundary as in the interpreter.
-. **Stops are exact.** An engine asked to run until cycle N stops at exactly N (the next
-  scheduler event or the end of the run). Device timing therefore does not depend on the
-  engine.
+  engine keeps a private copy of guest state.
+. **Exact processor steps (ADR-018).** Every processor cycle is accounted for when it
+  happens, by `Cpu::end_cycle(retired)` at the instruction boundary: cycles in which an
+  interrupt, delayed watch, or instruction exception is taken retire nothing. Count is
+  derived from cycles and Random from retirements, so an MFC0 of Count or Random, and every
+  synchronized device access, sees the cycle position the reference interpreter would.
+  Tier 0 does not batch cycle accounting. Any later batching needs block metadata that
+  proves no instruction in the batch can observe or change the cycle position, and is its
+  own reviewed change.
+. **The run limit is mutable.** `Interpreter::run_until` takes its limit by reference: a
+  device access during an instruction can lower it (an access schedules an event, and the
+  machine moves its stop cycle). An engine rechecks the limit at every instruction
+  boundary. Checks may later be removed only where block metadata proves that no
+  instruction in the stretch can synchronously alter the scheduling boundary.
+. **Pending exceptions at a boundary.** Before an instruction, if
+  `Cpu::service_pending_exceptions()` takes an interrupt or delayed watch exception, the
+  engine calls `end_cycle(false)` and leaves the block, exactly as `execute_cycle` does
+  today. This is a different case from an exception raised by the instruction itself (next
+  rule), although both end the block.
+. **Instruction exceptions are precise.** A faulting instruction leaves the state of the
+  instructions before it and none of its own; `Cpu::take_exception` then sets PC, EPC, BD,
+  and the delay-slot state, the engine calls `end_cycle(false)`, and leaves the block.
+. **Slow bus paths are barriers.** An instruction whose memory reference leaves the
+  transparent host-memory path (any `Cpu::read` or `Cpu::write`: MMIO, uncached space, an
+  unmapped or code-holding page) completes exactly; then the engine leaves the block and
+  rechecks the run limit and pending exceptions before continuing. Such an access may have
+  synchronized devices, run events, changed interrupt lines, changed bus mappings, or
+  written code. Removing this barrier is a later optimization that needs its own proof.
 . **Memory is the bus's.** Loads, stores, and fetches have the interpreter's translation,
-  exceptions, byte order, uncached attribute, and device side effects. A host-memory fast
-  path is allowed only where it is transparent, as the host page caches are today.
+  exceptions, byte order, uncached attribute, and device effects. Host-memory fast paths are
+  allowed only where transparent, as the host page caches are today.
 
-`scripts/bench.py` digests and byte-identical snapshots test the invariants at the whole-run
-level; lockstep comparison (below) tests them per instruction.
+=== Scheduler invariant
 
-== Unit of translation: the block
+No device, event, or DMA callback runs while an instruction is partly executed, except
+inside a synchronized MMIO access made by that instruction, and none runs concurrently with
+CPU execution. Events run where the machine synchronizes time: at the run limit, between
+calls into the engine, and inside a `SynchronizedTarget` access. The IP27 machine enforces
+this (`Ip27Machine::synchronize_time`) and `ip27.events_run_at_cycle_boundaries` tests it:
+an event fires at the exact cycle its deadline converts to, and guest RAM it writes is seen
+by the next instruction and not before.
 
-A block is a run of guest instructions that the engine executes without returning to the
-dispatcher:
+Consequence: DMA into guest RAM happens either between engine runs or inside a barrier
+access. A block never continues past a DMA write.
 
-* It starts at a virtual PC in a translation context (`Cpu::translation_context()`: mode
-  bits and ASID) and lies within one 4 KiB virtual page, so one translation covers it.
-* It ends after a branch or jump and its delay slot, or before the page boundary, or after
-  an instruction that can change translation, mode, or interrupt state: MTC0/DMTC0, ERET,
-  TLBWI/TLBWR, CACHE, SYNC, SYSCALL, BREAK, trap instructions, and any instruction whose
-  decoding the IR does not cover (those run through the reference interpreter's `step`).
-* A branch-likely whose delay slot is nullified follows the interpreter's PC sequence.
-* Blocks are keyed by (virtual PC, translation context, physical page), and found through
-  a small direct-mapped table like `Cpu`'s host pages.
+=== Mutable memory spans
 
-The block is the unit for the fast interpreter and for the JIT, so the invalidation rules
-below are the same for both.
+`AddressSpace::writable_memory_bytes` returns host bytes that alias guest RAM. Contract: a
+caller writes through the span synchronously, during the operation that obtained it, and
+does not keep it across a return to the scheduler, to CPU execution, or to block
+construction. Hub DMA (`Hub::Widget::xtalk_dma_write`) obeys this. The one retained
+writable span is the CPU's own data page cache, which is `Cpu`'s and is invalidated by
+`Cpu` (stage F). Code invalidation through `writable_memory_bytes` (below) covers exactly
+the writers that obey this contract. A future DMA engine that kept a span would need its own
+invalidation event.
+
+== DecodedInstruction
+
+`decode(std::uint32_t word)` is a pure function of the instruction word; `execute(Cpu&,
+const DecodedInstruction&, std::uint64_t pc)` holds the semantics. The reference
+interpreter becomes fetch, `decode`, `execute`, and `apply_flow` (the shared PC and
+delay-slot update that `execute_cycle` does today). There is one copy of the MIPS semantics:
+the reference interpreter and the fast engine call the same `execute`.
+
+----
+enum class DecodedOpcode : std::uint16_t {
+    sll, srl, sra, ...        // one value per architectural instruction
+    cop1,                     // the FPU, opaque in tier 0: execute_fpu(cpu, Instruction{word})
+    cop2_unusable,            // COP2, LWC2, SWC2, LDC2, SDC2
+    reserved,                 // words the ISA or the R10000 reserves
+};
+
+struct DecodedInstruction {   // 24 bytes; not tuned until measured
+    DecodedOpcode opcode;
+    std::uint8_t rs, rt, rd, sa;
+    std::uint8_t requirements;  // which mode checks apply: 64-bit, MIPS IV, CU1, ...
+    std::uint8_t properties;    // branch, likely, ends a block, ...
+    std::uint32_t word;         // for execute_fpu, tracing, diagnostics
+    std::uint64_t immediate;    // pre-extended as the opcode uses it
+};
+----
+
+* Checks that depend on Status (64-bit operations, MIPS IV, coprocessor usability) run at
+  execution time in the reference order: `requirements` says which apply, never whether
+  they pass, so a decoded instruction stays correct when Status changes after decoding.
+* The FPU stays one opaque operation in tier 0.
+* Tracing (`--trace cpu`) and PC probes keep using the reference interpreter.
+
+== Blocks
+
+A block is a run of decoded instructions that the fast engine executes without returning to
+its dispatcher.
+
+* **Source:** only host-backed instruction bytes (the CPU's code page cache) within one
+  4 KiB virtual page. Page containment is a correctness rule, not an allocation size.
+* **Length:** at most a conservative tier-0 maximum (initially 64 instructions; a tuning
+  parameter measured in stage H).
+* **Storage:** variable-sized. A block holds its instruction count and its operations in
+  separately sized storage; no block reserves a page's worth of operations.
+* **Ends:**
+** after a branch or jump and its delay slot;
+** before a branch or jump whose delay slot would fall on the next page (the reference
+   step runs it);
+** before the page boundary, or at the maximum length;
+** after MTC0, DMTC0, ERET, TLBR, TLBWI, TLBWR, TLBP, CACHE, and SYNC (SYNC stays a
+   terminator in tier 0, as a conservative choice);
+** before any instruction tier 0 does not cover (`reserved`, COP2, and anything else
+   listed as unsupported), which runs as a reference step.
+* SYSCALL, BREAK, traps, and faults end execution when they are taken, not by rule.
+* A block is entered only at its first instruction; other entry points have their own,
+  possibly overlapping, blocks.
+
+=== Executor (tier 0)
+
+At every instruction boundary, conservatively:
+
+. stop if `cycles() >= limit` (the limit read through its reference each time);
+. if `service_pending_exceptions()` took one: `end_cycle(false)`, leave the block;
+. execute the operation; on an exception: `take_exception`, `end_cycle(false)`, leave;
+. `apply_flow`, `end_cycle(true)`;
+. leave if the instruction left the host fast path (a flag the CPU's slow paths set);
+. leave if the next PC is not the next operation's (a taken branch out of the block, a
+  nullified branch-likely slot).
 
 == Keeping blocks valid
 
-A block is a function of the guest bytes it was decoded from and the translation that found
-them. Both can change:
+A block depends on the translation that found its bytes and on the bytes.
 
-* **Translation** changes: TLB writes (entries that mapped the block's page), ASID and mode
-  changes (part of the key), Config writes, reset, snapshot loads. The mechanism is the
-  host page cache's (`Cpu::forget_tlb_pages`, `invalidate_host_pages`), extended to blocks.
-* **Code bytes** change: CPU stores and device DMA. Each physical 4 KiB frame that holds
-  decoded code gets a "has code" mark in its `MemoryBlock`. A store to a marked frame takes
-  the slow path, because the host data page for a marked frame is not writable in the data
-  page cache, and the slow path drops the frame's blocks before the store completes. DMA
-  writes into `MemoryBlock` through the bus drop them too. IRIX loading programs, the PROM
-  copying itself to memory, and the kernel's instruction-cache flushes are the cases that
-  exercise this.
-* The interpreter fetches the bytes in memory at the moment of the fetch; it does not
-  model a stale instruction cache. Blocks must behave the same, so a store is visible to
-  the next fetch even where real hardware would need a cache operation first.
-
-== Cycle and interrupt accounting inside a block
-
-* On entry the engine knows its budget: the stop cycle, and `Cpu`'s next timer cycle (Count
-  reaching Compare sets IP[7]). A block runs only if it fits within the budget; otherwise
-  the engine runs single steps up to the limit. After a block, `cycles_` advances by the
-  number of instructions retired, and Random follows automatically (it is derived from
-  retirements).
-* Nothing inside a block can make an interrupt pending except a bus access that reaches a
-  device, and a device access synchronizes time (`SynchronizedTarget`), which may run
-  events that change interrupt lines. The engine therefore checks `Cpu`'s interrupt flag
-  after any memory operation that left the host fast path, and exits the block at that
-  instruction boundary if it is set.
-
-== IR operations
-
-Two levels, introduced in this order:
-
-. **Decoded instructions (tier 0).** One IR operation per guest instruction: the handler (an
-  operation code of the IR, not a host pointer, so blocks can be saved and compared),
-  pre-extracted register numbers, the sign-extended immediate, and the guest PC offset. The
-  handlers call the same `Cpu` methods as the interpreter (`load_as`, `store_as`, CP0,
-  TLB, exceptions); ALU semantics come from shared inline functions so the interpreter and
-  the IR cannot disagree. This removes fetch, decode, and dispatch, and needs no new
-  semantics.
-. **Micro-operations (tier 1, for the JIT).** Each decoded instruction lowered to typed
-  operations on 64-bit values: register read/write, add/sub/logic/shift with explicit
-  32-bit sign extension, compare, select, load/store with width and signedness,
-  exception-if, branch. The lowering is the MIPS semantics written once; the direct emitter
-  and any optimizing tier consume it. Designing these waits until tier 0 runs IRIX.
-
-HI/LO, the LL bit, the FPU, and CP0 stay in `Cpu` state; micro-operations that touch them
-call `Cpu`.
+* **Selective translation tracking,** the host page model extended to blocks: a block
+  records the TLB entry that mapped its page (none for unmapped segments) and its
+  translation context (mode bits and ASID). A TLB write stales exactly the blocks derived
+  from the entry written and from entries the write invalidated (`Cpu::forget_tlb_pages`'s
+  mask). ASID and mode changes are part of the lookup key and stale nothing.
+* **Global translation epoch** only for what selective tracking cannot represent: Config
+  writes, reset, snapshot loads, and bus mapping changes (the existing
+  `translation_generation_` and bus generation).
+* **Code bytes:** each 4 KiB frame of a `MemoryBlock` that holds decoded code has a mark and a
+  generation. Writers that can change it bump the generation: `AddressSpace::write` into
+  memory, `writable_memory_bytes` (under the span contract above), and the CPU's slow store
+  path. When a frame is first marked, the CPU drops its writable data-page entries for it,
+  and afterward never caches a writable page into a marked frame, so every CPU store to
+  code takes the slow path and is a barrier.
+* **Lifetime:** invalidation never frees or overwrites a block; it makes blocks stale, and a
+  stale block no longer matches a lookup. Blocks are replaced only on a lookup miss, and
+  lookups happen only between blocks, so the block being executed stays intact even when
+  its own code is written. The store completes, the barrier leaves the block, and the next
+  lookup rebuilds.
 
 == Correctness method
 
-* **Lockstep mode:** a diagnostic that runs every block on the engine and the same
-  instructions on the reference interpreter from a copy of the state, and compares
-  registers, HI/LO, PC, CP0, and the cycle count after each block. It needs a way to copy
-  and compare `Cpu` state (snapshots already serialize it).
-* **Digests and snapshots:** the benchmark workloads must keep their digests, and snapshots
-  taken at the same cycle must be byte-identical across engines.
-* The reference interpreter stays the oracle and the default for `--trace cpu` and probes.
+* **Complete CPU state:** `Cpu::capture()` returns the architectural state in a comparable
+  form: integer and FPU state, CP0 (Random computed), all TLB entries, the cache arrays,
+  cycles, retirements, interrupt inputs, timer and watch state, compared field by field.
+  Raw `StateImage` bytes are not used for comparison because structure padding is
+  unspecified; snapshots keep using `StateImage`.
+* **Differential tests** run two identical CPU + RAM systems (no MMIO), one on the reference
+  interpreter and one on the engine under test, from the same deterministic state, and
+  compare `capture()` and RAM after every step or block. MMIO is never executed twice.
+  Directed programs cover arithmetic, branches, branch-likely, delay slots, exceptions,
+  Count/Compare boundaries, Random retirement, CP0, loads and stores, and fetch faults;
+  seeded random sequences add breadth.
+* **Whole machine:** benchmark digests, and byte-identical snapshots at the same guest cycle.
+  A full-machine lockstep mode with MMIO would need duplicated or restored machine state
+  and is not planned.
 
-== Order of work
+== Stages
 
-. Micro-optimizations of the reference path that are transparent (done in part:
-  STATUS "Performance").
-. Tier 0: decoded blocks, the fast interpreter, with lockstep mode and the invalidation
-  rules. Expected gain: the dispatch and decode share of the profile.
-. Tier 1: micro-operations and a direct x86-64 emitter (the JIT milestone).
+Each is one mechanism and one commit.
+
+A. This document; tests of the execution-boundary assumptions; the scheduler invariant.
+B. `DecodedInstruction`, `decode`, `execute`, `apply_flow`; the reference interpreter uses
+   them. Digests and snapshots unchanged; the reference interpreter's speed measured.
+C. `Cpu::capture()`, the differential harness, and single decoded instructions executed
+   through the shared semantics against the reference interpreter.
+D. Block construction without caching (formation rules above).
+E. The tier-0 block executor with per-instruction boundary accounting.
+F. The block cache and invalidation (TLB remaps, ASID and mode, virtual aliases of one
+   physical frame, CPU stores and DMA into code, reset, snapshot load, bus mapping
+   changes), memory-safe for the executing block.
+G. Engine selection with the reference interpreter as the permanent oracle; all presets and
+   all four workloads with identical digests and same-cycle snapshots.
+H. Measure and optimize tier 0: boundary checks, dispatch representation, `ExecutionResult`
+   traffic, block table size and block length, FPU handling. No tier-1 work.
+
+A review follows stage C, before block construction.
+
+If a stage would require duplicating instruction semantics, special-casing a guest PC,
+weakening exact-cycle behavior, or making MMIO behavior hard to compare with the reference
+interpreter, it stops and the conflict is documented here instead.
 
 == Open questions
 
 * Whether decoded blocks are worth keeping across snapshots (probably not: rebuild on load).
-* How large the block table should be for IRIX's working set (measure).
-* Whether the FPU belongs in tier 0 or stays a call into `execute_fpu` (measure; the `cpu`
-  workload spends about 4% there).
+* Block table size and maximum block length for IRIX's working set (stage H).
+* Whether the FPU leaves the opaque operation (stage H; the `cpu` workload spends about 4%
+  in `execute_fpu`).

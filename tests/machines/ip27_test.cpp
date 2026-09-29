@@ -254,6 +254,34 @@ const test::Registration determinism{
         t.check_equal(first.now(), second.now());
     }};
 
+const test::Registration event_boundaries{
+    "ip27.events_run_at_cycle_boundaries", [](test::Context& t) {
+        // Scheduler invariant (IR.adoc): an event runs at the exact cycle its deadline
+        // converts to, between instructions, and guest RAM it writes (as DMA does, through
+        // a writable span) is seen by the next instruction and not before. The loop loads
+        // the word at physical 0x100 every four cycles, from cycle 2, and counts what it
+        // sees.
+        const auto prom = program({lui(t0, 0xa800), dsll32(t0, t0, 0), lw(t1, 0x100, t0),
+                                   daddu(t2, t2, t1), beq(zero, zero, -12), nop()});
+        Ip27Machine machine{small_config(), prom};
+        machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
+        std::uint64_t fired_at = 0;
+        auto& scheduler = machine.scheduler();
+        const EventId dma = scheduler.add_event("test.dma", [&] {
+            fired_at = machine.cpu().cycles();
+            const auto bytes = machine.bus().writable_memory_bytes(PhysicalAddress{0x100}, 4);
+            if (t.check_equal(bytes.size(), std::size_t{4})) {
+                store_unsigned(bytes, 1, ByteOrder::big);
+            }
+        });
+        // Cycle 50 is a load (2 + 4 * 12).
+        scheduler.schedule_at(dma, time_at_cycles(50, small_config().cpu_clock));
+        machine.run(200);
+        t.check_equal(fired_at, std::uint64_t{50});
+        // Loads at cycles 50, 54, ..., 198 see the write; their DADDUs run by cycle 199.
+        t.check_equal(machine.cpu().state().gpr[t2], std::uint64_t{38});
+    }};
+
 const test::Registration snapshot{
     "ip27.snapshot_resumes_exactly", [](test::Context& t) {
         // Saving at cycle N and resuming must match running straight through.
