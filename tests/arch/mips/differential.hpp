@@ -7,8 +7,10 @@
 #include "arch/mips/system.hpp"
 #include "support/test.hpp"
 
+#include <ultraviolent/arch/mips/block.hpp>
 #include <ultraviolent/arch/mips/decoded.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -26,6 +28,8 @@ namespace ultraviolent::mips::testing {
 // did not decode) runs as a reference step. Later stages substitute blocks.
 class PredecodedEngine {
   public:
+    static constexpr bool decodes_unsupported = true;
+
     explicit PredecodedEngine(Cpu& cpu) : cpu_{cpu}, fallback_{cpu} {}
 
     void add(std::uint64_t virtual_address, std::uint32_t word) {
@@ -59,6 +63,62 @@ class PredecodedEngine {
     std::unordered_map<std::uint64_t, DecodedInstruction> decoded_;
 };
 
+// The engine under test at stage D: blocks built at each block entry (build_block), their
+// operations run one per cycle through complete_cycle, following the tier-0 executor rules
+// (IR.adoc "Executor"): a block is left after an exception, after an access that left the
+// host fast path, when pc is not the next operation's, or when an operation's word changed in
+// memory. Where no block can be built, a reference step runs, counted by reason.
+class BlockSteppingEngine {
+  public:
+    static constexpr bool decodes_unsupported = false;
+
+    explicit BlockSteppingEngine(Cpu& cpu) : cpu_{cpu}, fallback_{cpu} {}
+
+    void add(std::uint64_t /*virtual_address*/, std::uint32_t /*word*/) {}
+
+    void step() {
+        cpu_.synchronize_host_pages();
+        if (cpu_.service_pending_exceptions()) {
+            cpu_.end_cycle(false);
+            in_block_ = false;
+            return;
+        }
+        const std::uint64_t pc = cpu_.state().pc;
+        if (!in_block_ || pc != block_.start_pc + 4 * next_ ||
+            block_.word_now(next_) != block_.operations[next_].instruction.word) {
+            if (const auto none = build_block(cpu_, pc, block_)) {
+                fallback_.step();
+                ++fallback_steps;
+                ++fallback_reasons[static_cast<std::size_t>(*none)];
+                in_block_ = false;
+                return;
+            }
+            ++blocks_built;
+            next_ = 0;
+            in_block_ = true;
+        }
+        cpu_.clear_left_host_path();
+        const bool retired = complete_cycle(cpu_, block_.operations[next_]);
+        ++decoded_steps;
+        ++next_;
+        if (!retired || cpu_.left_host_path() || next_ == block_.operations.size()) {
+            in_block_ = false;
+        }
+    }
+
+    std::uint64_t decoded_steps{};
+    std::uint64_t fallback_steps{};
+    std::uint64_t blocks_built{};
+    std::array<std::uint64_t, no_block_count> fallback_reasons{};
+
+  private:
+    Cpu& cpu_;
+    Interpreter fallback_;
+    Block block_;
+    std::size_t next_{};
+    bool in_block_{};
+};
+
 // The first difference between two systems' architectural state and memory, or empty.
 inline std::string difference(const System& a, const System& b) {
     const Cpu::State x = a.cpu.capture();
@@ -66,8 +126,7 @@ inline std::string difference(const System& a, const System& b) {
     if (x.integer != y.integer) {
         for (unsigned r = 0; r < 32; ++r) {
             if (x.integer.gpr[r] != y.integer.gpr[r]) {
-                return std::format("gpr {}: {:#x} vs {:#x}", r, x.integer.gpr[r],
-                                   y.integer.gpr[r]);
+                return std::format("gpr {}: {:#x} vs {:#x}", r, x.integer.gpr[r], y.integer.gpr[r]);
             }
         }
         return std::format("integer state: pc {:#x}/{:#x} next {:#x}/{:#x}", x.integer.pc,
@@ -83,8 +142,7 @@ inline std::string difference(const System& a, const System& b) {
         return "tlb";
     }
     if (x.cycles != y.cycles || x.retired != y.retired) {
-        return std::format("cycles {}/{} retired {}/{}", x.cycles, y.cycles, x.retired,
-                           y.retired);
+        return std::format("cycles {}/{} retired {}/{}", x.cycles, y.cycles, x.retired, y.retired);
     }
     if (x != y) {
         return "interrupt or watch state";
@@ -92,9 +150,8 @@ inline std::string difference(const System& a, const System& b) {
     if (!(a.cpu.caches() == b.cpu.caches())) {
         return "cache arrays";
     }
-    for (const auto& [left, right, name] :
-         {std::tuple{a.ram.bytes(), b.ram.bytes(), "ram"},
-          std::tuple{a.boot.bytes(), b.boot.bytes(), "boot"}}) {
+    for (const auto& [left, right, name] : {std::tuple{a.ram.bytes(), b.ram.bytes(), "ram"},
+                                            std::tuple{a.boot.bytes(), b.boot.bytes(), "boot"}}) {
         if (std::memcmp(left.data(), right.data(), left.size()) != 0) {
             std::size_t at = 0;
             while (left[at] == right[at]) {
@@ -108,10 +165,10 @@ inline std::string difference(const System& a, const System& b) {
 
 // A reference system and a candidate system kept identical: every setup action is applied
 // to both, and the candidate's engine is told about every program loaded.
-struct Differential {
+template <class Engine> struct DifferentialWith {
     System reference;
     System candidate;
-    PredecodedEngine engine{candidate.cpu};
+    Engine engine{candidate.cpu};
 
     // Applies `action` to both systems.
     void both(const std::function<void(System&)>& action) {
@@ -160,5 +217,7 @@ struct Differential {
         return true;
     }
 };
+
+using Differential = DifferentialWith<PredecodedEngine>;
 
 } // namespace ultraviolent::mips::testing

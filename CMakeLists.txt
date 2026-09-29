@@ -35,6 +35,7 @@ ultraviolent_enable_warnings(ultraviolent_core)
 ultraviolent_enable_sanitizers(ultraviolent_core)
 
 add_library(ultraviolent_mips
+    src/arch/mips/block.cpp
     src/arch/mips/cache_arrays.cpp
     src/arch/mips/cpu.cpp
     src/arch/mips/fpu.cpp
@@ -139,6 +140,7 @@ if(BUILD_TESTING)
     add_test(NAME core COMMAND core_tests)
 
     add_executable(mips_tests
+        tests/arch/mips/block_test.cpp
         tests/arch/mips/boundary_test.cpp
         tests/arch/mips/cache_test.cpp
         tests/arch/mips/differential_test.cpp

@@ -351,6 +351,7 @@ std::expected<std::uint64_t, Exception> Cpu::read(const Translation& translation
         return std::unexpected(watch.error());
     }
     const PhysicalAddress address = bus_address(translation, width);
+    left_host_path_ = true;
     auto value = bus_.read(address, width);
     check_host_pages();
     if (!value) {
@@ -370,6 +371,7 @@ std::expected<void, Exception> Cpu::write(const Translation& translation, Access
         return watch;
     }
     const PhysicalAddress address = bus_address(translation, width);
+    left_host_path_ = true;
     auto result = bus_.write(address, width, value);
     check_host_pages();
     if (!result) {
@@ -412,6 +414,30 @@ std::expected<void, Exception> Cpu::store_slow(std::uint64_t address, AccessWidt
         remember_page(address, *translation, AccessKind::store);
     }
     return result;
+}
+
+std::optional<Cpu::CodePage> Cpu::code_page(std::uint64_t address) {
+    if (address % 4 != 0) {
+        return std::nullopt;
+    }
+    const std::uint64_t page = address & ~page_offset_mask;
+    const auto hit = [&]() -> std::optional<CodePage> {
+        const HostPage& entry = code_pages_[host_page_slot(address)];
+        if (entry.page == page && entry.context == translation_context()) {
+            return CodePage{entry.bytes, bus_.byte_order()};
+        }
+        return std::nullopt;
+    };
+    if (auto found = hit()) {
+        return found;
+    }
+    // Fill as a fetch would, without reading: remember_page caches plain memory only.
+    const auto translation = translate(address, AccessKind::fetch);
+    if (!translation) {
+        return std::nullopt;
+    }
+    remember_page(address, *translation, AccessKind::fetch);
+    return hit();
 }
 
 void Cpu::forget_tlb_pages(std::uint64_t entries) {

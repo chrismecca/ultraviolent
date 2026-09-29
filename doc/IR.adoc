@@ -1,8 +1,8 @@
 = Ultraviolent IR
 
-Status: design, reviewed with the user (2026-09-28). Stages A (this document and the
-boundary tests), B (decode and shared semantics), and C (the differential harness) are
-implemented; D-H are not. Review with the user before D.
+Status: design, reviewed with the user (2026-09-28, 2026-09-29). Stages A (this document
+and the boundary tests), B (decode and shared semantics), C (the differential harness), and
+D (block construction) are implemented; E-H are not.
 
 This document designs the representation between the MIPS decoder and the fast execution
 engines (ARCHITECTURE "The CPU is not the interpreter", "Future JIT architecture"): what a
@@ -165,6 +165,24 @@ its dispatcher.
 * A block is entered only at its first instruction; other entry points have their own,
   possibly overlapping, blocks.
 
+=== Construction (stage D)
+
+`build_block(Cpu&, pc, Block&)` (`block.hpp`) builds one block into reusable storage:
+
+* `Cpu::code_page(pc)` gives the host bytes of the code page where a fetch would take the
+  host fast path. It translates and consults the memory map only (the code page cache fill
+  of `remember_page`), never the bus: building a block cannot read a device.
+* `operation_class(DecodedOpcode)`, a table by opcode, says whether an operation is plain,
+  control (branch or jump), a state change, or unsupported.
+* The result is a `Block` (start pc, page bytes, byte order, `BlockEnd`, and a vector of
+  decoded operations sized by what was decoded), or a `NoBlock` reason: not host-backed, an
+  unsupported first operation, or a first operation that is a branch whose delay slot cannot
+  join it.
+* Beyond the ends listed above: a branch whose delay slot holds another branch or an
+  unsupported operation ends the block before the branch (`BlockEnd::delay_slot`); a state
+  change in a delay slot stays with its branch; a branch and its slot are never split by the
+  length limit.
+
 === Executor (tier 0)
 
 At every instruction boundary, conservatively:
@@ -175,7 +193,15 @@ At every instruction boundary, conservatively:
 . `apply_flow`, `end_cycle(true)`;
 . leave if the instruction left the host fast path (a flag the CPU's slow paths set);
 . leave if the next PC is not the next operation's (a taken branch out of the block, a
-  nullified branch-likely slot).
+  nullified branch-likely slot);
+. before each operation after the first, leave if its word in memory changed (a store
+  through the host fast path into the block's page). Until stage F's frame generations, this
+  per-operation load and compare is what keeps stores into code exact; it also covers the
+  executing block, which is never freed.
+
+A block starting in a delay slot (after a reference step ran the branch) needs no special
+case: its first operation runs, `apply_flow` sends pc to the branch target, and the pc
+check leaves the block.
 
 == Keeping blocks valid
 
