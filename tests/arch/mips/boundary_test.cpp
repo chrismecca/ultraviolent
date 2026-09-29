@@ -5,6 +5,7 @@
 #include "arch/mips/system.hpp"
 #include "support/test.hpp"
 
+#include <ultraviolent/arch/mips/block_interpreter.hpp>
 #include <ultraviolent/arch/mips/cp0.hpp>
 
 #include <cstdint>
@@ -117,6 +118,50 @@ const test::Registration count_and_random_positions{
         t.check_equal(s.gpr(t1), std::uint64_t{2}); // cycle 4
         t.check_equal(s.gpr(t2), std::uint64_t{3}); // cycle 6
         t.check_equal(s.gpr(t3), std::uint64_t{63 - 7});
+    }};
+
+const test::Registration tier0_limit_lowered{
+    "mips.tier0.run_limit_lowered_during_an_access", [](test::Context& t) {
+        // The same device access inside a block: the access is a barrier, the lowered limit
+        // stops the run after that instruction, and later operations of the block wait.
+        System s;
+        Device device;
+        attach(s, device);
+        std::uint64_t limit = 100;
+        device.on_access = [&] { limit = s.cpu.cycles(); };
+        s.set(t0, kseg1(device_base));
+        s.set(t2, kseg0(System::data));
+        s.load(System::code, {nop(), sw(t3, 0, t2), lw(t1, 0, t0), addiu(t4, t4, 1), nop(), nop()});
+        s.start_kernel();
+        BlockInterpreter tier0{s.cpu};
+        tier0.run_until(limit);
+        t.check_equal(s.cpu.cycles(), std::uint64_t{3});
+        t.check_equal(s.gpr(t1), std::uint64_t{0x1234});
+        t.check_equal(s.gpr(t4), std::uint64_t{0});
+        t.check_equal(s.pc(), kseg0(System::code) + 12);
+        // Two barriers: the first store to the data page also went through the bus (a host
+        // page cache miss), then the device read.
+        t.check_equal(tier0.statistics().exits[static_cast<std::size_t>(BlockExit::host_path)],
+                      std::uint64_t{2});
+    }};
+
+const test::Registration tier0_interrupt_from_access{
+    "mips.tier0.interrupt_raised_during_an_access", [](test::Context& t) {
+        System s;
+        Device device;
+        attach(s, device);
+        device.on_access = [&] { s.cpu.set_interrupt_level(0, true); };
+        s.set(t0, kseg1(device_base));
+        s.load(System::code, {nop(), lw(t1, 0, t0), addiu(t2, zero, 1), nop()});
+        s.start_kernel(kseg0(System::code), status::kx | status::ie | (0x04u << status::im_shift));
+        BlockInterpreter tier0{s.cpu};
+        const std::uint64_t limit = 3;
+        tier0.run_until(limit);
+        t.check_equal(s.pc(), general_vector);
+        t.check_equal(s.exception_code(), code_of(ExceptionCode::interrupt));
+        t.check_equal(s.cpu.dmfc0(cp0::epc), kseg0(System::code) + 8);
+        t.check_equal(s.gpr(t2), std::uint64_t{0});
+        t.check_equal(s.cpu.cycles(), std::uint64_t{3});
     }};
 
 } // namespace

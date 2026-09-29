@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ultraviolent/arch/mips/block_interpreter.hpp>
 #include <ultraviolent/arch/mips/cpu.hpp>
 #include <ultraviolent/arch/mips/interpreter.hpp>
 #include <ultraviolent/core/address_space.hpp>
@@ -143,6 +144,14 @@ class Ip27Machine {
     // accessed (IP27.adoc "Machine loop"); run() leaves it current.
     void step();
     void run(std::uint64_t cycles);
+    // The engine run() uses (IR.adoc "Stages"): a host choice, not guest configuration, and
+    // not part of snapshots. Tracing and PC probes always step the reference interpreter.
+    void set_execution_engine(mips::ExecutionEngine engine) {
+        engine_ = engine;
+    }
+    [[nodiscard]] const mips::BlockStatistics& block_statistics() const {
+        return block_interpreter_.statistics();
+    }
     // Ends the current run() at the next cycle boundary (for host backends, such as a console
     // script that has run out).
     void request_stop() {
@@ -288,6 +297,8 @@ class Ip27Machine {
              [this] { cpu_.reset(ResetKind::cold); }};
     mips::Cpu cpu_;
     mips::Interpreter interpreter_{cpu_};
+    mips::BlockInterpreter block_interpreter_{cpu_};
+    mips::ExecutionEngine engine_{mips::ExecutionEngine::reference};
     SynchronizedTarget synchronized_hub_{*this, hub_};
     SynchronizedTarget synchronized_flash_{*this, flash_interface_};
     SynchronizedTarget synchronized_flash_commands_{*this, flash_commands_};

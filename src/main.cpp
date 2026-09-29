@@ -55,6 +55,7 @@ void usage() {
         "                    [--console LINE]... [--cdrom FILE] [--disk FILE]\n"
         "                    [--sample-pc NS] [--date DATE] [--stop-at-prompt]\n"
         "                    [--interactive] [--ethernet tap:IFNAME|pcap:FILE]\n"
+        "                    [--engine reference|tier0] [--engine-statistics]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
         "from a snapshot. Snapshots are for exploration; checkpoints need a cold run.\n"
@@ -84,9 +85,68 @@ void usage() {
         "ends a run early; the snapshot, flash, NVRAM, and disk are still written.\n"
         "--date YYYY-MM-DD[THH:MM:SS] sets the time-of-day clock at power-on (UTC; default\n"
         "2026-01-01): virtual time runs it from there.\n"
+        "--engine reference|tier0 selects the execution engine (default reference, the\n"
+        "oracle; tier0 is experimental, doc/IR.adoc). --engine-statistics prints tier 0's\n"
+        "block statistics at the end of the run.\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
         "scsi ethernet irq scheduler firmware machine all\n",
         stderr);
+}
+
+// Tier 0's block statistics (IR.adoc "Stages" E), for benchmark review.
+void print_block_statistics(const mips::BlockStatistics& s) {
+    const auto share = [](std::uint64_t part, std::uint64_t whole) {
+        return whole == 0 ? 0.0 : 100.0 * static_cast<double>(part) / static_cast<double>(whole);
+    };
+    std::uint64_t fallbacks = 0;
+    for (const std::uint64_t n : s.fallbacks) {
+        fallbacks += n;
+    }
+    std::uint64_t built = 0;
+    std::uint64_t built_operations = 0;
+    for (std::size_t n = 0; n < s.built_lengths.size(); ++n) {
+        built += s.built_lengths[n];
+        built_operations += n * s.built_lengths[n];
+    }
+    std::fprintf(
+        stderr,
+        "tier0: %llu block entries, %llu decoded operations (%.2f per entry; built "
+        "blocks average %.2f), %llu reference steps, %llu interrupts at entry\n",
+        static_cast<unsigned long long>(s.entries), static_cast<unsigned long long>(s.operations),
+        s.entries == 0 ? 0.0 : static_cast<double>(s.operations) / static_cast<double>(s.entries),
+        built == 0 ? 0.0 : static_cast<double>(built_operations) / static_cast<double>(built),
+        static_cast<unsigned long long>(fallbacks),
+        static_cast<unsigned long long>(s.pending_at_entry));
+    constexpr const char* no_block[] = {"not host-backed", "unsupported", "delay slot"};
+    for (std::size_t i = 0; i < s.fallbacks.size(); ++i) {
+        std::fprintf(stderr, "tier0 reference step: %-16s %12llu (%5.1f%%)\n", no_block[i],
+                     static_cast<unsigned long long>(s.fallbacks[i]),
+                     share(s.fallbacks[i], fallbacks));
+    }
+    constexpr const char* ends[] = {"control flow", "state change",  "unsupported",
+                                    "delay slot",   "page boundary", "length limit"};
+    for (std::size_t i = 0; i < s.built_ends.size(); ++i) {
+        std::fprintf(stderr, "tier0 block end:      %-16s %12llu (%5.1f%%)\n", ends[i],
+                     static_cast<unsigned long long>(s.built_ends[i]),
+                     share(s.built_ends[i], built));
+    }
+    constexpr const char* exits[] = {"completed", "run limit",  "pending exception", "exception",
+                                     "host path", "left block", "code changed"};
+    for (std::size_t i = 0; i < s.exits.size(); ++i) {
+        std::fprintf(stderr, "tier0 block exit:     %-17s %11llu (%5.1f%%)\n", exits[i],
+                     static_cast<unsigned long long>(s.exits[i]), share(s.exits[i], s.entries));
+    }
+    const auto histogram = [&](const char* name, const auto& lengths) {
+        std::fprintf(stderr, "tier0 %s lengths:", name);
+        for (std::size_t n = 0; n < lengths.size(); ++n) {
+            if (lengths[n] != 0) {
+                std::fprintf(stderr, " %zu:%llu", n, static_cast<unsigned long long>(lengths[n]));
+            }
+        }
+        std::fprintf(stderr, "\n");
+    };
+    histogram("built", s.built_lengths);
+    histogram("run", s.run_lengths);
 }
 
 std::optional<std::uint64_t> parse_number(std::string_view text) {
@@ -153,6 +213,8 @@ struct Options {
     std::optional<std::int64_t> date;
     bool stop_at_prompt{};
     bool interactive{};
+    mips::ExecutionEngine engine{mips::ExecutionEngine::reference};
+    bool engine_statistics{};
 };
 
 // "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" (UTC) as Unix seconds.
@@ -190,6 +252,10 @@ std::optional<Options> parse(std::span<char*> arguments) {
             options.interactive = true;
             continue;
         }
+        if (flag == "--engine-statistics") {
+            options.engine_statistics = true;
+            continue;
+        }
         if (i + 1 >= arguments.size()) {
             std::fprintf(stderr, "missing value for %.*s\n", static_cast<int>(flag.size()),
                          flag.data());
@@ -216,6 +282,15 @@ std::optional<Options> parse(std::span<char*> arguments) {
                 return std::nullopt;
             }
             options.ethernet = value;
+        } else if (flag == "--engine") {
+            if (value == "reference") {
+                options.engine = mips::ExecutionEngine::reference;
+            } else if (value == "tier0") {
+                options.engine = mips::ExecutionEngine::tier0;
+            } else {
+                std::fprintf(stderr, "--engine takes reference or tier0\n");
+                return std::nullopt;
+            }
         } else if (flag == "--cdrom") {
             options.cdrom = value;
         } else if (flag == "--disk") {
@@ -325,6 +400,7 @@ int main(int argc, char** argv) {
     }
 
     ip27::Ip27Machine machine{config, *prom};
+    machine.set_execution_engine(options->engine);
     backends::StreamTraceSink sink{stderr};
     machine.tracer().set_sink(&sink);
     // The guest console: the IOC3's first serial port, on standard output, with scripted input.
@@ -534,6 +610,9 @@ int main(int argc, char** argv) {
     }
 
     machine.insert_cdrom(nullptr);
+    if (options->engine_statistics) {
+        print_block_statistics(machine.block_statistics());
+    }
     const auto& state = machine.cpu().state();
     std::fprintf(stderr, "stopped after %llu cycles at virtual %llu ns, pc %#018llx\n",
                  static_cast<unsigned long long>(machine.cpu().cycles()),

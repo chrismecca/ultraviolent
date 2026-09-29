@@ -1,7 +1,7 @@
 #!/bin/sh
 # Profile-guided release build (DEVELOPMENT.adoc "Fast builds"). Builds an instrumented
-# binary, trains it by running the user's IP27 PROM image from power-on, and builds
-# build/pgo/ultraviolent with the profile and link-time optimization.
+# binary, trains it by running the user's IP27 PROM image from power-on once per execution
+# engine, and builds build/pgo/ultraviolent with the profile and link-time optimization.
 #
 #   ULTRAVIOLENT_IP27_PROM=/path/to/ip27prom.img scripts/build-pgo.sh [training cycles]
 #
@@ -30,8 +30,12 @@ cmake -S "$root" -B "$generate" -G Ninja -DCMAKE_CXX_COMPILER=clang++ \
     -DCMAKE_CXX_FLAGS=-fprofile-instr-generate \
     -DCMAKE_EXE_LINKER_FLAGS=-fprofile-instr-generate >/dev/null
 cmake --build "$generate" --target ultraviolent
-LLVM_PROFILE_FILE=$generate/training.profraw \
-    "$generate/ultraviolent" --machine ip27 --prom "$prom" --cycles "$cycles" >/dev/null
+# Train both execution engines, so neither is laid out without a profile.
+for engine in reference tier0; do
+    LLVM_PROFILE_FILE=$generate/training-$engine.profraw \
+        "$generate/ultraviolent" --machine ip27 --prom "$prom" --cycles "$cycles" \
+        --engine "$engine" >/dev/null
+done
 "$profdata" merge -o "$generate/ultraviolent.profdata" "$generate"/*.profraw
 
 cmake -S "$root" -B "$root/build/pgo" -G Ninja -DCMAKE_CXX_COMPILER=clang++ \

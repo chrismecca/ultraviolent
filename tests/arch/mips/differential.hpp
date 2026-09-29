@@ -8,8 +8,10 @@
 #include "support/test.hpp"
 
 #include <ultraviolent/arch/mips/block.hpp>
+#include <ultraviolent/arch/mips/block_interpreter.hpp>
 #include <ultraviolent/arch/mips/decoded.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +19,7 @@
 #include <format>
 #include <functional>
 #include <initializer_list>
+#include <random>
 #include <string>
 #include <unordered_map>
 
@@ -119,6 +122,39 @@ class BlockSteppingEngine {
     bool in_block_{};
 };
 
+// The engine under test at stage E: the library's tier-0 executor, run for chunks of cycles
+// (DifferentialWith::run compares after each chunk).
+class Tier0Engine {
+  public:
+    static constexpr bool decodes_unsupported = false;
+
+    explicit Tier0Engine(Cpu& cpu) : interpreter_{cpu} {}
+
+    void add(std::uint64_t /*virtual_address*/, std::uint32_t /*word*/) {}
+
+    void run_until(const std::uint64_t& limit) {
+        interpreter_.run_until(limit);
+        const BlockStatistics& s = interpreter_.statistics();
+        decoded_steps = s.operations;
+        fallback_reasons = s.fallbacks;
+        fallback_steps = 0;
+        for (const std::uint64_t n : s.fallbacks) {
+            fallback_steps += n;
+        }
+    }
+
+    [[nodiscard]] const BlockStatistics& statistics() const {
+        return interpreter_.statistics();
+    }
+
+    std::uint64_t decoded_steps{};
+    std::uint64_t fallback_steps{};
+    std::array<std::uint64_t, no_block_count> fallback_reasons{};
+
+  private:
+    BlockInterpreter interpreter_;
+};
+
 // The first difference between two systems' architectural state and memory, or empty.
 inline std::string difference(const System& a, const System& b) {
     const Cpu::State x = a.cpu.capture();
@@ -202,19 +238,47 @@ template <class Engine> struct DifferentialWith {
     // compares them after every cycle. Returns false at the first difference.
     bool run(test::Context& t, std::uint64_t steps,
              const std::function<void(std::uint64_t, System&)>& before = {}) {
-        for (std::uint64_t n = 0; n < steps; ++n) {
-            if (before) {
-                before(n, reference);
-                before(n, candidate);
+        if constexpr (requires(Engine& e, const std::uint64_t& limit) { e.run_until(limit); }) {
+            // Engines that run many cycles per call: chunks of 1 to 37 cycles (a fixed
+            // sequence), both systems through run_until, compared after each chunk. `before`
+            // runs for every cycle of a chunk at its start, on both systems alike.
+            std::mt19937_64 rng{steps};
+            for (std::uint64_t n = 0; n < steps;) {
+                const std::uint64_t chunk =
+                    std::min<std::uint64_t>(steps - n, rng() % 4 == 0 ? 1 : 1 + rng() % 37);
+                if (before) {
+                    for (std::uint64_t m = n; m < n + chunk; ++m) {
+                        before(m, reference);
+                        before(m, candidate);
+                    }
+                }
+                const std::uint64_t reference_limit = reference.cpu.cycles() + chunk;
+                reference.interpreter.run_until(reference_limit);
+                const std::uint64_t candidate_limit = candidate.cpu.cycles() + chunk;
+                engine.run_until(candidate_limit);
+                n += chunk;
+                if (const std::string d = difference(reference, candidate); !d.empty()) {
+                    t.check(false,
+                            std::format("after cycle {} pc {:#x}: {}", n, reference.pc(), d));
+                    return false;
+                }
             }
-            reference.interpreter.step();
-            engine.step();
-            if (const std::string d = difference(reference, candidate); !d.empty()) {
-                t.check(false, std::format("cycle {} pc {:#x}: {}", n, reference.pc(), d));
-                return false;
+            return true;
+        } else {
+            for (std::uint64_t n = 0; n < steps; ++n) {
+                if (before) {
+                    before(n, reference);
+                    before(n, candidate);
+                }
+                reference.interpreter.step();
+                engine.step();
+                if (const std::string d = difference(reference, candidate); !d.empty()) {
+                    t.check(false, std::format("cycle {} pc {:#x}: {}", n, reference.pc(), d));
+                    return false;
+                }
             }
+            return true;
         }
-        return true;
     }
 };
 

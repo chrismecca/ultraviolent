@@ -609,7 +609,11 @@ void Ip27Machine::run(std::uint64_t cycles) {
             continue;
         }
         executing_ = true;
-        interpreter_.run_until(stop_cycle_);
+        if (engine_ == mips::ExecutionEngine::tier0) {
+            block_interpreter_.run_until(stop_cycle_);
+        } else {
+            interpreter_.run_until(stop_cycle_);
+        }
         executing_ = false;
         if (cpu_.cycles() >= next_event_cycle_) {
             synchronize_time();

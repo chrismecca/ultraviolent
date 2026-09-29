@@ -77,6 +77,23 @@ at RC-IP27 (the user chose no tag or release).
   whole differential suite run a second time on a block-stepping engine (build at block
   entry, one operation per cycle, the executor's rules), plus self-modifying code
   (mutation-checked).
+* **Stage E done (2026-09-29):** `BlockInterpreter`, the uncached tier-0 executor with the
+  reference's per-instruction boundary accounting, behind `--engine tier0` (the reference
+  stays the default); `--engine-statistics`; `scripts/bench.py --engine --statistics` and
+  repeatable `--compare`; PGO training runs both engines. Gates passed: the differential
+  suite on the library executor (chunked runs, 14 tests), tier-0 access-boundary tests,
+  machine tests (same CPU state as the reference; events at exact cycles), mutation checks
+  (removing each of the five boundary rules fails tests), all four workload digests equal
+  to the reference's, and snapshots and disk images byte-identical to the reference's at the
+  same cycle (PROM 3 G cycles; IRIX `fs` from the shell snapshot, 0.9 G cycles).
+  Speed (profile-guided, best of 2; M cycles/s, then versus the pre-B baseline and the
+  current reference built the same way): prom 46.3 (0.71x, 0.94x), boot 42.7 (0.73x, 0.92x),
+  cpu 45.5 (0.79x, 0.98x), fs 51.1 (0.69x, 1.05x). Expected without caching: every block
+  entry fetches and decodes again. Statistics (`local/bench/tier0-stats/`): 3.8-6.1 operations
+  per entry; 98-100% of built blocks end at control flow; reference steps are 0.00-0.02% of
+  instructions (mostly branches whose delay slot cannot join); no code-changed exits;
+  host-path barriers end 23% of block entries in the PROM-heavy workloads (prom, boot) and
+  0.1-2.8% under IRIX (cpu, fs).
 * **Performance comparisons** keep the pre-stage-B build as the baseline
   (`local/bench/step2.json`: prom 64.9, boot 58.6, cpu 57.6, fs 73.7 M cycles/s) alongside the
   current reference interpreter (`local/bench/stageB.json`: 49.7, 45.7, 45.0, 48.0). Target:
@@ -275,11 +292,9 @@ All but performance are done; the repository is public.
   bottlenecks only where the profile shows them (the remaining per-instruction cost is
   mostly decode, dispatch, and result passing, which tier 0 removes). Then record the final
   baseline with `scripts/bench.py run --repeat 3 --save`.
-. **Tier 0 stage E** (doc/IR.adoc "Executor"): the block executor in the library, run from
-  the machine behind an experimental engine option (the reference stays the default),
-  with statistics (block lengths, operations per entry, fallback and termination reasons);
-  benchmark against the current reference and the pre-B baseline; differential suite; then
-  stop for the user's review before F.
+. **Review with the user** (stages D and E, their statistics), then **tier 0 stage F**
+  (doc/IR.adoc "Keeping blocks valid"): the block cache with selective TLB invalidation,
+  frame generations, and memory-safe lifetime.
 . **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
   inventory ID). What the PROM reads there may also select the deskside slot table.
 . **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.
@@ -984,4 +999,24 @@ Disproven: that pre-extracting fields into a 24-byte decoded structure is cheap 
   replaced by 8 bytes: operation and word).
 Best checkpoint: unchanged (rc_alpha.remote_login).
 Next step: review A-C with the user; then stage D.
+----
+
+----
+Date: 2026-09-29 (later)
+Milestone: Performance baseline / tier 0, stages D and E
+Hypothesis: decoded blocks, built from host-backed code and run with the reference's
+  per-instruction accounting, are exactly equivalent to the reference interpreter.
+Evidence: the differential suite on a block-stepping engine and on the library executor;
+  boundary and machine tests; mutation checks; identical digests on all four workloads;
+  byte-identical same-cycle snapshots and disks (PROM and IRIX).
+Changed: block.hpp/.cpp (build_block, BlockEnd, NoBlock), OperationClass table,
+  Cpu::code_page and the host-path flag, block_interpreter.hpp/.cpp, Ip27Machine engine
+  selection, --engine and --engine-statistics, bench.py and build-pgo.sh updates, tests.
+Newly proven: tier 0 without caching runs at 0.92-1.05x of the reference (the rebuild on
+  every entry costs what caching would save); blocks average 3.8-6.1 executed operations.
+Disproven: two test words in C's exception program were not what their comments said
+  (0xfc000000 is SD, 0x40000003 is MFC0); fixed with a genuinely reserved opcode and a CO
+  function.
+Best checkpoint: unchanged (rc_alpha.remote_login).
+Next step: review D and E with the user; then stage F.
 ----

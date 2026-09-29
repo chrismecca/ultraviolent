@@ -11,6 +11,7 @@ behavior.
     scripts/bench.py run                       # all workloads, 3 runs each
     scripts/bench.py run --save base.json      # record results
     scripts/bench.py run --compare base.json   # digests must match; speedups reported
+    scripts/bench.py run --engine tier0 --statistics DIR --compare a.json --compare b.json
 
 The fixture holds copies of the user's private disk and firmware state; keep it out of Git
 (the default is on local disk, off the network file system that holds the repository).
@@ -72,7 +73,7 @@ def copy(source, destination):
 def base_command(args, scratch):
     return [args.binary, "--machine", "ip27", "--prom", args.prom, "--io6prom", args.io6prom,
             "--flash", os.path.join(scratch, "flash.bin"),
-            "--nvram", os.path.join(scratch, "nvram.bin")]
+            "--nvram", os.path.join(scratch, "nvram.bin"), "--engine", args.engine]
 
 
 def make_fixture(args):
@@ -126,6 +127,8 @@ def run_once(args, name, workload):
     command += ["--cycles", workload.get("cycles", CAP)]
     for line in workload["console"]:
         command += ["--console", line]
+    if args.statistics:
+        command.append("--engine-statistics")
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     start = time.perf_counter()
     result = subprocess.run(command, capture_output=True)
@@ -136,6 +139,11 @@ def run_once(args, name, workload):
         sys.stderr.buffer.write(result.stderr[-2000:])
         sys.exit(f"{name}: the run failed")
     digest = hashlib.sha256(result.stdout + stopped.group(0)).hexdigest()[:16]
+    if args.statistics:
+        os.makedirs(args.statistics, exist_ok=True)
+        with open(os.path.join(args.statistics, name + ".txt"), "wb") as f:
+            f.write(b"".join(line + b"\n" for line in result.stderr.splitlines()
+                             if line.startswith(b"tier0")))
     origin = {"cycles": 0, "virtual_ns": 0}
     if workload.get("snapshot"):
         with open(paths["shell.json"]) as f:
@@ -148,14 +156,15 @@ def run_once(args, name, workload):
 
 def run(args):
     names = args.workloads or list(WORKLOADS)
-    baseline = {}
-    if args.compare:
-        with open(args.compare) as f:
-            baseline = json.load(f)["workloads"]
+    baselines = []
+    for path in args.compare or []:
+        with open(path) as f:
+            baselines.append((os.path.basename(path), json.load(f)["workloads"]))
     results = {}
     failed = False
     print(f"{'workload':8} {'guest cycles':>14} {'virtual s':>9} {'host s':>8} "
-          f"{'M cycles/s':>10} {'x real':>6} {'digest':>16}  vs baseline")
+          f"{'M cycles/s':>10} {'x real':>6} {'digest':>16}  vs "
+          + (", ".join(label for label, _ in baselines) or "baseline"))
     for name in names:
         runs = [run_once(args, name, WORKLOADS[name]) for _ in range(args.repeat)]
         digests = {r["digest"] for r in runs}
@@ -171,10 +180,12 @@ def run(args):
         if len(digests) > 1:
             note = "NONDETERMINISTIC " + ",".join(sorted(digests))
             failed = True
-        if name in baseline:
+        for label, baseline in baselines:
+            if name not in baseline:
+                continue
             old = baseline[name]
             if old["digest"] != best["digest"]:
-                note += f" DIGEST CHANGED (was {old['digest']})"
+                note += f" DIGEST CHANGED vs {label} (was {old['digest']})"
                 failed = True
             else:
                 note += f" {old['best_wall'] / best['wall']:.2f}x"
@@ -183,7 +194,8 @@ def run(args):
               f"{best['wall']:>8.2f} {rate:>10.1f} {real:>6.3f} {best['digest']:>16} {note}",
               flush=True)
     if args.save:
-        host = {"binary": args.binary, "cpu": cpu_model(), "kernel": os.uname().release,
+        host = {"binary": args.binary, "engine": args.engine, "cpu": cpu_model(),
+                "kernel": os.uname().release,
                 "repeat": args.repeat, "date": time.strftime("%Y-%m-%d %H:%M")}
         with open(args.save, "w") as f:
             json.dump({"host": host, "workloads": results}, f, indent=2)
@@ -211,6 +223,7 @@ def main():
     common.add_argument("--binary", default="build/pgo/ultraviolent")
     common.add_argument("--prom", default=os.path.join(FIRMWARE, "ip27prom.img"))
     common.add_argument("--io6prom", default=os.path.join(FIRMWARE, "io6prom.img"))
+    common.add_argument("--engine", default="reference", choices=["reference", "tier0"])
     commands = parser.add_subparsers(dest="command", required=True)
     fixture = commands.add_parser("fixture", parents=[common],
                                   help="build the fixture from an installed system")
@@ -220,7 +233,10 @@ def main():
     bench.add_argument("workloads", nargs="*", help=", ".join(WORKLOADS))
     bench.add_argument("--repeat", type=int, default=3)
     bench.add_argument("--save")
-    bench.add_argument("--compare")
+    bench.add_argument("--compare", action="append",
+                       help="a saved result to compare with (repeatable)")
+    bench.add_argument("--statistics", metavar="DIR",
+                       help="write each workload's tier-0 statistics to DIR/WORKLOAD.txt")
     args = parser.parse_args()
     os.chdir(REPO)
     unknown = set(getattr(args, "workloads", None) or []) - set(WORKLOADS)

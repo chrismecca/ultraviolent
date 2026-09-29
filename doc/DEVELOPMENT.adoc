@@ -185,7 +185,14 @@ scripts/bench.py fixture --from local/rc
 scripts/bench.py run --save local/bench/base.json          # before a change
 scripts/bench.py run --compare local/bench/base.json       # after: speedups, digests
 scripts/bench.py run --repeat 1 cpu fs                     # a quick subset
+scripts/bench.py run --engine tier0 --statistics local/bench/tier0-stats \
+    --compare local/bench/step2.json --compare local/bench/stageB.json
 ----
+
+`--engine tier0` runs the experimental tier-0 engine (IR.adoc); its digests must equal the
+reference's. `--compare` repeats: speedups are reported against each saved result, and a
+digest that differs from any of them fails the run. Keep the pre-stage-B reference results
+(`local/bench/step2.json`) as the performance baseline.
 
 The reported time is the best of `--repeat` runs, including process start and, for the
 shell workloads, loading the 560 MB snapshot (under a second). Frequency scaling and other
