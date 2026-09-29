@@ -883,10 +883,12 @@ Result Executor::execute() {
 } // namespace
 
 void Interpreter::step() {
+    cpu_.synchronize_host_pages();
     execute_cycle(cpu_);
 }
 
 void Interpreter::run_until(const std::uint64_t& limit) {
+    cpu_.synchronize_host_pages();
     while (cpu_.cycles() < limit) {
         execute_cycle(cpu_);
     }

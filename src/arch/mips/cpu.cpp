@@ -79,6 +79,7 @@ void Cpu::reset(ResetKind kind) {
             (cp0_.status | status::erl | status::sr | status::bev) & ~(status::ts | status::nmi);
         external_interrupts_ = 0;
         enter_reset_vector();
+        update_derived_state();
         tracer_.log(TraceCategory::exception, "soft reset");
         return;
     }
@@ -92,12 +93,14 @@ void Cpu::reset(ResetKind kind) {
     cp0_.error_epc = pc;
     cp0_.status = status::erl | status::bev;
     cp0_.config = config_.config;
-    cp0_.random = static_cast<std::uint32_t>(Tlb::entry_count - 1);
+    set_random(static_cast<std::uint32_t>(Tlb::entry_count - 1));
     cp0_.count_offset = static_cast<std::uint32_t>(0 - (cycles_ >> 1));
     external_interrupts_ = 0;
     timer_interrupt_ = false;
     watch_pending_ = false;
     enter_reset_vector();
+    schedule_timer();
+    update_derived_state();
 }
 
 void Cpu::nonmaskable_interrupt() {
@@ -106,11 +109,12 @@ void Cpu::nonmaskable_interrupt() {
     cp0_.status =
         (cp0_.status | status::erl | status::sr | status::bev | status::nmi) & ~status::ts;
     enter_reset_vector();
+    update_derived_state();
     tracer_.log(TraceCategory::exception, "nmi");
 }
 
 void Cpu::enter_reset_vector() {
-    ++translation_generation_;
+    invalidate_host_pages();
     state_.pc = reset_vector;
     state_.next_pc = reset_vector + 4;
     state_.delay_slot = false;
@@ -120,6 +124,32 @@ void Cpu::set_interrupt_level(std::uint32_t input, bool asserted) {
     invariant(input < external_interrupt_count, "R10000 has five external interrupts");
     const std::uint32_t mask = 1u << (input + 2);
     external_interrupts_ = asserted ? external_interrupts_ | mask : external_interrupts_ & ~mask;
+    update_derived_state();
+}
+
+std::uint32_t Cpu::random() const {
+    // Random decrements as instructions graduate, from 63 down to Wired, then continues from
+    // 63 (UM 14.2); a value at or below Wired is followed by 63. cp0_.random was the value
+    // when random_base_ instructions had retired.
+    constexpr std::uint64_t top = Tlb::entry_count - 1;
+    const std::uint64_t steps = retired() - random_base_;
+    const std::uint64_t start = cp0_.random;
+    const std::uint64_t wired = cp0_.wired;
+    const std::uint64_t to_top = start > wired ? start - wired + 1 : 1;
+    if (steps < to_top) {
+        return static_cast<std::uint32_t>(start - steps);
+    }
+    return static_cast<std::uint32_t>(top - (steps - to_top) % (top - wired + 1));
+}
+
+void Cpu::schedule_timer() {
+    // The next even cycle after this one at which (cycle / 2 + count_offset) mod 2^32, Count,
+    // equals Compare.
+    const std::uint64_t match = 2 * std::uint64_t{cp0_.compare - cp0_.count_offset};
+    timer_cycle_ = (cycles_ & ~(timer_period - 1)) + match;
+    if (timer_cycle_ <= cycles_) {
+        timer_cycle_ += timer_period;
+    }
 }
 
 std::expected<Translation, Exception> Cpu::translate(std::uint64_t address, AccessKind kind) {
@@ -299,6 +329,7 @@ std::expected<void, Exception> Cpu::check_watch(const Translation& translation, 
     if ((cp0_.status & (status::exl | status::erl)) != 0) {
         // Deferred until EXL and ERL are both clear; the reference still happens.
         watch_pending_ = true;
+        update_derived_state();
         return {};
     }
     return std::unexpected(Exception{.code = ExceptionCode::watch});
@@ -321,6 +352,7 @@ std::expected<std::uint64_t, Exception> Cpu::read(const Translation& translation
     }
     const PhysicalAddress address = bus_address(translation, width);
     auto value = bus_.read(address, width);
+    check_host_pages();
     if (!value) {
         // A read that receives an error response takes a bus error (UM 17 "Bus Error").
         tracer_.log(TraceCategory::memory, "read fault {:#x} width {} fault {}", address.value,
@@ -338,7 +370,9 @@ std::expected<void, Exception> Cpu::write(const Translation& translation, Access
         return watch;
     }
     const PhysicalAddress address = bus_address(translation, width);
-    if (auto result = bus_.write(address, width, value); !result) {
+    auto result = bus_.write(address, width, value);
+    check_host_pages();
+    if (!result) {
         // Only reads can take bus errors on the R10000 (UM 17 "Bus Error Exception" lists
         // read requests only). A refused write is lost; report it for diagnosis.
         tracer_.log(TraceCategory::memory, "write fault {:#x} width {} value {:#x} fault {}",
@@ -396,12 +430,7 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
         big_endian() != (bus_.byte_order() == ByteOrder::big)) {
         return;
     }
-    if (!host_pages_current()) {
-        code_pages_.fill({});
-        data_pages_.fill({});
-        host_pages_translation_generation_ = translation_generation_;
-        host_pages_bus_generation_ = bus_.generation();
-    }
+    check_host_pages();
     const std::uint64_t page = address & ~page_offset_mask;
     const PhysicalAddress frame{translation.address.value & ~page_offset_mask};
     if (kind == AccessKind::store) {
@@ -441,7 +470,7 @@ std::uint64_t Cpu::read_cp0(unsigned reg) const {
     case cp0::index:
         return cp0_.index;
     case cp0::random:
-        return cp0_.random;
+        return random();
     case cp0::entry_lo0:
         return cp0_.entry_lo0;
     case cp0::entry_lo1:
@@ -520,10 +549,11 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
         return;
     case cp0::wired:
         cp0_.wired = low & 0x3f;
-        cp0_.random = static_cast<std::uint32_t>(Tlb::entry_count - 1);
+        set_random(static_cast<std::uint32_t>(Tlb::entry_count - 1));
         return;
     case cp0::count:
         cp0_.count_offset = low - static_cast<std::uint32_t>(cycles_ >> 1);
+        schedule_timer();
         tracer_.log(TraceCategory::irq, "count = {:#x}", low);
         return;
     case cp0::entry_hi:
@@ -532,6 +562,7 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
     case cp0::compare:
         cp0_.compare = low;
         timer_interrupt_ = false;
+        schedule_timer();
         tracer_.log(TraceCategory::irq, "compare = {:#x} (count {:#x})", low, count());
         return;
     case cp0::status:
@@ -545,7 +576,7 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
         cp0_.epc = value;
         return;
     case cp0::config:
-        ++translation_generation_;
+        invalidate_host_pages();
         // hypothesis: only K0 is writable; the remaining fields are latched mode bits.
         cp0_.config = (cp0_.config & ~7u) | (low & 7u);
         return;
@@ -554,6 +585,7 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
         return;
     case cp0::watch_lo:
         cp0_.watch_lo = low & 0xffff'fffbu;
+        data_pages_.fill({}); // armed watchpoints need the full path
         watch_pending_ = false;
         return;
     case cp0::watch_hi:
@@ -607,10 +639,12 @@ void Cpu::mtc0(unsigned reg, std::uint64_t value) {
     // DMTC0 does; only MFC0 truncates. observed: IRIX loads EntryLo with MTC0, and the uncached
     // attribute of I/O mappings is in bits 63:62.
     write_cp0(reg, is_64bit_register(reg) ? value : value & 0xffff'ffff);
+    update_derived_state();
 }
 
 void Cpu::dmtc0(unsigned reg, std::uint64_t value) {
     write_cp0(reg, is_64bit_register(reg) ? value : value & 0xffff'ffff);
+    update_derived_state();
 }
 
 TlbEntry Cpu::tlb_entry_from_registers() const {
@@ -639,6 +673,7 @@ void Cpu::write_tlb(std::size_t index) {
     const bool conflict = invalidated != 0;
     // TS reports whether this write invalidated conflicting entries (UM 14.10).
     cp0_.status = conflict ? cp0_.status | status::ts : cp0_.status & ~status::ts;
+    update_derived_state();
     tracer_.log(TraceCategory::tlb, "write {} hi {:#x} lo0 {:#x} lo1 {:#x} mask {:#x}{}", index,
                 cp0_.entry_hi, cp0_.entry_lo0, cp0_.entry_lo1, cp0_.page_mask,
                 conflict ? " (conflict)" : "");
@@ -657,6 +692,7 @@ void Cpu::tlb_read() {
     const std::uint64_t g = entry.global ? entry_lo::g : 0;
     cp0_.page_mask = static_cast<std::uint32_t>(entry.page_mask);
     cp0_.entry_hi = entry.entry_hi;
+    update_derived_state();
     cp0_.entry_lo0 = entry.entry_lo0 | g;
     cp0_.entry_lo1 = entry.entry_lo1 | g;
 }
@@ -666,7 +702,7 @@ void Cpu::tlb_write_indexed() {
 }
 
 void Cpu::tlb_write_random() {
-    write_tlb(cp0_.random);
+    write_tlb(random());
 }
 
 std::uint64_t Cpu::exception_return() {
@@ -678,6 +714,7 @@ std::uint64_t Cpu::exception_return() {
         target = cp0_.epc;
         cp0_.status &= ~status::exl;
     }
+    update_derived_state();
     state_.ll_bit = false;
     return target;
 }
@@ -712,6 +749,7 @@ void Cpu::take_exception(const Exception& exception) {
                  (std::uint32_t{std::to_underlying(exception.code)} << cause::exc_code_shift) |
                  (std::uint32_t{exception.coprocessor} << cause::ce_shift);
     cp0_.status |= status::exl;
+    update_derived_state();
 
     const std::uint64_t base =
         (cp0_.status & status::bev) != 0 ? 0xffff'ffff'bfc0'0200 : 0xffff'ffff'8000'0000;
@@ -728,7 +766,7 @@ bool Cpu::take_pending_exception() {
     }
     if (watch_pending_) {
         watch_pending_ = false;
-        take_exception(Exception{.code = ExceptionCode::watch});
+        take_exception(Exception{.code = ExceptionCode::watch}); // updates the derived state
         return true;
     }
     const std::uint32_t pending = (cause_value() >> cause::ip_shift) & 0xff;
@@ -756,6 +794,7 @@ std::expected<void, Exception> Cpu::cache(unsigned operation, std::uint64_t addr
     cp0_.ecc = registers.ecc;
     if (ch) {
         cp0_.status = *ch ? cp0_.status | status::ch : cp0_.status & ~status::ch;
+        update_derived_state();
     }
     return {};
 }
@@ -763,7 +802,9 @@ std::expected<void, Exception> Cpu::cache(unsigned operation, std::uint64_t addr
 void Cpu::save_state(StateImage& image) const {
     image.put("cpu.integer", state_);
     image.put("cpu.fpu", fpu_);
-    image.put("cpu.cp0", cp0_);
+    Cp0Registers cp0 = cp0_;
+    cp0.random = random();
+    image.put("cpu.cp0", cp0);
     image.put("cpu.tlb", tlb_.entries());
     image.put("cpu.cycles", cycles_);
     image.put("cpu.external_interrupts", external_interrupts_);
@@ -785,7 +826,10 @@ void Cpu::load_state(const StateImage& image) {
     image.get("cpu.timer_interrupt", timer_interrupt_);
     image.get("cpu.watch_pending", watch_pending_);
     caches_.load_state(image);
-    ++translation_generation_;
+    invalidate_host_pages();
+    set_random(cp0_.random);
+    schedule_timer();
+    update_derived_state();
 }
 
 } // namespace ultraviolent::mips

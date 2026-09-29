@@ -295,4 +295,28 @@ const test::Registration random_decrements{
         t.check(wrapped, "wrapped at least once");
     }};
 
+const test::Registration random_counts_retirements{
+    "mips.random_counts_retired_instructions", [](test::Context& t) {
+        System s;
+        // A loop whose SYSCALL takes an exception every third cycle; the handler steps EPC
+        // past it and returns.
+        s.load(System::code, {syscall(), beq(zero, zero, -8), nop()});
+        s.load(0x180, {mfc0(k0, cp0::epc), addiu(k0, k0, 4), mtc0(k0, cp0::epc), eret()});
+        s.start_kernel();
+        s.cpu.mtc0(cp0::wired, 5);
+        // A cycle that takes an exception graduates no instruction, so Random holds (UM 14.2).
+        std::uint64_t expected = 63;
+        bool held = false;
+        for (int i = 0; i < 1000; ++i) {
+            s.interpreter.step();
+            if (s.pc() == testing::general_vector) {
+                held = true;
+            } else {
+                expected = expected <= 5 ? 63 : expected - 1;
+            }
+            t.check_equal(s.cpu.mfc0(cp0::random), expected);
+        }
+        t.check(held, "exceptions were taken");
+    }};
+
 } // namespace

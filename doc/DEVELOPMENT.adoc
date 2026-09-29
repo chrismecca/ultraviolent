@@ -151,6 +151,47 @@ To see the guest code behind a hot spot, histogram guest PCs with a short `--tra
 translate the PC through the snapshot's TLB if it is mapped, and disassemble the bytes that
 `tools/uvstate_memory.py` copies out of the snapshot.
 
+For source-line attribution, configure a separate build with frame pointers and debug
+information, and profile the benchmark workloads' commands:
+
+[source,shell]
+----
+cmake -S . -B build/prof -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING=OFF "-DCMAKE_CXX_FLAGS=-g -fno-omit-frame-pointer"
+cmake --build build/prof --target ultraviolent
+perf record -F 999 -g build/prof/ultraviolent ...
+perf report --no-children --stdio -g none --sort srcline \
+    --symbols 'ultraviolent::mips::Interpreter::run_until(unsigned long const&)'
+----
+
+== Benchmarks
+
+`scripts/bench.py` times fixed guest workloads (`scripts/bench.py --help` lists them): a PROM
+power-on, a cold boot of the installed disk to `login:`, and two workloads in a root shell
+(user-mode arithmetic in awk; find and sum over system directories). Each workload ends at a
+point the guest defines (a console `@stop`), so its guest cycle count and console output
+are the same on every run and every build; only host time varies. The digest of the output
+is the transparency check, and `--compare` fails if a digest changes.
+
+The fixture is built once from an installed system after a clean shutdown (the
+demonstration's work directory, for example) and holds copies of the user's private disk
+and firmware state. It lives outside the repository, on local disk (default
+`/var/tmp/ultraviolent-bench`):
+
+[source,shell]
+----
+scripts/build-pgo.sh
+scripts/bench.py fixture --from local/rc
+scripts/bench.py run --save local/bench/base.json          # before a change
+scripts/bench.py run --compare local/bench/base.json       # after: speedups, digests
+scripts/bench.py run --repeat 1 cpu fs                     # a quick subset
+----
+
+The reported time is the best of `--repeat` runs, including process start and, for the
+shell workloads, loading the 560 MB snapshot (under a second). Frequency scaling and other
+load on the host add noise of a few percent; compare builds on an otherwise idle host.
+Results are recorded in STATUS "Performance".
+
 == AsciiDoc
 
 Render documentation locally with:
