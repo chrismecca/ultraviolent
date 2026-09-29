@@ -4,7 +4,49 @@ Update this file at the end of every significant development session.
 
 == Current milestone
 
-M8 - Ethernet (acceptance met, 2026-09-28); RC-IP27 demonstrated clean end to end; tagging left
+Performance baseline (ROADMAP "After RC-IP27"; started 2026-09-28). The repository is public
+at RC-IP27 (the user chose no tag or release).
+
+* **Benchmark set:** `scripts/bench.py` (DEVELOPMENT "Benchmarks"): `prom` (power-on to the
+  PROM menu), `boot` (the installed disk from power-on to `login:`), `cpu` (an awk
+  arithmetic loop in a root shell), `fs` (find and sum over /usr/lib, /usr/bin, /usr/sbin).
+  Each ends where the guest says (console `@stop`), so cycles and output digests are the
+  same on every run and build.
+* **Baseline** (2026-09-28, profile-guided Clang build, i5-3470T, best of 2), in guest
+  cycles per host second and fraction of real time at 180 MHz:
++
+[cols="1,2,1,1,1"]
+|===
+| Workload | Guest cycles | Host s | M cycles/s | x real
+
+| prom | 8,133,653,960 | 145.7 | 55.8 | 0.31
+| boot | 16,375,106,269 | 345.1 | 47.4 | 0.26
+| cpu | 2,855,438,414 | 63.5 | 45.0 | 0.25
+| fs | 1,496,812,979 | 27.1 | 55.3 | 0.31
+|===
+* **Profile** (perf, `cpu` and `fs`): the interpreter is the time; devices barely register.
+  Most of each guest instruction is work independent of its operands: the interrupt check,
+  Count/Compare and Random bookkeeping, host-page validity checks, decode and nested
+  dispatch, and a 32-byte `std::expected<Control, Exception>` returned through memory.
+* **Done (transparent: digests unchanged, snapshots at the same cycle byte-identical to the
+  baseline build's):** (1) the interrupt check, the translation context, the Count/Compare
+  match cycle, and Random (derived from retirements) are kept up to date where their
+  inputs change instead of recomputed per instruction; (2) the host page caches are
+  flushed when translation or the bus mappings change (at the start of a run and after
+  each bus access) instead of validated per access, and arming a watchpoint drops the data
+  pages. Debug builds check both against the direct computation on every instruction.
+  Result (best of 2, `--compare` against the baseline): `prom` 1.16x (64.9 M cycles/s),
+  `boot` 1.23x (58.6), `cpu` 1.28x (57.6), `fs` 1.33x (73.7); a cold boot to `login:` now
+  takes 280 s of host time instead of 345.
+* **Tried and reverted:** keeping the bus byte order in `Cpu` instead of reading it through
+  the bus made `fs` 13% slower in an A/B of profile-guided builds (layout, not the work
+  saved). Run-to-run noise on this host is about 2.5%.
+* **Designed:** the Ultraviolent IR (doc/IR.adoc): decoded blocks as the unit of
+  translation for a fast interpreter (tier 0) and later micro-operations for the JIT
+  (tier 1), with the invalidation, cycle, and interrupt rules that keep them exactly
+  equivalent to the reference interpreter.
+
+Previous: M8 - Ethernet (acceptance met, 2026-09-28); RC-IP27 demonstrated clean end to end.
 
 * **A telnet login from another network to the installed, unmodified IRIX works**
   (addresses here are RFC 5737 documentation stand-ins for the user's network)
@@ -163,7 +205,10 @@ IRIX reports these and carries on:
   invalid NIC") and "Warning: Inventory table ID value is 0. Check Midplane NIC". Slate's
   node bus carries MODULEID and midplane NICs (OBS-SLATE-0004); our Hub's MicroLAN is empty.
 * "Some CPUs have old firmware. Please update node board flash proms."
-* The PROM's IOC3 diagnostics (serial DMA timeout, Ethernet PHY/SSRAM/NIC).
+* The PROM's IOC3 diagnostics (serial DMA timeout, Ethernet PHY/SSRAM/NIC). Because the
+  IOC3 fails its diagnostic, a cold boot stops at the System Maintenance Menu (`Option?`)
+  instead of autobooting; `1` starts the system (the demonstration and benchmark scripts
+  answer it).
 * The ESP event manager's profiles fail on first boot ("EMGR: System Error"); not examined.
 * CP0 register 25 (performance counters) is read by IRIX and not modeled (traced under `cpu`).
 * `hinv -mvv` prints two spaces before "rev" where slate prints one. The last 6 bytes of our
@@ -178,28 +223,22 @@ Housekeeping left from M0:
 == Next task
 
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
-The console, M8, and the clean RC-IP27 demonstration are done. What is left before the
-release is the tag (the user's) and adding its commit to the release notes.
+All but performance are done; the repository is public.
 
-. (Done 2026-09-28: the interactive console, `--interactive`.)
-. **Before the repository goes public** (the user's decisions where marked):
-.. License: MIT, `LICENSE` and README (2026-09-28).
-.. The user's network must not appear. `doc/STATUS.adoc` uses RFC 5737 stand-ins; re-scan
-   every file before publishing (`git grep` for the LAN prefix, the host name, home paths).
-.. History: done (2026-09-28). The one commit with a host-named author address and a
-   home-directory path (the unpushed tip, `significant PROM unblocking for core`) was
-   rebuilt with the user's address and the path removed; the pushed history had neither.
-   Rescan before publishing: `git log --all --format='%ae %ce'` and `git grep` over
-   `git rev-list --all` for home paths, the LAN prefix, the host name, and board serials.
-.. Private tooling stays in `local/` (ignored): kname.py, efs.py, slate-tn.py, snapshots,
-   disks, captures. `scripts/irix-install-discs.sh` names the user's media files; check it.
-.. Third-party sources consulted are documented in SOURCES.adoc; none are vendored.
-.. Release notes: doc/RELEASE-NOTES-RC-IP27.adoc (done 2026-09-28; add the commit/tag).
+. **Performance baseline, remaining:** re-profile and remove further accidental
+  bottlenecks only where the profile shows them (the remaining per-instruction cost is
+  mostly decode, dispatch, and result passing, which tier 0 removes). Then record the final
+  baseline with `scripts/bench.py run --repeat 3 --save`.
+. **JIT milestone, first step: tier 0** (doc/IR.adoc "Order of work"): decoded blocks run by
+  a fast interpreter, a lockstep mode against the reference interpreter, and the
+  invalidation rules for stores and DMA into code pages. The reference interpreter stays
+  the default until tier 0 passes lockstep over the benchmark workloads.
 . **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
   inventory ID). What the PROM reads there may also select the deskside slot table.
-. **Performance** after RC-IP27, as ROADMAP orders it (baseline, then a predecoded
-  interpreter and JIT toward VISION's host-speed target). Until then, only small
-  optimizations proven transparent (byte-identical snapshots).
+. **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.
+. Before any public announcement, rescan the tree and history for private data
+  (`git log --all --format='%ae %ce'`; `git grep` over `git rev-list --all` for home paths,
+  the LAN prefix, the host name, and board serials).
 
 How to reproduce the current state (all snapshots are git-ignored in `local/state/`; disk
 images in `local/disks/`). Snapshots taken before the BaseIO moved to Crossbow port 8
@@ -855,4 +894,27 @@ History cleaned: the unpushed tip commit rebuilt with the user's address and wit
   laser serials replaced with synthetic ones in code, tests, and docs; home-directory
   references removed from the docs.
 Next step: the tag; then Node NICs or performance.
+----
+
+----
+Date: 2026-09-28 (night)
+Milestone: Performance baseline
+Hypothesis: most interpreter time is per-instruction bookkeeping that can move out of the
+  loop without changing guest behavior.
+Evidence: perf over the `cpu` and `fs` workloads (build/prof, frame pointers): run_until
+  about 45%, Executor::execute and special about 25%, loads and stores about 15%; inside
+  run_until the interrupt check, end_cycle (Count/Compare, Random), the translation
+  context, and the host-page generation checks were each 3-7%.
+Changed: scripts/bench.py (fixture and workloads); Cpu keeps the interrupt check,
+  translation context, timer match cycle, and Random base up to date at their inputs;
+  host pages flush on change instead of validating per access; DEVELOPMENT "Benchmarks";
+  doc/IR.adoc.
+Tests: mips.random_counts_retired_instructions (Random over 1000 cycles with exceptions
+  against a step model); mips.count_compare_timer_wraps; debug builds check the cached
+  state every instruction (IRIX `fs` and PROM runs of 1.2-1.5 G cycles, no failures).
+Newly proven: 1.23-1.33x on IRIX workloads (boot 1.23x), 1.16x on the PROM, with identical
+  digests and byte-identical snapshots.
+Disproven: that caching the bus byte order in Cpu helps (13% slower on `fs`, reverted).
+Best checkpoint: unchanged (rc_alpha.remote_login).
+Next step: finish the baseline (final numbers), then tier 0 (doc/IR.adoc).
 ----

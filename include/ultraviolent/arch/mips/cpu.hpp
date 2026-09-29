@@ -274,11 +274,20 @@ class Cpu final : public InterruptSink {
     std::expected<std::uint32_t, Exception> fetch(std::uint64_t address) {
         const HostPage& page = code_pages_[host_page_slot(address)];
         if (page.page == (address & ~page_offset_mask) && address % 4 == 0 &&
-            page.context == translation_context() && host_pages_current()) [[likely]] {
+            page.context == translation_context()) [[likely]] {
+#ifndef NDEBUG
+            invariant(host_pages_current(), "stale host page");
+#endif
             return detail::load_word<std::uint32_t>(page.bytes + (address & page_offset_mask),
                                                     bus_.byte_order());
         }
         return fetch_slow(address);
+    }
+
+    // Called by execution engines before running instructions: the machine may have changed
+    // the bus mappings since the last run.
+    void synchronize_host_pages() {
+        check_host_pages();
     }
 
     // CP0 moves with the R10000 width rules (UM 14.26, Table 14-26).
@@ -309,13 +318,10 @@ class Cpu final : public InterruptSink {
     // At an instruction boundary: takes a pending interrupt or delayed watch exception.
     // Returns true when one was taken.
     bool service_pending_exceptions() {
-        if ((cp0_.status & (status::exl | status::erl)) != 0) {
-            return false;
-        }
-        const std::uint32_t pending = (cause_value() >> cause::ip_shift) & 0xff;
-        const std::uint32_t enabled = (cp0_.status >> status::im_shift) & 0xff;
-        if (!watch_pending_ && ((cp0_.status & status::ie) == 0 || (pending & enabled) == 0))
-            [[likely]] {
+#ifndef NDEBUG
+        invariant(exception_pending() == interrupt_check_, "stale interrupt check");
+#endif
+        if (!interrupt_check_) [[likely]] {
             return false;
         }
         return take_pending_exception();
@@ -324,15 +330,15 @@ class Cpu final : public InterruptSink {
     // Accounts one processor cycle; `retired` when an instruction completed in it.
     void end_cycle(bool retired) {
         ++cycles_;
-        // Count advances on every other cycle; IP[7] is set when it becomes equal to Compare.
-        if ((cycles_ & 1) == 0 && count() == cp0_.compare) {
-            timer_interrupt_ = true;
+        if (!retired) {
+            ++unretired_cycles_;
         }
-        if (retired) {
-            // Random decrements as instructions graduate, from 63 down to Wired (UM 14.2).
-            cp0_.random = cp0_.random <= cp0_.wired
-                              ? static_cast<std::uint32_t>(Tlb::entry_count - 1)
-                              : cp0_.random - 1;
+        // Count advances on every other cycle; IP[7] is set when it becomes equal to Compare,
+        // which next happens at timer_cycle_.
+        if (cycles_ == timer_cycle_) [[unlikely]] {
+            timer_interrupt_ = true;
+            timer_cycle_ += timer_period;
+            update_derived_state();
         }
     }
 
@@ -373,6 +379,36 @@ class Cpu final : public InterruptSink {
     [[nodiscard]] std::uint32_t count() const {
         return static_cast<std::uint32_t>(cycles_ >> 1) + cp0_.count_offset;
     }
+    // Cycles in which an instruction graduated.
+    [[nodiscard]] std::uint64_t retired() const {
+        return cycles_ - unretired_cycles_;
+    }
+    // Random (UM 14.2), derived from the instructions retired since cp0_.random was set.
+    [[nodiscard]] std::uint32_t random() const;
+    // Sets cp0_.random as of now.
+    void set_random(std::uint32_t value) {
+        cp0_.random = value;
+        random_base_ = retired();
+    }
+    // Count equals Compare every 2^32 Count increments, 2^33 cycles.
+    static constexpr std::uint64_t timer_period = std::uint64_t{1} << 33;
+    // Finds timer_cycle_ after Count, Compare, or the cycle count changed.
+    void schedule_timer();
+    // Whether an interrupt or delayed watch exception would be taken at the next boundary.
+    [[nodiscard]] bool exception_pending() const {
+        if ((cp0_.status & (status::exl | status::erl)) != 0) {
+            return false;
+        }
+        const std::uint32_t pending = (cause_value() >> cause::ip_shift) & 0xff;
+        const std::uint32_t enabled = (cp0_.status >> status::im_shift) & 0xff;
+        return watch_pending_ || ((cp0_.status & status::ie) != 0 && (pending & enabled) != 0);
+    }
+    // Recomputes what the per-instruction paths cache from Status, Cause, EntryHi, and the
+    // interrupt inputs. Every change to those calls it.
+    void update_derived_state() {
+        interrupt_check_ = exception_pending();
+        context_ = compute_translation_context();
+    }
     [[nodiscard]] std::uint32_t cause_value() const {
         std::uint32_t pending = external_interrupts_;
         if (timer_interrupt_) {
@@ -391,21 +427,45 @@ class Cpu final : public InterruptSink {
     // Data fast path: host bytes of recently used 4 KiB data pages, by virtual page.
     struct HostPage;
     [[nodiscard]] const HostPage* data_page(std::uint64_t address) const {
-        // Watchpoints need the full path.
-        if ((cp0_.watch_lo & 3) != 0 || !host_pages_current()) {
+        // No data page is filled while a watchpoint is armed (remember_page), and arming one
+        // drops them: watched accesses need the full path.
+        const HostPage& page = data_pages_[host_page_slot(address)];
+        if (page.page != (address & ~page_offset_mask) || page.context != translation_context()) {
             return nullptr;
         }
-        const HostPage& page = data_pages_[host_page_slot(address)];
-        return page.page == (address & ~page_offset_mask) && page.context == translation_context()
-                   ? &page
-                   : nullptr;
+#ifndef NDEBUG
+        invariant(host_pages_current() && (cp0_.watch_lo & 3) == 0, "stale host page");
+#endif
+        return &page;
     }
     // Everything besides the TLB that selects a translation: the mode and addressing bits of
     // Status (EXL, ERL, KSU, UX, SX, KX, RE) and the ASID.
     [[nodiscard]] std::uint64_t translation_context() const {
+#ifndef NDEBUG
+        invariant(context_ == compute_translation_context(), "stale translation context");
+#endif
+        return context_;
+    }
+    [[nodiscard]] std::uint64_t compute_translation_context() const {
         constexpr std::uint32_t mode_bits = status::exl | status::erl | status::ksu_mask |
                                             status::ux | status::sx | status::kx | status::re;
         return (cp0_.status & mode_bits) | (cp0_.entry_hi & entry_hi::asid_mask) << 32;
+    }
+    // Drops the host pages if translation or the bus mappings changed since they were filled.
+    // The bus changes only between runs or during a bus access, so this runs at the start of
+    // a run (synchronize_host_pages) and after every bus access (read, write).
+    void check_host_pages() {
+        if (!host_pages_current()) {
+            code_pages_.fill({});
+            data_pages_.fill({});
+            host_pages_translation_generation_ = translation_generation_;
+            host_pages_bus_generation_ = bus_.generation();
+        }
+    }
+    // Translation changed in a way the host pages cannot track.
+    void invalidate_host_pages() {
+        ++translation_generation_;
+        check_host_pages();
     }
     // Drops cached pages that TLB entries in `entries` (bit n: entry n) translated.
     void forget_tlb_pages(std::uint64_t entries);
@@ -438,6 +498,16 @@ class Cpu final : public InterruptSink {
     bool timer_interrupt_{};
     bool watch_pending_{};
 
+    // Per-instruction work kept out of the instruction loop; transparent (the same values
+    // the direct computation gives, which debug builds check). Measured: the interrupt
+    // check, Count/Compare, Random, and the translation context were about 20% of IRIX run
+    // time (perf, 2026-09-28).
+    std::uint64_t unretired_cycles_{};
+    std::uint64_t random_base_{};
+    std::uint64_t timer_cycle_{};
+    bool interrupt_check_{};
+    std::uint64_t context_{};
+
     // Host page caches: the host bytes of recently used 4 KiB virtual pages that translate
     // to plain memory in the bus byte order, one set for instruction fetch and one for loads
     // and stores, direct-mapped by virtual page. Data loads hit any entry; stores only
@@ -446,7 +516,8 @@ class Cpu final : public InterruptSink {
     // armed. Transparent: every hit returns or changes exactly what the full path would. An
     // entry is used only in the translation context it was filled in (translation_context());
     // a TLB write drops the entries its target and the entries it invalidated had mapped;
-    // everything is dropped when translation_generation_ or the bus generation changes.
+    // everything is dropped when translation_generation_ or the bus generation changes, as
+    // soon as it changes, so a hit needs no generation check.
     // Measured: translation and bus decode of fetches, loads, and stores were about 45% of
     // IP27 PROM run time (perf, 2026-09-26 and 2026-09-27); under IRIX, flushing on every
     // exception entry and return left most accesses on the full path (2026-09-27).

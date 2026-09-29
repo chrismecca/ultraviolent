@@ -80,6 +80,7 @@ Start here, in order:
 . `doc/ARCHITECTURE.adoc`
 . `doc/CORE.adoc`
 . `doc/MIPS.adoc`
+. `doc/IR.adoc`
 . `doc/IP27.adoc`
 . `doc/IP27-TARGET.adoc`
 . `doc/ROADMAP.adoc`

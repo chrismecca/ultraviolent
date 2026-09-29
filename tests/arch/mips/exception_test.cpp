@@ -281,6 +281,27 @@ const test::Registration timer_interrupt{
         t.check((s.cpu.mfc0(cp0::cause) & (0x80u << cause::ip_shift)) == 0, "IP7 cleared");
     }};
 
+const test::Registration timer_wraps{
+    "mips.count_compare_timer_wraps", [](test::Context& t) {
+        System s;
+        s.load(System::code, {beq(zero, zero, -4), nop()});
+        s.start_kernel(kseg0(System::code), status::kx);
+        s.cpu.mtc0(cp0::count, 0xffff'fffc);
+        s.cpu.mtc0(cp0::compare, 2);
+        // Count wraps through zero and sets IP7 when it becomes 2, not before.
+        bool set = false;
+        for (int i = 0; i < 20 && !set; ++i) {
+            s.interpreter.step();
+            set = (s.cpu.mfc0(cp0::cause) & (0x80u << cause::ip_shift)) != 0;
+            t.check(!set || s.cpu.mfc0(cp0::count) == 2, "IP7 set when Count equals Compare");
+        }
+        t.check(set, "IP7 set after the wrap");
+        // Another match needs 2^32 more increments.
+        s.cpu.mtc0(cp0::compare, 2);
+        s.interpreter.run(1000);
+        t.check((s.cpu.mfc0(cp0::cause) & (0x80u << cause::ip_shift)) == 0, "IP7 stays clear");
+    }};
+
 const test::Registration watch{"mips.watch_exception", [](test::Context& t) {
                                    System s;
                                    s.cpu.mtc0(cp0::watch_lo, System::data | 1); // trap on stores
