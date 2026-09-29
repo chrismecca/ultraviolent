@@ -69,6 +69,24 @@ at RC-IP27 (the user chose no tag or release).
   was 0.56-0.74x). The user's priority: oracle simplicity and one copy of the semantics
   over the reference being the fastest interpreter; tier 0 pays classification once per
   block.
+* **Stage D done (2026-09-29):** `build_block` and `Cpu::code_page` (no bus access), the
+  `OperationClass` table by opcode, `BlockEnd` and `NoBlock` reasons, the host-path barrier
+  flag (`Cpu::left_host_path`), and `static_assert`s that `DecodedInstruction` is 8 bytes and
+  trivially copyable. Tests: `mips.block.*` (every end, every state change, delay slots,
+  length limit, no block from device or unmapped code without touching the device) and the
+  whole differential suite run a second time on a block-stepping engine (build at block
+  entry, one operation per cycle, the executor's rules), plus self-modifying code
+  (mutation-checked).
+* **Performance comparisons** keep the pre-stage-B build as the baseline
+  (`local/bench/step2.json`: prom 64.9, boot 58.6, cpu 57.6, fs 73.7 M cycles/s) alongside the
+  current reference interpreter (`local/bench/stageB.json`: 49.7, 45.7, 45.0, 48.0). Target:
+  180 M cycles/s.
+* **Compiler note (2026-09-29):** one `gcc` preset build hit "cc1plus: internal compiler
+  error: Segmentation fault" and did not reproduce on rebuild or on a single-job rebuild of
+  the touched files. GCC 14.2.0 (Debian 14.2.0-19), `gcc` preset (Debug, `-std=c++23`, the
+  project warnings, no extra flags), parallel Ninja build on the 4-core reference host; the
+  translation unit was not identified. Investigate if it repeats, particularly in the same
+  translation unit.
 * **Stage C done (2026-09-29):** `Cpu::capture()` and equality on the CPU state types; the
   differential harness (`tests/arch/mips/differential.hpp`) and 13 differential tests over
   a predecoded engine. Mutation checks: removing the candidate's pending-exception service
@@ -257,9 +275,11 @@ All but performance are done; the repository is public.
   bottlenecks only where the profile shows them (the remaining per-instruction cost is
   mostly decode, dispatch, and result passing, which tier 0 removes). Then record the final
   baseline with `scripts/bench.py run --repeat 3 --save`.
-. **Review with the user** (stages A-C, and the stage B cost), then **tier 0 stage D**
-  (doc/IR.adoc "Stages"): block construction without caching, with the formation rules and
-  a table of block properties by operation.
+. **Tier 0 stage E** (doc/IR.adoc "Executor"): the block executor in the library, run from
+  the machine behind an experimental engine option (the reference stays the default),
+  with statistics (block lengths, operations per entry, fallback and termination reasons);
+  benchmark against the current reference and the pre-B baseline; differential suite; then
+  stop for the user's review before F.
 . **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
   inventory ID). What the PROM reads there may also select the deskside slot table.
 . **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.

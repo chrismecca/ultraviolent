@@ -5,6 +5,8 @@
 
 #include <array>
 #include <cstdint>
+#include <type_traits>
+#include <utility>
 
 namespace ultraviolent::mips {
 
@@ -156,6 +158,11 @@ struct DecodedInstruction {
     DecodedOpcode opcode{DecodedOpcode::reserved};
     Instruction instruction{};
 };
+
+// Dense on purpose (IR.adoc "DecodedInstruction"): blocks hold arrays of these, and per-operation
+// metadata lives in tables by opcode instead.
+static_assert(sizeof(DecodedInstruction) == 8);
+static_assert(std::is_trivially_copyable_v<DecodedInstruction>);
 
 namespace detail {
 
@@ -418,6 +425,45 @@ inline DecodedInstruction decode(std::uint32_t word) {
     const unsigned cop0 = i.rs() < 16 ? 160 + i.rs() : 176 + i.funct();
     index = op == 16 ? cop0 : index;
     return {.opcode = detail::operations[index], .instruction = i};
+}
+
+// What block construction needs to know about an operation (IR.adoc "Blocks"): metadata by
+// opcode, so DecodedInstruction stays dense.
+enum class OperationClass : std::uint8_t {
+    // Continues a block.
+    plain,
+    // A branch or jump: its delay slot belongs to the same block, which ends after the slot.
+    control,
+    // Changes translation, mode, interrupt state, or the caches (MTC0, DMTC0, ERET, TLBR,
+    // TLBWI, TLBWR, TLBP, CACHE), or orders memory (SYNC): the block ends after it.
+    state_change,
+    // Left to a reference step (reserved encodings, COP2): the block ends before it.
+    unsupported,
+};
+
+namespace detail {
+
+inline constexpr auto operation_classes = [] {
+    using enum DecodedOpcode;
+    std::array<OperationClass, std::to_underlying(reserved) + 1> table{};
+    for (const DecodedOpcode op :
+         {jr, jalr, bltz, bgez, bltzl, bgezl, bltzal, bgezal, bltzall, bgezall,
+          j,  jal,  beq,  bne,  blez,  bgtz,  beql,   bnel,   blezl,   bgtzl}) {
+        table[std::to_underlying(op)] = OperationClass::control;
+    }
+    for (const DecodedOpcode op : {mtc0, dmtc0, eret, tlbr, tlbwi, tlbwr, tlbp, cache, sync}) {
+        table[std::to_underlying(op)] = OperationClass::state_change;
+    }
+    for (const DecodedOpcode op : {reserved, cop0_reserved, cop2}) {
+        table[std::to_underlying(op)] = OperationClass::unsupported;
+    }
+    return table;
+}();
+
+} // namespace detail
+
+[[nodiscard]] constexpr OperationClass operation_class(DecodedOpcode opcode) {
+    return detail::operation_classes[std::to_underlying(opcode)];
 }
 
 // Executes `instruction`, located at `pc`, against the CPU: the MIPS semantics, shared by

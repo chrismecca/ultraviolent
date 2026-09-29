@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 
 namespace ultraviolent::mips {
@@ -286,6 +287,26 @@ class Cpu final : public InterruptSink {
         return fetch_slow(address);
     }
 
+    // Where instruction fetches at `address` would take the host fast path now: the host
+    // bytes of its 4 KiB virtual page, in the bus byte order, for building decoded blocks
+    // (IR.adoc "Blocks"). Empty when a fetch there would fault or go through the bus.
+    // Translates and consults the memory map only: no bus access, no architectural effect.
+    struct CodePage {
+        const std::byte* bytes;
+        ByteOrder order;
+    };
+    [[nodiscard]] std::optional<CodePage> code_page(std::uint64_t address);
+
+    // Set by every access that reaches the bus (read, write): the access left the host fast
+    // path and may have synchronized devices. Execution engines clear it before an
+    // instruction and treat it as a barrier after (IR.adoc "Slow bus paths are barriers").
+    [[nodiscard]] bool left_host_path() const {
+        return left_host_path_;
+    }
+    void clear_left_host_path() {
+        left_host_path_ = false;
+    }
+
     // Called by execution engines before running instructions: the machine may have changed
     // the bus mappings since the last run.
     void synchronize_host_pages() {
@@ -523,6 +544,7 @@ class Cpu final : public InterruptSink {
     std::uint32_t external_interrupts_{};
     bool timer_interrupt_{};
     bool watch_pending_{};
+    bool left_host_path_{};
 
     // Per-instruction work kept out of the instruction loop; transparent (the same values
     // the direct computation gives, which debug builds check). Measured: the interrupt
