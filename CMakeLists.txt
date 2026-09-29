@@ -39,6 +39,7 @@ add_library(ultraviolent_mips
     src/arch/mips/cpu.cpp
     src/arch/mips/fpu.cpp
     src/arch/mips/interpreter.cpp
+    src/arch/mips/semantics.cpp
     src/arch/mips/tlb.cpp
 )
 
