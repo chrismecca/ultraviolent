@@ -57,6 +57,22 @@ at RC-IP27 (the user chose no tag or release).
   `mips.count_and_random_at_each_cycle`); the scheduler invariant, enforced in
   `Ip27Machine::synchronize_time` and tested by `ip27.events_run_at_cycle_boundaries`; the
   writable span contract on `AddressSpace::writable_memory_bytes`.
+* **Stage B done (2026-09-29):** `decode` (a branchless lookup into one 240-entry table) and
+  `execute` (the semantics, moved verbatim into one switch on the operation), shared
+  `complete_cycle`; the reference interpreter is fetch, decode, complete_cycle. Guest
+  behavior unchanged: 3 million random words from random states stepped identically on the
+  previous interpreter and this one (a scratch harness compiling both), and every benchmark
+  digest matches. **Cost:** the reference interpreter is slower, now that classifying and
+  executing are separate data-dependent steps: `prom` 0.77x, `boot` 0.78x, `cpu` 0.78x, `fs`
+  0.65x of the previous build (profile-guided, best of 2; 49.7, 45.7, 45.0, 48.0 M
+  cycles/s). IR.adoc "DecodedInstruction" records the investigation (the first 24-byte shape
+  was 0.56-0.74x). The user's priority: oracle simplicity and one copy of the semantics
+  over the reference being the fastest interpreter; tier 0 pays classification once per
+  block.
+* **Stage C done (2026-09-29):** `Cpu::capture()` and equality on the CPU state types; the
+  differential harness (`tests/arch/mips/differential.hpp`) and 13 differential tests over
+  a predecoded engine. Mutation checks: removing the candidate's pending-exception service
+  fails two tests with the exact cycle and difference.
 
 Previous: M8 - Ethernet (acceptance met, 2026-09-28); RC-IP27 demonstrated clean end to end.
 
@@ -241,11 +257,9 @@ All but performance are done; the repository is public.
   bottlenecks only where the profile shows them (the remaining per-instruction cost is
   mostly decode, dispatch, and result passing, which tier 0 removes). Then record the final
   baseline with `scripts/bench.py run --repeat 3 --save`.
-. **Tier 0, stages B and C** (doc/IR.adoc "Stages"): B, `DecodedInstruction`, `decode`,
-  `execute`, and `apply_flow`, used by the reference interpreter (digests and snapshots
-  unchanged, speed measured); C, `Cpu::capture()`, the differential harness, and single
-  decoded instructions against the reference interpreter. Then stop for the user's review
-  before stage D (block construction).
+. **Review with the user** (stages A-C, and the stage B cost), then **tier 0 stage D**
+  (doc/IR.adoc "Stages"): block construction without caching, with the formation rules and
+  a table of block properties by operation.
 . **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
   inventory ID). What the PROM reads there may also select the deskside slot table.
 . **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.
@@ -930,4 +944,24 @@ Newly proven: 1.23-1.33x on IRIX workloads (boot 1.23x), 1.16x on the PROM, with
 Disproven: that caching the bus byte order in Cpu helps (13% slower on `fs`, reverted).
 Best checkpoint: unchanged (rc_alpha.remote_login).
 Next step: finish the baseline (final numbers), then tier 0 (doc/IR.adoc).
+----
+
+----
+Date: 2026-09-29
+Milestone: Performance baseline / tier 0, stages A-C
+Hypothesis: decoding can be separated from the instruction semantics without changing
+  guest behavior, and a candidate engine can be checked cycle by cycle against the
+  reference interpreter.
+Evidence: boundary tests of the reference (run limit lowered during an access, interrupt
+  raised during an access, Count and Random positions); the scheduler invariant enforced
+  and tested; 3 million random words identical between the old and new interpreter; 13
+  differential tests; benchmark digests unchanged.
+Changed: doc/IR.adoc (rules, representation, stages); Ip27Machine scheduler invariant;
+  decoded.hpp (DecodedInstruction, decode, apply_flow, complete_cycle); semantics.cpp;
+  interpreter.cpp; Cpu::capture and state equality; tests/arch/mips/boundary_test.cpp,
+  differential.hpp, differential_test.cpp; ip27.events_run_at_cycle_boundaries.
+Disproven: that pre-extracting fields into a 24-byte decoded structure is cheap (0.56-0.74x;
+  replaced by 8 bytes: operation and word).
+Best checkpoint: unchanged (rc_alpha.remote_login).
+Next step: review A-C with the user; then stage D.
 ----

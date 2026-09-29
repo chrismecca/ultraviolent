@@ -108,6 +108,7 @@ struct IntegerState {
     // The instruction at pc is in a branch delay slot.
     bool delay_slot{};
     bool ll_bit{};
+    friend bool operator==(const IntegerState&, const IntegerState&) = default;
 };
 
 // Floating-point architectural state (UM 15.3, 15.4). Register numbering follows Status.FR:
@@ -117,6 +118,7 @@ struct FpuState {
     std::array<std::uint64_t, 32> fpr{};
     // FCSR, CP1 control register 31.
     std::uint32_t fcsr{};
+    friend bool operator==(const FpuState&, const FpuState&) = default;
 };
 
 // R10000 architectural CPU (ARCHITECTURE "The CPU is not the interpreter").
@@ -374,8 +376,32 @@ class Cpu final : public InterruptSink {
         std::uint32_t tag_lo{};
         std::uint32_t tag_hi{};
         std::uint64_t error_epc{};
+        friend bool operator==(const Cp0Registers&, const Cp0Registers&) = default;
     };
 
+  public:
+    // The architectural state, compared field by field to check one execution engine against
+    // another (IR.adoc "Correctness method"). The cache arrays, large, are compared in place
+    // through caches(). Host-side caches and derived values are not part of it.
+    struct State {
+        IntegerState integer;
+        FpuState fpu;
+        // Random as of now; Count through count_offset and cycles.
+        Cp0Registers cp0;
+        std::array<TlbEntry, Tlb::entry_count> tlb;
+        std::uint64_t cycles;
+        std::uint64_t retired;
+        std::uint32_t external_interrupts;
+        bool timer_interrupt;
+        bool watch_pending;
+        friend bool operator==(const State&, const State&) = default;
+    };
+    [[nodiscard]] State capture() const;
+    [[nodiscard]] const CacheArrays& caches() const {
+        return caches_;
+    }
+
+  private:
     [[nodiscard]] std::uint32_t count() const {
         return static_cast<std::uint32_t>(cycles_ >> 1) + cp0_.count_offset;
     }

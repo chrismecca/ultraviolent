@@ -1,0 +1,164 @@
+#pragma once
+
+// Differential testing of execution engines against the reference interpreter (IR.adoc
+// "Correctness method"): two identical CPU + RAM systems, no MMIO, one stepped by the
+// reference interpreter and one by the engine under test, compared after every cycle.
+
+#include "arch/mips/system.hpp"
+#include "support/test.hpp"
+
+#include <ultraviolent/arch/mips/decoded.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <format>
+#include <functional>
+#include <initializer_list>
+#include <string>
+#include <unordered_map>
+
+namespace ultraviolent::mips::testing {
+
+// The engine under test at stage C: instructions decoded once, ahead of execution, from the
+// programs a test loads, and executed through complete_cycle. It uses a decoded instruction
+// only where a fetch at pc would give the same word now; anything else (fetch faults, code it
+// did not decode) runs as a reference step. Later stages substitute blocks.
+class PredecodedEngine {
+  public:
+    explicit PredecodedEngine(Cpu& cpu) : cpu_{cpu}, fallback_{cpu} {}
+
+    void add(std::uint64_t virtual_address, std::uint32_t word) {
+        decoded_.insert_or_assign(virtual_address, decode(word));
+    }
+
+    void step() {
+        cpu_.synchronize_host_pages();
+        if (cpu_.service_pending_exceptions()) {
+            cpu_.end_cycle(false);
+            return;
+        }
+        const std::uint64_t pc = cpu_.state().pc;
+        if (const auto it = decoded_.find(pc); it != decoded_.end()) {
+            if (const auto word = cpu_.fetch(pc); word && *word == it->second.instruction.word) {
+                complete_cycle(cpu_, it->second);
+                ++decoded_steps;
+                return;
+            }
+        }
+        fallback_.step();
+        ++fallback_steps;
+    }
+
+    std::uint64_t decoded_steps{};
+    std::uint64_t fallback_steps{};
+
+  private:
+    Cpu& cpu_;
+    Interpreter fallback_;
+    std::unordered_map<std::uint64_t, DecodedInstruction> decoded_;
+};
+
+// The first difference between two systems' architectural state and memory, or empty.
+inline std::string difference(const System& a, const System& b) {
+    const Cpu::State x = a.cpu.capture();
+    const Cpu::State y = b.cpu.capture();
+    if (x.integer != y.integer) {
+        for (unsigned r = 0; r < 32; ++r) {
+            if (x.integer.gpr[r] != y.integer.gpr[r]) {
+                return std::format("gpr {}: {:#x} vs {:#x}", r, x.integer.gpr[r],
+                                   y.integer.gpr[r]);
+            }
+        }
+        return std::format("integer state: pc {:#x}/{:#x} next {:#x}/{:#x}", x.integer.pc,
+                           y.integer.pc, x.integer.next_pc, y.integer.next_pc);
+    }
+    if (x.fpu != y.fpu) {
+        return "fpu state";
+    }
+    if (x.cp0 != y.cp0) {
+        return "cp0 registers";
+    }
+    if (x.tlb != y.tlb) {
+        return "tlb";
+    }
+    if (x.cycles != y.cycles || x.retired != y.retired) {
+        return std::format("cycles {}/{} retired {}/{}", x.cycles, y.cycles, x.retired,
+                           y.retired);
+    }
+    if (x != y) {
+        return "interrupt or watch state";
+    }
+    if (!(a.cpu.caches() == b.cpu.caches())) {
+        return "cache arrays";
+    }
+    for (const auto& [left, right, name] :
+         {std::tuple{a.ram.bytes(), b.ram.bytes(), "ram"},
+          std::tuple{a.boot.bytes(), b.boot.bytes(), "boot"}}) {
+        if (std::memcmp(left.data(), right.data(), left.size()) != 0) {
+            std::size_t at = 0;
+            while (left[at] == right[at]) {
+                ++at;
+            }
+            return std::format("{} byte {:#x}", name, at);
+        }
+    }
+    return {};
+}
+
+// A reference system and a candidate system kept identical: every setup action is applied
+// to both, and the candidate's engine is told about every program loaded.
+struct Differential {
+    System reference;
+    System candidate;
+    PredecodedEngine engine{candidate.cpu};
+
+    // Applies `action` to both systems.
+    void both(const std::function<void(System&)>& action) {
+        action(reference);
+        action(candidate);
+    }
+
+    // Loads `words` at `physical` in both systems; the candidate decodes them at
+    // `virtual_address` (where the program will run).
+    void load(std::uint64_t physical, std::uint64_t virtual_address,
+              std::initializer_list<std::uint32_t> words) {
+        both([&](System& s) { s.load(physical, words); });
+        for (const std::uint32_t word : words) {
+            engine.add(virtual_address, word);
+            virtual_address += 4;
+        }
+    }
+
+    // A handler at every exception vector (BEV clear) that resumes after the faulting
+    // instruction.
+    void load_skip_handlers() {
+        for (const std::uint64_t vector : {0x000u, 0x080u, 0x180u}) {
+            load(vector, kseg0(vector),
+                 {assembler::dmfc0(assembler::k0, cp0::epc),
+                  assembler::daddiu(assembler::k0, assembler::k0, 4),
+                  assembler::dmtc0(assembler::k0, cp0::epc), assembler::eret()});
+        }
+    }
+
+    // Steps both systems `steps` cycles, calling `before` (on both) ahead of each cycle, and
+    // compares them after every cycle. Returns false at the first difference.
+    bool run(test::Context& t, std::uint64_t steps,
+             const std::function<void(std::uint64_t, System&)>& before = {}) {
+        for (std::uint64_t n = 0; n < steps; ++n) {
+            if (before) {
+                before(n, reference);
+                before(n, candidate);
+            }
+            reference.interpreter.step();
+            engine.step();
+            if (const std::string d = difference(reference, candidate); !d.empty()) {
+                t.check(false, std::format("cycle {} pc {:#x}: {}", n, reference.pc(), d));
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+} // namespace ultraviolent::mips::testing

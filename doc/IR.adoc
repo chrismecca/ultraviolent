@@ -1,7 +1,8 @@
 = Ultraviolent IR
 
 Status: design, reviewed with the user (2026-09-28). Stages A (this document and the
-boundary tests) and B (decode and shared semantics) are implemented; C-H are not.
+boundary tests), B (decode and shared semantics), and C (the differential harness) are
+implemented; D-H are not. Review with the user before D.
 
 This document designs the representation between the MIPS decoder and the fast execution
 engines (ARCHITECTURE "The CPU is not the interpreter", "Future JIT architecture"): what a
@@ -207,12 +208,17 @@ A block depends on the translation that found its bytes and on the bytes.
   cycles, retirements, interrupt inputs, timer and watch state, compared field by field.
   Raw `StateImage` bytes are not used for comparison because structure padding is
   unspecified; snapshots keep using `StateImage`.
-* **Differential tests** run two identical CPU + RAM systems (no MMIO), one on the reference
-  interpreter and one on the engine under test, from the same deterministic state, and
-  compare `capture()` and RAM after every step or block. MMIO is never executed twice.
-  Directed programs cover arithmetic, branches, branch-likely, delay slots, exceptions,
-  Count/Compare boundaries, Random retirement, CP0, loads and stores, and fetch faults;
-  seeded random sequences add breadth.
+* **Differential tests** (`tests/arch/mips/differential.hpp`) run two identical CPU + RAM
+  systems (no MMIO), one on the reference interpreter and one on the engine under test,
+  from the same deterministic state, and compare `capture()`, the cache arrays, and RAM
+  after every cycle, reporting the first difference. MMIO is never executed twice. Directed
+  programs cover arithmetic, 64-bit gating in User mode, branches, branch-likely, delay
+  slots, exceptions, coprocessor unusable, the FPU, Count/Compare boundaries, Random and TLB
+  writes, interrupt lines raised between cycles, loads and stores, and fetch faults; 60
+  seeded random programs add breadth. At stage C the engine under test is
+  `PredecodedEngine`: instructions decoded ahead of execution and run through
+  `complete_cycle`, falling back to a reference step wherever a fetch would not give the
+  decoded word. The tests also check that the decoded path ran (no unexpected fallbacks).
 * **Whole machine:** benchmark digests, and byte-identical snapshots at the same guest cycle.
   A full-machine lockstep mode with MMIO would need duplicated or restored machine state
   and is not planned.

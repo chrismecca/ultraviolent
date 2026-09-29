@@ -799,6 +799,20 @@ std::expected<void, Exception> Cpu::cache(unsigned operation, std::uint64_t addr
     return {};
 }
 
+Cpu::State Cpu::capture() const {
+    State state{.integer = state_,
+                .fpu = fpu_,
+                .cp0 = cp0_,
+                .tlb = tlb_.entries(),
+                .cycles = cycles_,
+                .retired = retired(),
+                .external_interrupts = external_interrupts_,
+                .timer_interrupt = timer_interrupt_,
+                .watch_pending = watch_pending_};
+    state.cp0.random = random();
+    return state;
+}
+
 void Cpu::save_state(StateImage& image) const {
     image.put("cpu.integer", state_);
     image.put("cpu.fpu", fpu_);

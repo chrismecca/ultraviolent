@@ -35,11 +35,15 @@ class CacheArrays {
     void save_state(StateImage& image) const;
     void load_state(const StateImage& image);
 
+    // Every array and its geometry, for comparing execution engines.
+    friend bool operator==(const CacheArrays&, const CacheArrays&) = default;
+
   private:
     // TagLo/TagHi images of a tag entry, holding only the fields the array stores.
     struct Tag {
         std::uint32_t lo{};
         std::uint32_t hi{};
+        friend bool operator==(const Tag&, const Tag&) = default;
     };
 
     [[nodiscard]] std::size_t secondary_set(std::uint64_t pa) const;

@@ -20,6 +20,7 @@ struct TlbEntry {
     // False when the entry cannot match: never written since power-on, or invalidated by a
     // conflicting write (UM 14.10 "TS").
     bool enabled{};
+    friend bool operator==(const TlbEntry&, const TlbEntry&) = default;
 };
 
 struct TlbLookup {
