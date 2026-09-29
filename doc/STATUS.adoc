@@ -94,6 +94,45 @@ at RC-IP27 (the user chose no tag or release).
   instructions (mostly branches whose delay slot cannot join); no code-changed exits;
   host-path barriers end 23% of block entries in the PROM-heavy workloads (prom, boot) and
   0.1-2.8% under IRIX (cpu, fs).
+* **Stage F done (2026-09-29):** the tier-0 block cache (direct-mapped, power of two,
+  `--tier0-cache-entries`, default 4096) with invalidation by code frame (MemoryBlock marks
+  and generations; claimed frames never writable through the host page cache), by TLB entry
+  (per-entry generations), by translation context (the key), and by the code epoch (Config,
+  reset, snapshot loads, remapping); hits run without fetch, decode, translation, or word
+  checks. Barriers classified (memory fill, device, uncached memory, code store, other).
+  Gates: 170 MIPS tests (the whole differential suite on 4096- and 2-entry caches;
+  `mips.block_cache.*`: reuse, collisions, aliases, TLB remap and unrelated writes, ASIDs,
+  self-modifying blocks, DMA between runs, a device access that writes the executing block,
+  a one-entry cache under the sanitizer, reset, snapshot load, remapping), mutation checks of
+  each mechanism, identical digests on all four workloads at every cache size, byte-identical
+  same-cycle snapshots and disks.
+* **Stage F measurements** (profile-guided, M cycles/s; versus the pre-B baseline and versus
+  the reference of the same build; 4096 entries, best of 2):
++
+[cols="1,1,1,1,1,1,1"]
+|===
+| Workload | M cycles/s | vs pre-B | vs reference | Hit rate | Operations per lookup | Barriers (share of entries)
+
+| prom | 59.7 | 0.92x | 1.29x | 100.00% | 4.21 | device 22.0%, memory fill 0.8%
+| boot | 52.4 | 0.89x | 1.20x | 98.97% | 3.81 | device 19.6%, memory fill 2.7%, other 0.2%
+| cpu | 54.2 | 0.94x | 1.21x | 99.91% | 6.05 | memory fill 0.1%
+| fs | 61.9 | 0.84x | 1.31x | 95.33% | 5.68 | memory fill 2.0%, other 0.7%, device 0.1%
+|===
++
+Misses at 4096 entries are almost all tag replacements (boot 1.0%, fs 4.6%); code-frame
+misses 0, TLB misses at most 0.1%, epoch misses a few thousand. Sweep (M cycles/s at 256,
+1K, 4K, 16K entries): prom 58.8, 59.3, 59.7, 59.9; boot 50.1, 51.9, 52.4, 52.4; cpu 51.8,
+54.2, 54.2, 54.8; fs 55.8, 58.2, 61.9, 63.9 (hit rate 83.4, 89.1, 95.3, 98.4%). With hit
+rates near 100% and speed barely moving, the remaining cost is executing cached operations
+(complete_cycle, ExecutionResult, the per-operation checks), not decoding. The reference
+interpreter of this build is 0.93-0.97x of stage E's (the barrier classification and frame
+lookup added to its slow paths). The PROM's barriers are synchronized device accesses, not
+memory fills, so removing transparent-RAM barriers would not help it.
+* **Found by the sanitizer preset (pre-existing):** `memcpy` with null pointers for empty
+  vectors when loading snapshot state (undefined even for zero bytes). Fixed in
+  `StateImage::get_sparse` (reached by a stage F test); still present in the ISP1020 and IOC3
+  `load_state` (`isp1020.cpp:830, 841`, `ioc3.cpp:476`, reached by
+  `ip27.snapshot_resumes_exactly`). UBSan reports do not fail tests.
 * **Performance comparisons** keep the pre-stage-B build as the baseline
   (`local/bench/step2.json`: prom 64.9, boot 58.6, cpu 57.6, fs 73.7 M cycles/s) alongside the
   current reference interpreter (`local/bench/stageB.json`: 49.7, 45.7, 45.0, 48.0). Target:
@@ -292,9 +331,10 @@ All but performance are done; the repository is public.
   bottlenecks only where the profile shows them (the remaining per-instruction cost is
   mostly decode, dispatch, and result passing, which tier 0 removes). Then record the final
   baseline with `scripts/bench.py run --repeat 3 --save`.
-. **Review with the user** (stages D and E, their statistics), then **tier 0 stage F**
-  (doc/IR.adoc "Keeping blocks valid"): the block cache with selective TLB invalidation,
-  frame generations, and memory-safe lifetime.
+. **Review with the user** (stage F and its measurements). Candidates from the evidence:
+  stage G (tier 0 as the default engine, the gates having passed) and stage H (the
+  per-operation execution cost: boundary checks, dispatch, ExecutionResult traffic),
+  since the cache now hits 95-100% and speed is set by execution, not decode.
 . **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
   inventory ID). What the PROM reads there may also select the deskside slot table.
 . **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.
@@ -1019,4 +1059,24 @@ Disproven: two test words in C's exception program were not what their comments 
   function.
 Best checkpoint: unchanged (rc_alpha.remote_login).
 Next step: review D and E with the user; then stage F.
+----
+
+----
+Date: 2026-09-29 (evening)
+Milestone: Performance baseline / tier 0, stage F
+Hypothesis: a direct-mapped block cache with generation-based invalidation removes fetch
+  and decode from the hot path without changing guest behavior.
+Evidence: 170 MIPS tests including the cache and invalidation suite; mutation checks of
+  frame marking, writable-page dropping, frame generations, TLB generations, and the epoch;
+  identical digests at four cache sizes; byte-identical same-cycle snapshots and disks.
+Changed: MemoryBlock frame marks and generations; AddressSpace write hooks, memory_frame,
+  code_writes; Cpu code-page frames, claim_code_frame, TLB generations, code epoch, bus
+  access classification; BlockInterpreter cache and statistics; --tier0-cache-entries;
+  bench.py --cache-entries; StateImage::get_sparse null memcpy.
+Newly proven: tier 0 with the cache is 1.20-1.31x the reference and 0.84-0.94x the pre-B
+  baseline; hit rates 95-100%; the PROM's barriers are device accesses.
+Disproven: that decode dominated the reference interpreter's cost (with decode nearly gone,
+  execution sets the speed).
+Best checkpoint: unchanged (rc_alpha.remote_login).
+Next step: review F with the user; then G or H.
 ----

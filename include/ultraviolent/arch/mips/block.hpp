@@ -46,17 +46,16 @@ inline constexpr std::size_t no_block_count = 3;
 // operations actually decoded.
 struct Block {
     std::uint64_t start_pc{};
-    // Host bytes of the code page and their byte order, as Cpu::code_page gave them: valid
-    // while execution stays on the host fast path.
-    const std::byte* page{};
-    ByteOrder order{ByteOrder::big};
+    // The code page as Cpu::code_page gave it: host bytes (valid while the code epoch holds),
+    // the frame, and the TLB entry that translated it.
+    Cpu::CodePage code{};
     BlockEnd end{BlockEnd::control_flow};
     std::vector<DecodedInstruction> operations;
 
     // The word now in memory for operation `index`.
     [[nodiscard]] std::uint32_t word_now(std::size_t index) const {
         const std::uint64_t offset = (start_pc & 0xfff) + 4 * index;
-        return ultraviolent::detail::load_word<std::uint32_t>(page + offset, order);
+        return ultraviolent::detail::load_word<std::uint32_t>(code.bytes + offset, code.order);
     }
 };
 

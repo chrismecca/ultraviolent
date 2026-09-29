@@ -122,13 +122,13 @@ class BlockSteppingEngine {
     bool in_block_{};
 };
 
-// The engine under test at stage E: the library's tier-0 executor, run for chunks of cycles
-// (DifferentialWith::run compares after each chunk).
-class Tier0Engine {
+// The engine under test from stage E: the library's tier-0 executor with a block cache of
+// `Entries`, run for chunks of cycles (DifferentialWith::run compares after each chunk).
+template <std::size_t Entries = BlockInterpreter::default_cache_entries> class Tier0EngineSized {
   public:
     static constexpr bool decodes_unsupported = false;
 
-    explicit Tier0Engine(Cpu& cpu) : interpreter_{cpu} {}
+    explicit Tier0EngineSized(Cpu& cpu) : interpreter_{cpu, Entries} {}
 
     void add(std::uint64_t /*virtual_address*/, std::uint32_t /*word*/) {}
 
@@ -205,6 +205,10 @@ template <class Engine> struct DifferentialWith {
     System reference;
     System candidate;
     Engine engine{candidate.cpu};
+    // For engines that run many cycles per call: the longest chunk between comparisons.
+    // Short random chunks stop blocks at arbitrary points; tests of cache statistics use
+    // long ones.
+    std::uint64_t max_chunk{37};
 
     // Applies `action` to both systems.
     void both(const std::function<void(System&)>& action) {
@@ -244,8 +248,9 @@ template <class Engine> struct DifferentialWith {
             // runs for every cycle of a chunk at its start, on both systems alike.
             std::mt19937_64 rng{steps};
             for (std::uint64_t n = 0; n < steps;) {
+                const std::uint64_t random_chunk = rng() % 4 == 0 ? 1 : 1 + rng() % 37;
                 const std::uint64_t chunk =
-                    std::min<std::uint64_t>(steps - n, rng() % 4 == 0 ? 1 : 1 + rng() % 37);
+                    std::min(steps - n, max_chunk <= 37 ? random_chunk : max_chunk);
                 if (before) {
                     for (std::uint64_t m = n; m < n + chunk; ++m) {
                         before(m, reference);
@@ -283,5 +288,8 @@ template <class Engine> struct DifferentialWith {
 };
 
 using Differential = DifferentialWith<PredecodedEngine>;
+using Tier0Engine = Tier0EngineSized<>;
+// Two entries: nearly every block change replaces an entry.
+using Tier0TinyCacheEngine = Tier0EngineSized<2>;
 
 } // namespace ultraviolent::mips::testing

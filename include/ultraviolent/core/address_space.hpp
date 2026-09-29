@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <utility>
 #include <variant>
@@ -116,13 +117,25 @@ class AddressSpace {
     [[nodiscard]] std::span<const std::byte> memory_bytes(PhysicalAddress address,
                                                           std::uint64_t size) const;
     // The same for writable memory: empty unless one read-write memory mapping covers the
-    // range. Writes through it are exactly the bus writes a CPU store would make.
+    // range. Writes through it are exactly the bus writes a CPU store would make. Obtaining
+    // the span counts as a write for code-frame tracking (MemoryBlock::note_write).
     // Contract (IR.adoc "Mutable memory spans"): write through the span synchronously, during
     // the operation that obtained it; do not keep it across a return to the scheduler, to CPU
     // execution, or to block construction. The CPU's own data page cache is the one retained
     // writable span, and the CPU invalidates it itself.
     [[nodiscard]] std::span<std::byte> writable_memory_bytes(PhysicalAddress address,
-                                                             std::uint64_t size) const;
+                                                             std::uint64_t size);
+    // The memory block and offset behind a memory-mapped address, for code-frame tracking.
+    struct MemoryFrame {
+        MemoryBlock* block;
+        std::uint64_t offset;
+    };
+    [[nodiscard]] std::optional<MemoryFrame> memory_frame(PhysicalAddress address) const;
+    // Writes through this space that touched a frame holding decoded code (write and
+    // writable_memory_bytes).
+    [[nodiscard]] std::uint64_t code_writes() const {
+        return code_writes_;
+    }
     // Changes whenever a mapping is added or replaced.
     [[nodiscard]] std::uint64_t generation() const {
         return generation_;
@@ -135,6 +148,8 @@ class AddressSpace {
         std::span<std::byte> bytes;
         MemoryAccess access;
         MmioTarget* write_target{};
+        MemoryBlock* block{};
+        std::uint64_t block_offset{};
     };
 
     struct Mapping {
@@ -154,6 +169,7 @@ class AddressSpace {
     // IP27 PROM runs (callgrind, 2026-09-24).
     mutable std::size_t last_hit_{};
     std::uint64_t generation_{};
+    std::uint64_t code_writes_{};
 };
 
 } // namespace ultraviolent
