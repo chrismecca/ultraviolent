@@ -207,4 +207,35 @@ const test::Registration erl_kuseg{"mips.erl_makes_kuseg_unmapped", [](test::Con
                                        t.check_equal(s.gpr(t0), std::uint64_t{55});
                                    }};
 
+const test::Registration fetch_after_remap{
+    "mips.fetch_sees_remap_and_stores", [](test::Context& t) {
+        // Instruction fetch must follow TLB changes and see code written by stores, whatever the
+        // engine caches (MIPS.adoc "Execution and time").
+        System s;
+        const std::uint64_t code_va = 0xffff'ffff'e000'0000;
+        s.load(0x8000, {addiu(t0, zero, 1), jr(ra), nop()});
+        s.load(0x9000, {addiu(t0, zero, 2), jr(ra), nop()});
+        write_entry(s, 0, code_va, lo(8), lo(9));
+        s.set(ra, kseg0(System::code));
+        s.load(System::code, {jal(0), nop()});
+        s.start_kernel(code_va);
+        s.interpreter.run(3);
+        t.check_equal(s.gpr(t0), std::uint64_t{1});
+
+        // Remap the even page to physical 0x9000 by rewriting only EntryLo0 and the entry, so
+        // the TLB write itself must invalidate anything derived from the old translation.
+        s.cpu.dmtc0(cp0::entry_lo0, lo(9));
+        s.cpu.mtc0(cp0::index, 0);
+        s.cpu.tlb_write_indexed();
+        s.jump(code_va);
+        s.interpreter.run(1);
+        t.check_equal(s.gpr(t0), std::uint64_t{2});
+
+        // A store into the code page is seen by the next fetch.
+        s.poke(0x9000, AccessWidth::bits32, addiu(t0, zero, 3));
+        s.jump(code_va);
+        s.interpreter.run(1);
+        t.check_equal(s.gpr(t0), std::uint64_t{3});
+    }};
+
 } // namespace

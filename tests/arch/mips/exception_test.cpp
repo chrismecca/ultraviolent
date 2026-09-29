@@ -213,10 +213,10 @@ const test::Registration cp0_moves{
         // UM Table 14-26.
         t.check_equal(s.gpr(t0), 0xffff'ffff'8000'0000u); // MFC0 sign-extends bit 31
         t.check_equal(s.gpr(t1), 0x0000'0001'8000'0000u);
-        t.check_equal(s.gpr(t2), 0xffff'ffff'8000'0000u); // MTC0 to a 64-bit register sign-extends
+        t.check_equal(s.gpr(t2), 0x0000'0001'8000'0000u); // MTC0 to a 64-bit register: rt63..0
         t.check_equal(s.gpr(t3), std::uint64_t{0});       // only IP[1:0] are writable
-        // EntryHi: the sign-extended value keeps R, VPN2 43:13, and ASID; bits 61:44 read zero.
-        t.check_equal(s.gpr(t4), 0xc000'0fff'8000'0000u);
+        // EntryHi keeps R, VPN2 43:13, and ASID of the full value.
+        t.check_equal(s.gpr(t4), 0x0000'0001'8000'0000u);
         t.check_equal(s.gpr(t5), std::uint64_t{0x0900}); // 32-bit register zero-extended by DMFC0
     }};
 

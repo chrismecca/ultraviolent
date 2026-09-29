@@ -21,6 +21,7 @@ add_library(ultraviolent_core
     src/core/interrupt.cpp
     src/core/invariant.cpp
     src/core/scheduler.cpp
+    src/core/state_image.cpp
     src/core/trace.cpp
     src/core/virtual_time.cpp
 )
@@ -34,6 +35,7 @@ ultraviolent_enable_warnings(ultraviolent_core)
 ultraviolent_enable_sanitizers(ultraviolent_core)
 
 add_library(ultraviolent_mips
+    src/arch/mips/cache_arrays.cpp
     src/arch/mips/cpu.cpp
     src/arch/mips/fpu.cpp
     src/arch/mips/interpreter.cpp
@@ -51,7 +53,23 @@ set_source_files_properties(src/arch/mips/fpu.cpp
 )
 
 add_library(ultraviolent_devices
+    src/devices/am29f080.cpp
+    src/devices/dp83840.cpp
+    src/devices/ioc3.cpp
+    src/devices/ioc3_ethernet.cpp
+    src/devices/isp1020.cpp
+    src/devices/m48t35.cpp
+    src/pci/pci.cpp
+    src/devices/bridge.cpp
+    src/devices/elsc.cpp
+    src/devices/i2c.cpp
+    src/devices/i2c_eeprom.cpp
+    src/devices/one_wire.cpp
     src/devices/pcf8584.cpp
+    src/devices/uart16550.cpp
+    src/devices/xbow.cpp
+    src/scsi/cdrom.cpp
+    src/scsi/disk.cpp
 )
 
 target_link_libraries(ultraviolent_devices PUBLIC ultraviolent_core)
@@ -59,6 +77,7 @@ ultraviolent_enable_warnings(ultraviolent_devices)
 ultraviolent_enable_sanitizers(ultraviolent_devices)
 
 add_library(ultraviolent_ip27
+    src/machines/ip27/directory_memory.cpp
     src/machines/ip27/hub.cpp
     src/machines/ip27/ip27_machine.cpp
     src/machines/ip27/prom_image.cpp
@@ -69,10 +88,16 @@ ultraviolent_enable_warnings(ultraviolent_ip27)
 ultraviolent_enable_sanitizers(ultraviolent_ip27)
 
 add_library(ultraviolent_backends
+    src/backends/console.cpp
+    src/backends/file_block_store.cpp
+    src/backends/stream_serial_sink.cpp
     src/backends/stream_trace_sink.cpp
+    src/backends/pcap_link.cpp
+    src/backends/tap_link.cpp
+    src/backends/terminal_input.cpp
 )
 
-target_link_libraries(ultraviolent_backends PUBLIC ultraviolent_core)
+target_link_libraries(ultraviolent_backends PUBLIC ultraviolent_core ultraviolent_devices)
 ultraviolent_enable_warnings(ultraviolent_backends)
 ultraviolent_enable_sanitizers(ultraviolent_backends)
 
@@ -103,6 +128,7 @@ if(BUILD_TESTING)
         tests/core/byte_order_test.cpp
         tests/core/interrupt_test.cpp
         tests/core/scheduler_test.cpp
+        tests/core/state_image_test.cpp
         tests/core/trace_test.cpp
         tests/core/virtual_time_test.cpp
     )
@@ -112,8 +138,10 @@ if(BUILD_TESTING)
     add_test(NAME core COMMAND core_tests)
 
     add_executable(mips_tests
+        tests/arch/mips/cache_test.cpp
         tests/arch/mips/integer_test.cpp
         tests/arch/mips/memory_test.cpp
+        tests/arch/mips/host_page_test.cpp
         tests/arch/mips/exception_test.cpp
         tests/arch/mips/fpu_test.cpp
         tests/arch/mips/tlb_test.cpp
@@ -124,14 +152,30 @@ if(BUILD_TESTING)
     add_test(NAME mips COMMAND mips_tests)
 
     add_executable(device_tests
+        tests/devices/am29f080_test.cpp
+        tests/devices/bridge_test.cpp
+        tests/devices/uart_test.cpp
+        tests/devices/elsc_test.cpp
+        tests/devices/i2c_eeprom_test.cpp
+        tests/devices/ioc3_test.cpp
+        tests/devices/ioc3_ethernet_test.cpp
+        tests/devices/isp1020_test.cpp
+        tests/devices/m48t35_test.cpp
+        tests/devices/one_wire_test.cpp
         tests/devices/pcf8584_test.cpp
+        tests/devices/xbow_test.cpp
+        tests/scsi/scsi_test.cpp
+        tests/backends/console_test.cpp
+        tests/backends/terminal_input_test.cpp
     )
-    target_link_libraries(device_tests PRIVATE ultraviolent_devices ultraviolent_test_support)
+    target_link_libraries(device_tests PRIVATE ultraviolent_devices ultraviolent_backends
+                                               ultraviolent_test_support)
     ultraviolent_enable_warnings(device_tests)
     ultraviolent_enable_sanitizers(device_tests)
     add_test(NAME devices COMMAND device_tests)
 
     add_executable(machine_tests
+        tests/machines/directory_memory_test.cpp
         tests/machines/hub_test.cpp
         tests/machines/ip27_test.cpp
     )

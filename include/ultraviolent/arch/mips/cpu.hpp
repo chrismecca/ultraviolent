@@ -1,16 +1,21 @@
 #pragma once
 
+#include <ultraviolent/arch/mips/cache_arrays.hpp>
 #include <ultraviolent/arch/mips/cp0.hpp>
 #include <ultraviolent/arch/mips/tlb.hpp>
 #include <ultraviolent/core/address.hpp>
 #include <ultraviolent/core/address_space.hpp>
 #include <ultraviolent/core/interrupt.hpp>
+#include <ultraviolent/core/invariant.hpp>
 #include <ultraviolent/core/reset.hpp>
+#include <ultraviolent/core/state_image.hpp>
 #include <ultraviolent/core/trace.hpp>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <span>
 
 namespace ultraviolent::mips {
 
@@ -66,11 +71,29 @@ constexpr std::uint64_t uncached_window(unsigned attribute) {
 }
 } // namespace system_address
 
+// The unsigned integer type of an access width.
+template <AccessWidth W> struct UnsignedOfWidth;
+template <> struct UnsignedOfWidth<AccessWidth::bits8> {
+    using type = std::uint8_t;
+};
+template <> struct UnsignedOfWidth<AccessWidth::bits16> {
+    using type = std::uint16_t;
+};
+template <> struct UnsignedOfWidth<AccessWidth::bits32> {
+    using type = std::uint32_t;
+};
+template <> struct UnsignedOfWidth<AccessWidth::bits64> {
+    using type = std::uint64_t;
+};
+template <AccessWidth W> using UnsignedOf = typename UnsignedOfWidth<W>::type;
+
 // Result of address translation.
 struct Translation {
     // System address as driven on the system interface; see system_address.
     PhysicalAddress address;
     bool uncached{};
+    // The TLB entry that mapped the address, or -1 for an unmapped segment.
+    std::int8_t tlb_index{-1};
 };
 
 // Integer architectural state that execution engines read and write directly.
@@ -151,12 +174,51 @@ class Cpu final : public InterruptSink {
     }
 
     // Modes and permissions (UM 16.1).
-    [[nodiscard]] OperatingMode mode() const;
-    [[nodiscard]] bool allows_64bit_operations() const;
-    [[nodiscard]] bool allows_mips4() const;
-    [[nodiscard]] bool coprocessor_usable(unsigned unit) const;
+    [[nodiscard]] OperatingMode mode() const {
+        if ((cp0_.status & (status::exl | status::erl)) != 0) {
+            return OperatingMode::kernel;
+        }
+        switch ((cp0_.status & status::ksu_mask) >> status::ksu_shift) {
+        case 0:
+            return OperatingMode::kernel;
+        case 1:
+            return OperatingMode::supervisor;
+        default:
+            // KSU = 3 is undefined; the R10000 implements it as User mode (UM 14.10).
+            return OperatingMode::user;
+        }
+    }
+    [[nodiscard]] bool allows_64bit_operations() const {
+        // UM 16.1 Table 16-1; 64-bit operations are always valid in Kernel mode (UM 17
+        // "Reserved Instruction Exception").
+        switch (mode()) {
+        case OperatingMode::kernel:
+            return true;
+        case OperatingMode::supervisor:
+            return (cp0_.status & status::sx) != 0;
+        case OperatingMode::user:
+            return (cp0_.status & status::ux) != 0;
+        }
+        return false;
+    }
+    [[nodiscard]] bool allows_mips4() const {
+        // XX matters only in User mode (UM 14.10).
+        return mode() != OperatingMode::user || (cp0_.status & status::xx) != 0;
+    }
+    [[nodiscard]] bool coprocessor_usable(unsigned unit) const {
+        invariant(unit < 3, "the R10000 has coprocessors 0-2");
+        if (unit == 0 && mode() == OperatingMode::kernel) {
+            return true;
+        }
+        return (cp0_.status & (status::cu0 << unit)) != 0;
+    }
     // Effective byte order of data and instruction references in the current mode.
-    [[nodiscard]] bool big_endian() const;
+    [[nodiscard]] bool big_endian() const {
+        const bool memory_big_endian = (cp0_.config & config_big_endian) != 0;
+        // RE reverses the byte order in User mode only (UM 14.10).
+        const bool reversed = mode() == OperatingMode::user && (cp0_.status & status::re) != 0;
+        return memory_big_endian != reversed;
+    }
 
     // Memory references. Alignment is the caller's concern for translate/read/write; load,
     // store, and fetch check natural alignment first.
@@ -165,16 +227,69 @@ class Cpu final : public InterruptSink {
                                                  AccessKind kind);
     std::expected<void, Exception> write(const Translation& translation, AccessWidth width,
                                          std::uint64_t value);
-    std::expected<std::uint64_t, Exception> load(std::uint64_t address, AccessWidth width);
+    std::expected<std::uint64_t, Exception> load(std::uint64_t address, AccessWidth width) {
+        const std::size_t size = byte_count(width);
+        if (const HostPage* page = data_page(address); page != nullptr && address % size == 0)
+            [[likely]] {
+            return load_unsigned(std::span{page->bytes + (address & page_offset_mask), size},
+                                 bus_.byte_order());
+        }
+        return load_slow(address, width);
+    }
     std::expected<void, Exception> store(std::uint64_t address, AccessWidth width,
-                                         std::uint64_t value);
-    std::expected<std::uint32_t, Exception> fetch(std::uint64_t address);
+                                         std::uint64_t value) {
+        const std::size_t size = byte_count(width);
+        if (const HostPage* page = data_page(address);
+            page != nullptr && page->writable_bytes != nullptr && address % size == 0) [[likely]] {
+            store_unsigned(std::span{page->writable_bytes + (address & page_offset_mask), size},
+                           value, bus_.byte_order());
+            return {};
+        }
+        return store_slow(address, width, value);
+    }
+    // load and store for a width known at compile time: the same semantics, with the fast
+    // path reduced to one host access (execution engines use these for the common opcodes).
+    template <AccessWidth W>
+    std::expected<std::uint64_t, Exception> load_as(std::uint64_t address) {
+        using Word = UnsignedOf<W>;
+        if (const HostPage* page = data_page(address);
+            page != nullptr && address % sizeof(Word) == 0) [[likely]] {
+            return detail::load_word<Word>(page->bytes + (address & page_offset_mask),
+                                           bus_.byte_order());
+        }
+        return load_slow(address, W);
+    }
+    template <AccessWidth W>
+    std::expected<void, Exception> store_as(std::uint64_t address, std::uint64_t value) {
+        using Word = UnsignedOf<W>;
+        if (const HostPage* page = data_page(address);
+            page != nullptr && page->writable_bytes != nullptr && address % sizeof(Word) == 0)
+            [[likely]] {
+            detail::store_word(page->writable_bytes + (address & page_offset_mask),
+                               static_cast<Word>(value), bus_.byte_order());
+            return {};
+        }
+        return store_slow(address, W, value);
+    }
+    std::expected<std::uint32_t, Exception> fetch(std::uint64_t address) {
+        const HostPage& page = code_pages_[host_page_slot(address)];
+        if (page.page == (address & ~page_offset_mask) && address % 4 == 0 &&
+            page.context == translation_context() && host_pages_current()) [[likely]] {
+            return detail::load_word<std::uint32_t>(page.bytes + (address & page_offset_mask),
+                                                    bus_.byte_order());
+        }
+        return fetch_slow(address);
+    }
 
     // CP0 moves with the R10000 width rules (UM 14.26, Table 14-26).
     [[nodiscard]] std::uint64_t mfc0(unsigned reg) const;
     [[nodiscard]] std::uint64_t dmfc0(unsigned reg) const;
     void mtc0(unsigned reg, std::uint64_t value);
     void dmtc0(unsigned reg, std::uint64_t value);
+
+    // CACHE (UM chapter 10) on `address`, after the caller has checked that CP0 is usable.
+    // Translation exceptions are those of a load.
+    std::expected<void, Exception> cache(unsigned operation, std::uint64_t address);
 
     // TLB instructions (UM 14.34-14.37).
     void tlb_probe();
@@ -193,10 +308,37 @@ class Cpu final : public InterruptSink {
 
     // At an instruction boundary: takes a pending interrupt or delayed watch exception.
     // Returns true when one was taken.
-    bool service_pending_exceptions();
+    bool service_pending_exceptions() {
+        if ((cp0_.status & (status::exl | status::erl)) != 0) {
+            return false;
+        }
+        const std::uint32_t pending = (cause_value() >> cause::ip_shift) & 0xff;
+        const std::uint32_t enabled = (cp0_.status >> status::im_shift) & 0xff;
+        if (!watch_pending_ && ((cp0_.status & status::ie) == 0 || (pending & enabled) == 0))
+            [[likely]] {
+            return false;
+        }
+        return take_pending_exception();
+    }
 
     // Accounts one processor cycle; `retired` when an instruction completed in it.
-    void end_cycle(bool retired);
+    void end_cycle(bool retired) {
+        ++cycles_;
+        // Count advances on every other cycle; IP[7] is set when it becomes equal to Compare.
+        if ((cycles_ & 1) == 0 && count() == cp0_.compare) {
+            timer_interrupt_ = true;
+        }
+        if (retired) {
+            // Random decrements as instructions graduate, from 63 down to Wired (UM 14.2).
+            cp0_.random = cp0_.random <= cp0_.wired
+                              ? static_cast<std::uint32_t>(Tlb::entry_count - 1)
+                              : cp0_.random - 1;
+        }
+    }
+
+    // Snapshot support (StateImage).
+    void save_state(StateImage& image) const;
+    void load_state(const StateImage& image);
 
   private:
     struct Cp0Registers {
@@ -228,8 +370,47 @@ class Cpu final : public InterruptSink {
         std::uint64_t error_epc{};
     };
 
-    [[nodiscard]] std::uint32_t count() const;
-    [[nodiscard]] std::uint32_t cause_value() const;
+    [[nodiscard]] std::uint32_t count() const {
+        return static_cast<std::uint32_t>(cycles_ >> 1) + cp0_.count_offset;
+    }
+    [[nodiscard]] std::uint32_t cause_value() const {
+        std::uint32_t pending = external_interrupts_;
+        if (timer_interrupt_) {
+            pending |= 1u << 7;
+        }
+        return cp0_.cause | (pending << cause::ip_shift);
+    }
+    bool take_pending_exception();
+
+    // Slow paths of load, store, and fetch: full translation and bus decode.
+    std::expected<std::uint64_t, Exception> load_slow(std::uint64_t address, AccessWidth width);
+    std::expected<void, Exception> store_slow(std::uint64_t address, AccessWidth width,
+                                              std::uint64_t value);
+    std::expected<std::uint32_t, Exception> fetch_slow(std::uint64_t address);
+
+    // Data fast path: host bytes of recently used 4 KiB data pages, by virtual page.
+    struct HostPage;
+    [[nodiscard]] const HostPage* data_page(std::uint64_t address) const {
+        // Watchpoints need the full path.
+        if ((cp0_.watch_lo & 3) != 0 || !host_pages_current()) {
+            return nullptr;
+        }
+        const HostPage& page = data_pages_[host_page_slot(address)];
+        return page.page == (address & ~page_offset_mask) && page.context == translation_context()
+                   ? &page
+                   : nullptr;
+    }
+    // Everything besides the TLB that selects a translation: the mode and addressing bits of
+    // Status (EXL, ERL, KSU, UX, SX, KX, RE) and the ASID.
+    [[nodiscard]] std::uint64_t translation_context() const {
+        constexpr std::uint32_t mode_bits = status::exl | status::erl | status::ksu_mask |
+                                            status::ux | status::sx | status::kx | status::re;
+        return (cp0_.status & mode_bits) | (cp0_.entry_hi & entry_hi::asid_mask) << 32;
+    }
+    // Drops cached pages that TLB entries in `entries` (bit n: entry n) translated.
+    void forget_tlb_pages(std::uint64_t entries);
+    // Records the page of a successful access to `address` (kind fetch, load, or store).
+    void remember_page(std::uint64_t address, const Translation& translation, AccessKind kind);
     [[nodiscard]] std::uint64_t read_cp0(unsigned reg) const;
     void write_cp0(unsigned reg, std::uint64_t value);
     [[nodiscard]] TlbEntry tlb_entry_from_registers() const;
@@ -250,11 +431,48 @@ class Cpu final : public InterruptSink {
     FpuState fpu_;
     Cp0Registers cp0_;
     Tlb tlb_;
+    CacheArrays caches_{config_.config};
     std::uint64_t cycles_{};
     // Latched external interrupt requests, Cause.IP[6:2].
     std::uint32_t external_interrupts_{};
     bool timer_interrupt_{};
     bool watch_pending_{};
+
+    // Host page caches: the host bytes of recently used 4 KiB virtual pages that translate
+    // to plain memory in the bus byte order, one set for instruction fetch and one for loads
+    // and stores, direct-mapped by virtual page. Data loads hit any entry; stores only
+    // entries a store filled from writable memory, since a store's translation can fault
+    // (TLB Modified) where a load's does not; no data entry is used while a watchpoint is
+    // armed. Transparent: every hit returns or changes exactly what the full path would. An
+    // entry is used only in the translation context it was filled in (translation_context());
+    // a TLB write drops the entries its target and the entries it invalidated had mapped;
+    // everything is dropped when translation_generation_ or the bus generation changes.
+    // Measured: translation and bus decode of fetches, loads, and stores were about 45% of
+    // IP27 PROM run time (perf, 2026-09-26 and 2026-09-27); under IRIX, flushing on every
+    // exception entry and return left most accesses on the full path (2026-09-27).
+    static constexpr std::uint64_t page_offset_mask = 0xfff;
+    struct HostPage {
+        std::uint64_t page{~std::uint64_t{0}};
+        const std::byte* bytes{};
+        std::byte* writable_bytes{};
+        std::uint64_t context{};
+        std::int8_t tlb_index{-1};
+    };
+    static constexpr std::size_t host_page_count = 64;
+    [[nodiscard]] bool host_pages_current() const {
+        return host_pages_translation_generation_ == translation_generation_ &&
+               host_pages_bus_generation_ == bus_.generation();
+    }
+    [[nodiscard]] static std::size_t host_page_slot(std::uint64_t address) {
+        return (address >> 12) % host_page_count;
+    }
+    std::array<HostPage, host_page_count> code_pages_{};
+    std::array<HostPage, host_page_count> data_pages_{};
+    std::uint64_t host_pages_translation_generation_{};
+    std::uint64_t host_pages_bus_generation_{};
+    // Changes whenever address translation may have changed in a way translation_context()
+    // and TLB-entry tracking do not capture: Config, reset, snapshot loads.
+    std::uint64_t translation_generation_{1};
 };
 
 } // namespace ultraviolent::mips

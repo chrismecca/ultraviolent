@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ultraviolent/core/state_image.hpp>
 #include <ultraviolent/core/trace.hpp>
 #include <ultraviolent/core/virtual_clock.hpp>
 #include <ultraviolent/core/virtual_time.hpp>
@@ -62,6 +63,13 @@ class Scheduler {
     // Returns the number of events fired. Not reentrant: callbacks must not advance time.
     std::size_t advance_to(VirtualTime limit);
     std::size_t advance_by(VirtualDuration delay);
+
+    // Snapshot support (StateImage): the current time and every pending event, keyed by event
+    // name. Loading requires a scheduler at time zero with the same events registered; the
+    // snapshot's pending events replace any already scheduled (for example by components
+    // that start running at power-on).
+    void save_state(StateImage& image) const;
+    void load_state(const StateImage& image);
 
   private:
     static constexpr std::size_t not_pending = std::numeric_limits<std::size_t>::max();

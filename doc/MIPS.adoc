@@ -53,6 +53,15 @@ about IP27.
   63. It is set to 63 at reset and whenever Wired is written (UM 14.2).
 * The machine turns cycles into virtual time using the processor clock frequency
   (`core/virtual_time.hpp`, `cycles_at` / `time_at_cycles`). The CPU never reads host time.
+* Host page caches (`Cpu` fetch, load, store) keep the host bytes of recently used virtual
+  pages that translate to plain memory. They are not a model of the R10000 caches and are
+  invisible to the guest: an entry is used only in the translation context it was filled in
+  (Status EXL, ERL, KSU, UX, SX, KX, RE and the ASID); a TLB write drops the pages its target
+  entry and the entries it invalidated had mapped; everything is dropped when Config, reset,
+  a snapshot load, or the address-space mappings change; stores use them only for pages a
+  store translated to writable memory, so TLB Modified still happens; data references skip
+  them while a watchpoint is armed.
+  Tests: `tests/arch/mips/host_page_test.cpp`, `mips.fetch_sees_remap_and_stores`.
 
 == Delay slots
 
@@ -218,7 +227,9 @@ model of a 64-bit bus.
 
 == CP0 registers
 
-UM 14. MFC0 sign-extends bit 31. MTC0 to a 64-bit register sign-extends bit 31. DMFC0 of a
+UM 14. MFC0 sign-extends bit 31. MTC0 to a 64-bit register writes all 64 bits of rt, as DMTC0
+does (Table 14-26: rd <- rt63..0; corrected 2026-09-28 after IRIX's TLB handler, which loads
+EntryLo with MTC0, lost the uncached attribute in bits 63:62). DMFC0 of a
 32-bit register zero-extends, and DMTC0 to one writes the low 32 bits (UM Table 14-26). The
 64-bit registers are EntryLo0/1, Context, BadVAddr, EntryHi, EPC, XContext, Diagnostic, and
 ErrorEPC.
@@ -242,17 +253,40 @@ ErrorEPC.
 |WatchLo / WatchHi |PAddr0, R, W / PAddr1. Writing WatchLo cancels a delayed watch.
 |XContext |PTEBase 63:37
 |FrameMask |bits 15:0
-|Diagnostic, TagLo, TagHi, ErrorEPC, ECC |stored. Diagnostic effects are not modeled.
+|Diagnostic, TagLo, TagHi, ErrorEPC |stored. Diagnostic effects are not modeled.
+|ECC |bits 9:0 (UM 14.21: a 10-bit register)
 |Performance counters (25), CacheErr (27), reserved (7, 23, 24, 31) |not modeled: read zero, writes ignored, both traced under `cpu`
 |===
 
 == Caches
 
-Caches are not modeled. Memory is always coherent, so cached and uncached references reach
-the same data. CACHE needs CP0 to be usable and otherwise has no effect. Consequences that a
-guest could observe: Index Load Tag does not return tag contents, and Hit Invalidate does not
-discard dirty data. `hypothesis`: firmware does not depend on either. Reopen this if PROM
-cache diagnostics show otherwise.
+Caching is not modeled: memory is always coherent, so cached and uncached references reach
+the same data, and loads, stores, and fetches never fill or consult a cache.
+
+The cache arrays are modeled as CACHE operations see them (UM chapter 10), because firmware
+diagnostics test them: the IP27 PROM's secondary cache test writes a pattern to each way's
+tag with Index Store Tag (S) and reads it back (`observed`: "Failed scache tag test (way 0)"
+while CACHE had no effect). `mips::CacheArrays` holds:
+
+* tag arrays: I and D (32 KB, two ways, 64- and 32-byte blocks) and S (size and block size
+  from Config SS and SB), each entry storing exactly the TagLo/TagHi fields of UM 10.5-10.10;
+  the primary LRU bits and the secondary MRU (way prediction) bits per set;
+* data arrays for Index Load/Store Data: a 36-bit instruction and parity bit (I), a word and
+  four parity bits (D), and doublewords with ten check bits per quadword (S); Index Store Data
+  (S) zeroes the other doubleword of the quadword (UM 10.22).
+
+CACHE translates its address like a load (TLB exceptions, no alignment check). Index
+operations select the entry from VA 13:5 or 13:6 (primary) or PA (secondary) and the way from
+bit 0. Hit operations compare stored tags with the PA. Invalidation follows UM 10.2-10.4 and
+10.11-10.16: state fields cleared, D StateMod set to Normal, secondary tag and PIdx rewritten
+from the PA and VA 13:12, the MRU bit pointed at the other way, primary subsets invalidated,
+Status.CH set on a secondary hit and cleared on a miss. Write-backs write nothing, because
+memory is always current.
+
+`hypothesis`: the secondary tag ECC that invalidation "generates" is written as zero (the
+algorithm is not documented). `hypothesis`: for secondary caches larger than 1 MB, the
+8K-entry MRU table uses the low 13 bits of the set index (UM Table 5-3 is only legible up to
+1 MB).
 
 == Floating point
 
@@ -318,7 +352,8 @@ Every `hypothesis` above, as a list for anyone with an R10000 system to confirm:
 . DMA and other agents do not clear the LL bit;
 . Config writable bits (K0 only);
 . undefined reset state is zero, and the TLB starts disabled;
-. CACHE has no observable effect;
+. CACHE touches only the cache arrays (loads and stores never fill them); invalidation writes a
+  zero tag ECC; MRU table index above 1 MB;
 . FR=0 single results keep the odd half;
 . both-quiet-NaN operands return fs;
 . denormal operands compute normally;
@@ -330,6 +365,6 @@ Every `hypothesis` above, as a list for anyone with an R10000 system to confirm:
 
 == Not modeled
 
-Performance counters, cache and ECC error exceptions, cache tag access through CACHE, the
+Performance counters, cache and ECC error exceptions, caching itself (see <<Caches>>), the
 ITLB (it is transparent to software, UM 16.3), branch prediction and the Diagnostic
 register's effects, and uncached-accelerated gathering.

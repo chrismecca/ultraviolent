@@ -89,6 +89,55 @@ std::size_t Scheduler::advance_by(VirtualDuration delay) {
     return advance_to(now() + delay);
 }
 
+namespace {
+
+struct SavedEvent {
+    std::uint64_t deadline;
+    std::uint64_t sequence;
+};
+
+} // namespace
+
+void Scheduler::save_state(StateImage& image) const {
+    // Snapshots identify events by name.
+    for (std::size_t i = 0; i < events_.size(); ++i) {
+        for (std::size_t j = i + 1; j < events_.size(); ++j) {
+            invariant(events_[i].name != events_[j].name, "snapshots need unique event names");
+        }
+    }
+    image.put("scheduler.now", now().nanoseconds);
+    image.put("scheduler.next_sequence", next_sequence_);
+    for (const Event& event : events_) {
+        if (event.heap_position != not_pending) {
+            image.put("scheduler.pending." + event.name,
+                      SavedEvent{event.deadline.nanoseconds, event.sequence});
+        }
+    }
+}
+
+void Scheduler::load_state(const StateImage& image) {
+    invariant(now() == VirtualTime{}, "load a snapshot into a fresh scheduler");
+    for (const std::uint32_t index : heap_) {
+        events_[index].heap_position = not_pending;
+    }
+    heap_.clear();
+    std::uint64_t now_ns = 0;
+    image.get("scheduler.now", now_ns);
+    clock_.advance_to(VirtualTime{now_ns});
+    image.get("scheduler.next_sequence", next_sequence_);
+    for (std::size_t i = 0; i < events_.size(); ++i) {
+        SavedEvent saved{};
+        if (image.get("scheduler.pending." + events_[i].name, saved)) {
+            Event& event = events_[i];
+            event.deadline = VirtualTime{saved.deadline};
+            event.sequence = saved.sequence;
+            heap_.push_back(static_cast<std::uint32_t>(i));
+            event.heap_position = heap_.size() - 1;
+            sift_up(event.heap_position);
+        }
+    }
+}
+
 const Scheduler::Event& Scheduler::event_at(EventId event) const {
     invariant(event.index < events_.size(), "unknown event");
     return events_[event.index];

@@ -110,6 +110,7 @@ void Cpu::nonmaskable_interrupt() {
 }
 
 void Cpu::enter_reset_vector() {
+    ++translation_generation_;
     state_.pc = reset_vector;
     state_.next_pc = reset_vector + 4;
     state_.delay_slot = false;
@@ -119,55 +120,6 @@ void Cpu::set_interrupt_level(std::uint32_t input, bool asserted) {
     invariant(input < external_interrupt_count, "R10000 has five external interrupts");
     const std::uint32_t mask = 1u << (input + 2);
     external_interrupts_ = asserted ? external_interrupts_ | mask : external_interrupts_ & ~mask;
-}
-
-OperatingMode Cpu::mode() const {
-    if ((cp0_.status & (status::exl | status::erl)) != 0) {
-        return OperatingMode::kernel;
-    }
-    switch ((cp0_.status & status::ksu_mask) >> status::ksu_shift) {
-    case 0:
-        return OperatingMode::kernel;
-    case 1:
-        return OperatingMode::supervisor;
-    default:
-        // KSU = 3 is undefined; the R10000 implements it as User mode (UM 14.10).
-        return OperatingMode::user;
-    }
-}
-
-bool Cpu::allows_64bit_operations() const {
-    // UM 16.1 Table 16-1; 64-bit operations are always valid in Kernel mode (UM 17 "Reserved
-    // Instruction Exception").
-    switch (mode()) {
-    case OperatingMode::kernel:
-        return true;
-    case OperatingMode::supervisor:
-        return (cp0_.status & status::sx) != 0;
-    case OperatingMode::user:
-        return (cp0_.status & status::ux) != 0;
-    }
-    return false;
-}
-
-bool Cpu::allows_mips4() const {
-    // XX matters only in User mode (UM 14.10).
-    return mode() != OperatingMode::user || (cp0_.status & status::xx) != 0;
-}
-
-bool Cpu::coprocessor_usable(unsigned unit) const {
-    invariant(unit < 3, "the R10000 has coprocessors 0-2");
-    if (unit == 0 && mode() == OperatingMode::kernel) {
-        return true;
-    }
-    return (cp0_.status & (status::cu0 << unit)) != 0;
-}
-
-bool Cpu::big_endian() const {
-    const bool memory_big_endian = (cp0_.config & config_big_endian) != 0;
-    // RE reverses the byte order in User mode only (UM 14.10).
-    const bool reversed = mode() == OperatingMode::user && (cp0_.status & status::re) != 0;
-    return memory_big_endian != reversed;
 }
 
 std::expected<Translation, Exception> Cpu::translate(std::uint64_t address, AccessKind kind) {
@@ -329,7 +281,8 @@ std::expected<Translation, Exception> Cpu::translate_mapped(std::uint64_t addres
     const std::uint64_t physical = (frame & ~(size - 1)) | (address & (size - 1));
     const bool uncached = is_uncached(static_cast<unsigned>((lo >> entry_lo::c_shift) & 7));
     return Translation{
-        PhysicalAddress{system_address_of(physical, uncached, lo >> entry_lo::uc_shift)}, uncached};
+        PhysicalAddress{system_address_of(physical, uncached, lo >> entry_lo::uc_shift)}, uncached,
+        static_cast<std::int8_t>(lookup->index)};
 }
 
 std::expected<void, Exception> Cpu::check_watch(const Translation& translation, AccessKind kind) {
@@ -388,13 +341,13 @@ std::expected<void, Exception> Cpu::write(const Translation& translation, Access
     if (auto result = bus_.write(address, width, value); !result) {
         // Only reads can take bus errors on the R10000 (UM 17 "Bus Error Exception" lists
         // read requests only). A refused write is lost; report it for diagnosis.
-        tracer_.log(TraceCategory::memory, "write fault {:#x} width {} fault {}", address.value,
-                    byte_count(width), std::to_underlying(result.error()));
+        tracer_.log(TraceCategory::memory, "write fault {:#x} width {} value {:#x} fault {}",
+                    address.value, byte_count(width), value, std::to_underlying(result.error()));
     }
     return {};
 }
 
-std::expected<std::uint64_t, Exception> Cpu::load(std::uint64_t address, AccessWidth width) {
+std::expected<std::uint64_t, Exception> Cpu::load_slow(std::uint64_t address, AccessWidth width) {
     if (address % byte_count(width) != 0) {
         return std::unexpected(
             Exception{.code = ExceptionCode::address_error_load, .bad_address = address});
@@ -403,11 +356,15 @@ std::expected<std::uint64_t, Exception> Cpu::load(std::uint64_t address, AccessW
     if (!translation) {
         return std::unexpected(translation.error());
     }
-    return read(*translation, width, AccessKind::load);
+    auto value = read(*translation, width, AccessKind::load);
+    if (value) {
+        remember_page(address, *translation, AccessKind::load);
+    }
+    return value;
 }
 
-std::expected<void, Exception> Cpu::store(std::uint64_t address, AccessWidth width,
-                                          std::uint64_t value) {
+std::expected<void, Exception> Cpu::store_slow(std::uint64_t address, AccessWidth width,
+                                               std::uint64_t value) {
     if (address % byte_count(width) != 0) {
         return std::unexpected(
             Exception{.code = ExceptionCode::address_error_store, .bad_address = address});
@@ -416,10 +373,53 @@ std::expected<void, Exception> Cpu::store(std::uint64_t address, AccessWidth wid
     if (!translation) {
         return std::unexpected(translation.error());
     }
-    return write(*translation, width, value);
+    auto result = write(*translation, width, value);
+    if (result) {
+        remember_page(address, *translation, AccessKind::store);
+    }
+    return result;
 }
 
-std::expected<std::uint32_t, Exception> Cpu::fetch(std::uint64_t address) {
+void Cpu::forget_tlb_pages(std::uint64_t entries) {
+    for (auto* pages : {&code_pages_, &data_pages_}) {
+        for (HostPage& page : *pages) {
+            if (page.tlb_index >= 0 && (entries >> page.tlb_index & 1) != 0) {
+                page = {};
+            }
+        }
+    }
+}
+
+void Cpu::remember_page(std::uint64_t address, const Translation& translation, AccessKind kind) {
+    constexpr std::uint64_t page_size = page_offset_mask + 1;
+    if ((kind != AccessKind::fetch && (cp0_.watch_lo & 3) != 0) ||
+        big_endian() != (bus_.byte_order() == ByteOrder::big)) {
+        return;
+    }
+    if (!host_pages_current()) {
+        code_pages_.fill({});
+        data_pages_.fill({});
+        host_pages_translation_generation_ = translation_generation_;
+        host_pages_bus_generation_ = bus_.generation();
+    }
+    const std::uint64_t page = address & ~page_offset_mask;
+    const PhysicalAddress frame{translation.address.value & ~page_offset_mask};
+    if (kind == AccessKind::store) {
+        const auto bytes = bus_.writable_memory_bytes(frame, page_size);
+        if (bytes.size() == page_size) {
+            data_pages_[host_page_slot(address)] = {page, bytes.data(), bytes.data(),
+                                                    translation_context(), translation.tlb_index};
+        }
+        return;
+    }
+    const auto bytes = bus_.memory_bytes(frame, page_size);
+    if (bytes.size() == page_size) {
+        (kind == AccessKind::fetch ? code_pages_ : data_pages_)[host_page_slot(address)] = {
+            page, bytes.data(), nullptr, translation_context(), translation.tlb_index};
+    }
+}
+
+std::expected<std::uint32_t, Exception> Cpu::fetch_slow(std::uint64_t address) {
     if (address % 4 != 0) {
         return std::unexpected(
             Exception{.code = ExceptionCode::address_error_load, .bad_address = address});
@@ -432,19 +432,8 @@ std::expected<std::uint32_t, Exception> Cpu::fetch(std::uint64_t address) {
     if (!word) {
         return std::unexpected(word.error());
     }
+    remember_page(address, *translation, AccessKind::fetch);
     return static_cast<std::uint32_t>(*word);
-}
-
-std::uint32_t Cpu::count() const {
-    return static_cast<std::uint32_t>(cycles_ >> 1) + cp0_.count_offset;
-}
-
-std::uint32_t Cpu::cause_value() const {
-    std::uint32_t pending = external_interrupts_;
-    if (timer_interrupt_) {
-        pending |= 1u << 7;
-    }
-    return cp0_.cause | (pending << cause::ip_shift);
 }
 
 std::uint64_t Cpu::read_cp0(unsigned reg) const {
@@ -535,6 +524,7 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
         return;
     case cp0::count:
         cp0_.count_offset = low - static_cast<std::uint32_t>(cycles_ >> 1);
+        tracer_.log(TraceCategory::irq, "count = {:#x}", low);
         return;
     case cp0::entry_hi:
         cp0_.entry_hi = value & entry_hi::writable;
@@ -542,6 +532,7 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
     case cp0::compare:
         cp0_.compare = low;
         timer_interrupt_ = false;
+        tracer_.log(TraceCategory::irq, "compare = {:#x} (count {:#x})", low, count());
         return;
     case cp0::status:
         cp0_.status = low & status::writable;
@@ -554,6 +545,7 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
         cp0_.epc = value;
         return;
     case cp0::config:
+        ++translation_generation_;
         // hypothesis: only K0 is writable; the remaining fields are latched mode bits.
         cp0_.config = (cp0_.config & ~7u) | (low & 7u);
         return;
@@ -578,7 +570,8 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
         cp0_.diagnostic = value;
         return;
     case cp0::ecc:
-        cp0_.ecc = low & 0xff;
+        // A 10-bit register (UM 14.21).
+        cp0_.ecc = low & 0x3ff;
         return;
     case cp0::tag_lo:
         cp0_.tag_lo = low;
@@ -610,7 +603,10 @@ std::uint64_t Cpu::dmfc0(unsigned reg) const {
 }
 
 void Cpu::mtc0(unsigned reg, std::uint64_t value) {
-    write_cp0(reg, is_64bit_register(reg) ? sign_extend_32(value) : value & 0xffff'ffff);
+    // UM Table 14-26: MTC0 to a 64-bit register copies all 64 bits of rt (rd <- rt63..0), as
+    // DMTC0 does; only MFC0 truncates. observed: IRIX loads EntryLo with MTC0, and the uncached
+    // attribute of I/O mappings is in bits 63:62.
+    write_cp0(reg, is_64bit_register(reg) ? value : value & 0xffff'ffff);
 }
 
 void Cpu::dmtc0(unsigned reg, std::uint64_t value) {
@@ -638,7 +634,9 @@ TlbEntry Cpu::tlb_entry_from_registers() const {
 }
 
 void Cpu::write_tlb(std::size_t index) {
-    const bool conflict = tlb_.write(index, tlb_entry_from_registers());
+    const std::uint64_t invalidated = tlb_.write(index, tlb_entry_from_registers());
+    forget_tlb_pages(invalidated | std::uint64_t{1} << index);
+    const bool conflict = invalidated != 0;
     // TS reports whether this write invalidated conflicting entries (UM 14.10).
     cp0_.status = conflict ? cp0_.status | status::ts : cp0_.status & ~status::ts;
     tracer_.log(TraceCategory::tlb, "write {} hi {:#x} lo0 {:#x} lo1 {:#x} mask {:#x}{}", index,
@@ -724,7 +722,7 @@ void Cpu::take_exception(const Exception& exception) {
     state_.delay_slot = false;
 }
 
-bool Cpu::service_pending_exceptions() {
+bool Cpu::take_pending_exception() {
     if ((cp0_.status & (status::exl | status::erl)) != 0) {
         return false;
     }
@@ -742,17 +740,52 @@ bool Cpu::service_pending_exceptions() {
     return false;
 }
 
-void Cpu::end_cycle(bool retired) {
-    ++cycles_;
-    // Count advances on every other cycle; IP[7] is set when it becomes equal to Compare.
-    if ((cycles_ & 1) == 0 && count() == cp0_.compare) {
-        timer_interrupt_ = true;
+std::expected<void, Exception> Cpu::cache(unsigned operation, std::uint64_t address) {
+    // Index operations use the virtual address (primary caches) or the translated physical
+    // address (secondary); Hit operations compare the physical address (UM 10.1).
+    auto translation = translate(address, AccessKind::load);
+    if (!translation) {
+        return std::unexpected(translation.error());
     }
-    if (retired) {
-        // Random decrements as instructions graduate, from 63 down to Wired (UM 14.2).
-        cp0_.random = cp0_.random <= cp0_.wired ? static_cast<std::uint32_t>(Tlb::entry_count - 1)
-                                                : cp0_.random - 1;
+    constexpr std::uint64_t physical_bits = (std::uint64_t{1} << 40) - 1;
+    CacheRegisters registers{cp0_.tag_lo, cp0_.tag_hi, cp0_.ecc};
+    const auto ch =
+        caches_.execute(operation, address, translation->address.value & physical_bits, registers);
+    cp0_.tag_lo = registers.tag_lo;
+    cp0_.tag_hi = registers.tag_hi;
+    cp0_.ecc = registers.ecc;
+    if (ch) {
+        cp0_.status = *ch ? cp0_.status | status::ch : cp0_.status & ~status::ch;
     }
+    return {};
+}
+
+void Cpu::save_state(StateImage& image) const {
+    image.put("cpu.integer", state_);
+    image.put("cpu.fpu", fpu_);
+    image.put("cpu.cp0", cp0_);
+    image.put("cpu.tlb", tlb_.entries());
+    image.put("cpu.cycles", cycles_);
+    image.put("cpu.external_interrupts", external_interrupts_);
+    image.put("cpu.timer_interrupt", timer_interrupt_);
+    image.put("cpu.watch_pending", watch_pending_);
+    caches_.save_state(image);
+}
+
+void Cpu::load_state(const StateImage& image) {
+    image.get("cpu.integer", state_);
+    image.get("cpu.fpu", fpu_);
+    image.get("cpu.cp0", cp0_);
+    std::array<TlbEntry, Tlb::entry_count> entries{};
+    if (image.get("cpu.tlb", entries)) {
+        tlb_.restore(entries);
+    }
+    image.get("cpu.cycles", cycles_);
+    image.get("cpu.external_interrupts", external_interrupts_);
+    image.get("cpu.timer_interrupt", timer_interrupt_);
+    image.get("cpu.watch_pending", watch_pending_);
+    caches_.load_state(image);
+    ++translation_generation_;
 }
 
 } // namespace ultraviolent::mips

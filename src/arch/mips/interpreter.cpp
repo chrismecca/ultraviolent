@@ -105,8 +105,8 @@ class Executor {
     Result regimm();
     Result cop0();
     Result branch(bool condition, bool likely = false);
-    Result load(AccessWidth width, bool sign_extend);
-    Result store(AccessWidth width);
+    template <AccessWidth W, bool SignExtend> Result load();
+    template <AccessWidth W> Result store();
     Result load_left_right(bool left, AccessWidth width);
     Result store_left_right(bool left, AccessWidth width);
     Result load_linked(AccessWidth width);
@@ -131,36 +131,27 @@ Result Executor::trap(bool condition) {
     return sequential();
 }
 
-Result Executor::load(AccessWidth width, bool sign_extend) {
-    auto value = cpu_.load(address(), width);
+template <AccessWidth W, bool SignExtend> Result Executor::load() {
+    auto value = cpu_.load_as<W>(address());
     if (!value) {
         return std::unexpected(value.error());
     }
     std::uint64_t result = *value;
-    if (sign_extend) {
-        switch (width) {
-        case AccessWidth::bits8:
+    if constexpr (SignExtend) {
+        if constexpr (W == AccessWidth::bits8) {
             result = sign_extend_8(result);
-            break;
-        case AccessWidth::bits16:
+        } else if constexpr (W == AccessWidth::bits16) {
             result = sign_extend_16(result);
-            break;
-        case AccessWidth::bits32:
+        } else if constexpr (W == AccessWidth::bits32) {
             result = sign_extend_32(result);
-            break;
-        case AccessWidth::bits64:
-            break;
         }
     }
     cpu_.set_gpr(i_.rt(), result);
     return sequential();
 }
 
-Result Executor::store(AccessWidth width) {
-    const std::uint64_t mask = width == AccessWidth::bits64
-                                   ? ~std::uint64_t{0}
-                                   : (std::uint64_t{1} << (8 * byte_count(width))) - 1;
-    if (auto result = cpu_.store(address(), width, rt() & mask); !result) {
+template <AccessWidth W> Result Executor::store() {
+    if (auto result = cpu_.store_as<W>(address(), static_cast<UnsignedOf<W>>(rt())); !result) {
         return std::unexpected(result.error());
     }
     return sequential();
@@ -251,7 +242,9 @@ Result Executor::store_left_right(bool left, AccessWidth width) {
 }
 
 Result Executor::load_linked(AccessWidth width) {
-    if (auto result = load(width, true); !result) {
+    auto result = width == AccessWidth::bits32 ? load<AccessWidth::bits32, true>()
+                                               : load<AccessWidth::bits64, false>();
+    if (!result) {
         return result;
     }
     // LLAddr is a scratch register on the R10000 and is not written (UM 14.15).
@@ -775,29 +768,29 @@ Result Executor::execute() {
     case 27:
         return load_left_right(false, AccessWidth::bits64); // LDR
     case 32:
-        return load(AccessWidth::bits8, true); // LB
+        return load<AccessWidth::bits8, true>(); // LB
     case 33:
-        return load(AccessWidth::bits16, true); // LH
+        return load<AccessWidth::bits16, true>(); // LH
     case 34:
         return load_left_right(true, AccessWidth::bits32); // LWL
     case 35:
-        return load(AccessWidth::bits32, true); // LW
+        return load<AccessWidth::bits32, true>(); // LW
     case 36:
-        return load(AccessWidth::bits8, false); // LBU
+        return load<AccessWidth::bits8, false>(); // LBU
     case 37:
-        return load(AccessWidth::bits16, false); // LHU
+        return load<AccessWidth::bits16, false>(); // LHU
     case 38:
         return load_left_right(false, AccessWidth::bits32); // LWR
     case 39:
-        return load(AccessWidth::bits32, false); // LWU
+        return load<AccessWidth::bits32, false>(); // LWU
     case 40:
-        return store(AccessWidth::bits8); // SB
+        return store<AccessWidth::bits8>(); // SB
     case 41:
-        return store(AccessWidth::bits16); // SH
+        return store<AccessWidth::bits16>(); // SH
     case 42:
         return store_left_right(true, AccessWidth::bits32); // SWL
     case 43:
-        return store(AccessWidth::bits32); // SW
+        return store<AccessWidth::bits32>(); // SW
     case 44:
         return store_left_right(true, AccessWidth::bits64); // SDL
     case 45:
@@ -808,7 +801,9 @@ Result Executor::execute() {
         if (!cpu_.coprocessor_usable(0)) {
             return unusable(0);
         }
-        // Caches are not modeled; see MIPS.adoc "Caches".
+        if (auto result = cpu_.cache(i_.rt(), address()); !result) {
+            return std::unexpected(result.error());
+        }
         return sequential();
     case 48:
         return load_linked(AccessWidth::bits32); // LL
@@ -820,36 +815,35 @@ Result Executor::execute() {
     case 52:
         return load_linked(AccessWidth::bits64); // LLD
     case 55:
-        return load(AccessWidth::bits64, false); // LD
+        return load<AccessWidth::bits64, false>(); // LD
     case 56:
         return store_conditional(AccessWidth::bits32); // SC
     case 60:
         return store_conditional(AccessWidth::bits64); // SCD
     case 63:
-        return store(AccessWidth::bits64); // SD
+        return store<AccessWidth::bits64>(); // SD
     default:
         return reserved();
     }
 }
 
-} // namespace
-
-void Interpreter::step() {
-    if (cpu_.service_pending_exceptions()) {
-        cpu_.end_cycle(false);
+// One processor cycle; Interpreter::step and Interpreter::run_until both inline it.
+[[gnu::always_inline]] inline void execute_cycle(Cpu& cpu) {
+    if (cpu.service_pending_exceptions()) {
+        cpu.end_cycle(false);
         return;
     }
-    IntegerState& s = cpu_.state();
-    auto word = cpu_.fetch(s.pc);
+    IntegerState& s = cpu.state();
+    auto word = cpu.fetch(s.pc);
     if (!word) {
-        cpu_.take_exception(word.error());
-        cpu_.end_cycle(false);
+        cpu.take_exception(word.error());
+        cpu.end_cycle(false);
         return;
     }
-    auto result = Executor{cpu_, Instruction{*word}}.execute();
+    auto result = Executor{cpu, Instruction{*word}}.execute();
     if (!result) {
-        cpu_.take_exception(result.error());
-        cpu_.end_cycle(false);
+        cpu.take_exception(result.error());
+        cpu.end_cycle(false);
         return;
     }
     switch (result->flow) {
@@ -883,7 +877,19 @@ void Interpreter::step() {
         s.delay_slot = false;
         break;
     }
-    cpu_.end_cycle(true);
+    cpu.end_cycle(true);
+}
+
+} // namespace
+
+void Interpreter::step() {
+    execute_cycle(cpu_);
+}
+
+void Interpreter::run_until(const std::uint64_t& limit) {
+    while (cpu_.cycles() < limit) {
+        execute_cycle(cpu_);
+    }
 }
 
 } // namespace ultraviolent::mips

@@ -4,14 +4,100 @@ Update this file at the end of every significant development session.
 
 == Current milestone
 
-M2 - Minimal IP27 reset machine (in progress)
+M8 - Ethernet (acceptance met, 2026-09-28); RC-IP27 demonstrated clean end to end; tagging left
 
-* The unmodified user PROM executes from the reset vector. It passes its Config self-check,
-  performs its Hub local-reset handshake, and reports LEDs 0x01 INITCPU and 0x02 TESTCP1.
-  Deterministic; no PC-specific code. Specification: `IP27.adoc`.
+* **A telnet login from another network to the installed, unmodified IRIX works**
+  (addresses here are RFC 5737 documentation stand-ins for the user's network)
+  (2026-09-28). The user's Mac (198.51.100.30, another segment, through the LAN router) ran
+  `telnet 203.0.113.250`, got "IRIX (IRIS) login:", logged in as root, and ran `uname -aR`
+  ("IRIX64 IRIS 6.5 6.5.30m 07202013 IP27") and `w` (ttyq0 from 198.51.100.30). This meets M8's
+  acceptance and the RC-IP27 definition.
+* The path: IRIX's own `ef` driver on the modeled IOC3 Ethernet and DP83840 PHY
+  (IP27.adoc "IOC3 Ethernet"; every BASEIO PROM Ethernet diagnostic passes), the TAP
+  backend (`--ethernet tap:uv0`), and proxy ARP on the host. Guest configuration
+  (persistent): `203.0.113.250 IRIS` in `/etc/hosts`, `netmask 0xffffff00` in
+  `/etc/config/ifconfig-1.options`, `$ROUTE $QUIET add default 203.0.113.1` in
+  `/etc/config/static-route.options`. Host configuration (the user's, runtime):
++
+----
+sudo ip tuntap add dev uv0 mode tap user $USER
+sudo ip link set uv0 up
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv4.conf.$LAN_IF.proxy_arp=1
+sudo sysctl -w net.ipv4.conf.uv0.proxy_arp=1
+sudo ip route replace 203.0.113.250/32 dev uv0 src 203.0.113.200
+----
++
+`observed`: the guest needs a default route to answer hosts on other segments. Without `src`,
+the host itself reaches the guest from `uv0`'s own address, which the guest cannot answer.
+* Also verified on the private link (192.168.77.0/24): ping in both directions, and a telnet
+  login from the host.
+* **The clean demonstration passed** (2026-09-28, `scripts/rc-ip27-demo.py`, 1.68 h): from a
+  blank disk, NVRAM, and flash, IRIX's tools installed the five discs (71 min, through the
+  `flash` exit command: "prom not flashed"), the installed system cold-booted, a telnet
+  session from the host over the TAP ran `uname -a`, `hinv`, `id`, `pwd`, `date`, and
+  `df -k`, and a file written before a clean shutdown was there after the next cold boot.
+  Timings are in doc/RELEASE-NOTES-RC-IP27.adoc "Performance".
+* Left for the RC-IP27 release (doc/RC-IP27.adoc): the commit/tag in the release notes.
+  Done: release notes (doc/RELEASE-NOTES-RC-IP27.adoc: asset hashes, toolchain, host, launch, network,
+  limitations); MIT license (`LICENSE`, README); hygiene scans of the working tree and the
+  history (no firmware, media, PDFs, or blobs over 64 KB ever committed; the private assets
+  and manuals are ignored; no private addresses); history cleaned (2026-09-28, below); the
+  reference machine's board serials replaced with synthetic ones.
+
+M7 - Multiuser system (acceptance met, 2026-09-28)
+
+* The installed IRIX 6.5.30 boots from power-on, with no input, to multiuser and
+  `IRIS console login:`. The PROM autoboots from the persisted NVRAM (`--nvram`,
+  `AutoLoad=Yes`). Root logs in on the serial console (no password; answer `vt100` to
+  "TERM = (vt100)").
+* Smoke tests pass: `hinv` (R10000 revision 3.4 at 180 MHz, 512 MB, both QL1040B
+  controllers, the disk and CD-ROM, two IOC3 serial ports, "Origin BASEIO board, module 1
+  slot 1"); `hinv -mvv` (slate's MIO and BASEIO board records at
+  `/hw/module/1/slot/io1/baseio`); `uname -a` ("IRIX64 IRIS 6.5 07202013 IP27"); `date`;
+  `df -k` (XFS root); `ps -ef`; `who -r` (run level 2); `cp -r` and `tar` of 89 files with
+  `sum`; `find`; `sort`; background jobs with `wait`; a subshell with `kill -0`.
+* Files written before a clean `shutdown -y -g0 -i0` are there after the next cold boot.
+  That boot prints no "Check the date" warning.
+* M6 - Installation: acceptance met (2026-09-27). IRIX's own tools labeled the blank disk
+  (`fx.64`), made the XFS root (mkfs from the miniroot), and `inst` installed from five of
+  the user's CD images (Overlays 1-3, Foundation 1-2). After `quit` and "Restart", the PROM
+  booted the installed kernel to `login:`, and the disk cold-boots (above). One file,
+  `/usr/lib32/mips4/libmp.so`, is a media defect in the user's Overlays 2 image (see the
+  session log).
+* M5 - IRIX kernel: acceptance met (2026-09-27). The unmodified install kernel boots
+  ("IRIX Release 6.5 IP27 Version 07202013"), initializes VM, discovers the Crossbow,
+  Bridge, both ISPs (interrupt-driven), the IOC3, and the disks, and mounts the miniroot.
+* M4 - Storage path: acceptance met (2026-09-27). The PROM discovers the SCSI devices, sash
+  reads the installation CD, and the kernel image loads without modification.
+
+M3 - Stable PROM environment: met except the IOC3 diagnostics (serial DMA diagnostic,
+Ethernet SSRAM, PHY, MAC NIC) the BASEIO PROM reports; the PROM reaches its System
+Maintenance Menu.
+
+* Done: the system controller's I²C arbitration and NVRAM (module number), the node's slot,
+  the Xtalk seam, the Crossbow, the BaseIO Bridge (registers, configuration space, device
+  windows), PCI headers for the IOC3 and two ISP1020s, 1-Wire NICs, the IOC3 UARTs, and a
+  deterministic console. The PROM's banner and messages come out of the emulated IOC3 UART
+  on standard output, and it reaches the interactive `POD IOC3 Dex>` prompt at 43.8 s of
+  virtual time (cold run). The Am29F080 flash is modeled and persists in a host file; with
+  the PROM log initialized (`go cac`, `initlog`), the BASEIO PROM runs its BaseIO device
+  diagnostics. Next: the ISP1020 (M4) and the IOC3's remaining devices (see Next task).
+
+* M2 - Minimal IP27 reset machine: acceptance met (2026-09-26). The unmodified user PROM runs
+  deterministically from the reset vector, with no PC-specific code: Hub local reset, cache
+  tests, memory sizing through the directory, the PROM copied to and running from memory,
+  NUMAlink discovery, module voting through the system controller's NVRAM, and POD mode at
+  31.8 s of virtual time. The milestone's "serial path required to observe
+  firmware" is IOC3 on BaseIO, because this PROM build disables the junk-bus UART
+  (`-DDISABLE_JUNKUART`, IP27.adoc "Processor"); that path is M3 work. Until then the PROM's
+  console text is read with the `--probe` diagnostic (IP27.adoc "Diagnostics").
+  Specification: `IP27.adoc`.
 
 * M1 - Reference R1x000 interpreter: deliverables implemented; `mips_tests` (77 cases) pass on
   every preset; no dependency on any machine (2026-09-24). Specification: `MIPS.adoc`.
+  Extended 2026-09-26 with the cache tag and data arrays that PROM diagnostics test
+  (MIPS.adoc "Caches"); 84 cases.
 * M0 - Clean core boots itself: deliverables implemented; acceptance commands pass on the
   reference Debian 13 host for the `dev`, `gcc`, `asan`, and `release` presets (2026-09-24).
 
@@ -50,7 +136,6 @@ Remote telnet login to an unmodified, installed IRIX guest.
 * partial-word bus transactions (uncached `SWL`/`SWR` and similar): not representable in
   `AddressSpace` yet; see `CORE.adoc`;
 * the R10000 behaviors listed in `MIPS.adoc` "Hypothesis checklist";
-* how the machine loop interleaves CPU cycles with scheduler events (M2);
 * exact chosen CPU revision/reset fields;
 * exact canonical IO6/XBOW widget mapping;
 * exact firmware image expectations;
@@ -59,7 +144,32 @@ Remote telnet login to an unmodified, installed IRIX guest.
 
 == Current blocker
 
-None. Housekeeping left from M0:
+None for the private link: the user created `uv0` (2026-09-28). For the LAN, see M8 above.
+The TAP interface, for reference (root):
+
+----
+sudo ip tuntap add dev uv0 mode tap user $USER
+sudo ip addr add 192.168.77.1/24 dev uv0
+sudo ip link set uv0 up
+----
+
+Then `--ethernet tap:uv0` plugs the guest in; inside it, `ifconfig ef0 inet 192.168.77.2
+netmask 255.255.255.0 up`. Reaching the LAN needs a bridge or routing on the host (the
+user's decision).
+
+IRIX reports these and carries on:
+
+* The module serial number ("Invalid serial number for module 1, possible missing or
+  invalid NIC") and "Warning: Inventory table ID value is 0. Check Midplane NIC". Slate's
+  node bus carries MODULEID and midplane NICs (OBS-SLATE-0004); our Hub's MicroLAN is empty.
+* "Some CPUs have old firmware. Please update node board flash proms."
+* The PROM's IOC3 diagnostics (serial DMA timeout, Ethernet PHY/SSRAM/NIC).
+* The ESP event manager's profiles fail on first boot ("EMGR: System Error"); not examined.
+* CP0 register 25 (performance counters) is read by IRIX and not modeled (traced under `cpu`).
+* `hinv -mvv` prints two spaces before "rev" where slate prints one. The last 6 bytes of our
+  part field are spaces; slate's may hold something else.
+
+Housekeeping left from M0:
 
 * `src/core/virtual_time.cpp` (empty translation unit) and `tests/core/core_test.cpp` (the
   original single-assertion test, CTest `core_test`) are superseded bootstrap placeholders.
@@ -67,36 +177,148 @@ None. Housekeeping left from M0:
 
 == Next task
 
-Continue M2 with the observation loop in `IP27.adoc` "Observation log".
+Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
+The console, M8, and the clean RC-IP27 demonstration are done. What is left before the
+release is the tag (the user's) and adding its commit to the release notes.
 
-Current position: MD_MEMORY_CONFIG (`0x200018`), read right after LED `0x0e` SPEEDUP at 32 s
-of virtual time. The PROM first spends 26 s timing out on its missing system controller
-(ELSC), which it tolerates (IP27.adoc "Junk bus").
+. (Done 2026-09-28: the interactive console, `--interactive`.)
+. **Before the repository goes public** (the user's decisions where marked):
+.. License: MIT, `LICENSE` and README (2026-09-28).
+.. The user's network must not appear. `doc/STATUS.adoc` uses RFC 5737 stand-ins; re-scan
+   every file before publishing (`git grep` for the LAN prefix, the host name, home paths).
+.. History: done (2026-09-28). The one commit with a host-named author address and a
+   home-directory path (the unpushed tip, `significant PROM unblocking for core`) was
+   rebuilt with the user's address and the path removed; the pushed history had neither.
+   Rescan before publishing: `git log --all --format='%ae %ce'` and `git grep` over
+   `git rev-list --all` for home paths, the LAN prefix, the host name, and board serials.
+.. Private tooling stays in `local/` (ignored): kname.py, efs.py, slate-tn.py, snapshots,
+   disks, captures. `scripts/irix-install-discs.sh` names the user's media files; check it.
+.. Third-party sources consulted are documented in SOURCES.adoc; none are vendored.
+.. Release notes: doc/RELEASE-NOTES-RC-IP27.adoc (done 2026-09-28; add the commit/tag).
+. **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
+  inventory ID). What the PROM reads there may also select the deskside slot table.
+. **Performance** after RC-IP27, as ROADMAP orders it (baseline, then a predecoded
+  interpreter and JIT toward VISION's host-speed target). Until then, only small
+  optimizations proven transparent (byte-identical snapshots).
 
-MD_MEMORY_CONFIG is the start of memory configuration (PRM LEDs `0x4a` MDIRINIT, `0x4b`
-MDIRCONFIG "probe and configure memory size"). The IRIX-derived `sn0/hubmd.h` gives its field
-layout, bank-size codes (MD_SIZE_*), and reset value (MMC_RESET_DEFAULTS). The PROM sizes
-memory in software, so modeling it means making RAM decode depend on the programmed bank
-sizes and on the installed DIMMs: memory placement becomes Hub MD behavior, not a fixed
-window. Specify from `hubmd.h` and the PROM's observed accesses before implementing.
+How to reproduce the current state (all snapshots are git-ignored in `local/state/`; disk
+images in `local/disks/`). Snapshots taken before the BaseIO moved to Crossbow port 8
+(2026-09-27) no longer load ("snapshot was taken with the BaseIO on another Crossbow port").
+Disks are unaffected. The installed system: `irix-shut2.img` was shut down cleanly on the
+current topology. `nvram-installed.bin` holds the PROM environment with `AutoLoad=Yes`
+(and the console path at io1). `flash.bin` holds an initialized PROM log. Cold boot to a
+root shell (about 17 G cycles to `login:`):
 
-The evidence trail after memory, toward booting the CD: Hub II link, XBOW widget ID/status,
-Bridge widget and PCI config, IOC3 PCI config and console UART, then the ISP1020 probe.
-"Loading BASEIO prom" needs the user's `io6prom.img` behind Bridge (M3).
+[source,shell]
+----
+cp --sparse=always local/disks/irix-shut2.img local/disks/irix.img
+cp local/state/nvram-installed.bin local/state/nvram.bin
+cp local/state/flash.bin local/state/flash-cold.bin
+build/pgo/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img \
+    --flash local/state/flash-cold.bin --nvram local/state/nvram.bin \
+    --disk local/disks/irix.img --console '@expect login:' --console root \
+    --console vt100 --console hinv \
+    --stop-at-prompt --cycles 150000000000 --save-state local/state/login.uvstate
+----
+
+To use the system yourself, add `--interactive` (and drop `--stop-at-prompt`, which it does
+not combine with). Once the `--console` lines are used up, what you type goes to the guest;
+Ctrl-] ends the run and still writes the disk, NVRAM, and flash. Resume a saved session
+with `--load-state` and the same files, without any `--console` lines, to type at once:
+
+[source,shell]
+----
+build/pgo/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img \
+    --flash local/state/flash-cold.bin --nvram local/state/nvram.bin \
+    --disk local/disks/irix.img --console '@expect login:' --interactive \
+    --cycles 10000000000000 --save-state local/state/mine.uvstate
+----
+
+`@expect login:` holds the script until the login prompt: otherwise the PROM's autoboot
+countdown ("To perform system maintenance instead, press <Esc>") takes the first line.
+`root` answers the login prompt and `vt100` the TERM question. Without `--nvram` (or with a
+new file), the PROM reinitializes its environment and stops at its menu. There, `1` starts
+the system, and `5` then `setenv AutoLoad Yes` makes later boots automatic. Other installed
+disks: `irix-installed.img` is the disk as `inst` left it, before the first boot;
+`irix-shut1.img` was shut down cleanly on the old topology.
+
+The installation: `fx-2.uvstate` is at the PROM menu with the disk labeled
+(`irix-labeled.img`); `kernel-0.uvstate` is just after the miniroot copy (disk
+`irix-miniroot.img`); `kernel-10.uvstate` is at the installer's mkfs question (disk
+`irix-installer.img`). A resumed snapshot needs the same `--disk` contents it was taken
+with. Cold path from power-on (assembled from steps each run separately from snapshots;
+not yet run end to end in one invocation):
+
+[source,shell]
+----
+truncate -s 9G local/disks/irix.img
+CD="assets/media/IRIX 6.5.30 Installation Tools and Overlays (1 of 3).iso"
+build/pgo/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img \
+    --flash local/state/flash.bin --cdrom "$CD" --disk local/disks/irix.img \
+    --console 5 --console 'boot -f dksc(0,6,8)sash64 dksc(0,6,7)stand/fx.64 --x' \
+    --console '' --console '' --console '' --console '' --console r --console ro \
+    --console '' --console y --console .. --console exit \
+    --console 2 --console '' --console '' --console yes --console y --console 4096 \
+    --cycles 120000000000
+----
+
+(`flash.bin` must already hold an initialized PROM log: see below.)
+
+Flash and the PROM log: `--flash FILE` keeps the flash. To initialize the PROM log from a
+fresh image: run to the POD prompt, then `--console 'go cac' --console initlog --console y`
+(`local/state/flash.bin` holds an initialized one).
+
+Console: `--console LINE` types a line at the next prompt (IP27.adoc "Console").
+
+Snapshots for exploration (git-ignored): `local/state/prom-5s.uvstate` (5.25 s, before
+INITII and the Crossbow probes), `prom-pod.uvstate` (at the `POD IOC3 Dex>` prompt, before
+the flash was modeled), and `io6-49s.uvstate` (49 s, the BASEIO PROM installing device
+drivers with the PROM log initialized). Snapshots replay later model changes from their state; checkpoints need cold runs.
 
 Loop mechanics: `ULTRAVIOLENT_IP27_PROM=assets/firmware/ip27prom.img
 scripts/ip27-prom-checkpoint.sh`, `--trace hub,firmware,exception`, `--probe PC`. Record
 evidence with its source class (`SOURCES.adoc`), model only the observed behavior, and add a
 unit test.
 
-Performance: about 12 M instructions per second (release). The TLB last-match cache and the
-address-space last-hit cache were profile-driven and are transparent (callgrind). perf needs
-`kernel.perf_event_paranoid` at or below 2.
+Performance (2026-09-27, i5-3470T host, 300 M cycles from each snapshot and from power-on):
+about 30 M instructions per second with the `release` preset and 45-55 M with the
+profile-guided build (`scripts/build-pgo.sh`, DEVELOPMENT.adoc "Fast builds"), from 21 M
+before. The guest runs at roughly a quarter of a real 180 MHz R10000. Profile-driven,
+transparent optimizations: TLB last-match cache, address-space last-hit cache, lazy time
+synchronization (time catches up at event deadlines and before device accesses), the run
+loop executing uninterrupted to the next event, host page caches for fetch, load, and store
+(`cpu.hpp`, tagged with the translation context and TLB entry, so exceptions do not flush
+them), inline fast paths for
+interrupt checks and cycle accounting, and a binary search for Hub registers. Each was
+checked by comparing console output and a full snapshot after 50 M cycles from all four
+starting points: byte-identical. `local/perf/bench.sh` and `local/perf/same.sh` (git-ignored)
+do that comparison. The IO6 PROM spends much of its time in `us_delay`, a 14-instruction loop
+polling PI_RT_COUNT, so its wall-clock cost is purely the interpreter's speed. perf works
+(`perf_event_paranoid` is 1).
 
 Private assets are in the repository's `assets/` (firmware: `ip27prom.img`, `io6prom.img`,
-`mmscfw.bin`; IRIX 6.5 and 6.5.30 media) and are ignored by Git. Two copies of the R10000
-User's Manual are in `doc/*.pdf`, also ignored. The user-supplied PRM PDF is kept
-outside the repository.
+`mmscfw.bin`; IRIX 6.5 and 6.5.30 media) and are ignored by Git. `doc/*.pdf` (R10000 User's
+Manual, PCF8584 datasheet) is also ignored. The user-supplied PRM PDF is kept outside the
+repository.
+
+The previous prototype is kept outside the repository (CLEANROOM "Old prototype"). It reached the IRIX
+install kernel, partly through shortcuts its own notes regret: flash machine-type forcing,
+pre-filled memory configuration, and chosen semantics. Use its findings as leads to re-verify,
+never as facts. It cites IRIX's own `/usr/include/sys/SN` headers; those are not a source
+class this project uses without the user's decision (see `SOURCES.adoc`).
+
+Reference hardware: the user can power up `slate` (Onyx2, IP31 R12000 nodes, IO4 BaseIO, IP27
+PROM 6.156, the same version as ours) for POD register reads and console captures. It
+answers questions about the Hub, PROM, and IRIX; not about Origin 2000 IP27 geometry. A
+serial console capture of a slate cold boot, power-on to `login:`, already exists outside
+the repository with the old prototype's notes (terminal escapes included), with slate's
+`hinv -vm`. After "Installing PROM Device
+drivers" slate prints no per-test diagnostic output: "Base I/O Ethernet set to
+/dev/ethernet/ef0", a walk of both SCSI adapters (4 devices on adapter 0, the CD-ROM at unit
+6), the hardware inventory check, "ALL DIAGS PASSED", and "Starting up the system...". Every
+diagnostic failure our BASEIO PROM prints is therefore an unmodeled device, and that
+transcript is the comparison target for the BASEIO stage (allowing for slate's 2 nodes and 4
+CPUs).
 
 == Best known boot command
 
@@ -107,9 +329,19 @@ ULTRAVIOLENT_IP27_PROM=assets/firmware/ip27prom.img \
     scripts/ip27-prom-checkpoint.sh 2000000
 ----
 
-Expected: LEDs through `0x4c` I2CINIT within 6 ms; `0x4d` I2CDONE at about 5.006 s; `0x0e`
-SPEEDUP at about 32 s, then the MD_MEMORY_CONFIG stop. 32 s is about 5.8 G cycles, about 8
-minutes with the release binary: `ULTRAVIOLENT_BINARY=build/release/ultraviolent`.
+Expected (cold run 2026-09-26, `local/runs/cold-console.txt`): the console (standard output)
+shows the PROM banner, memory and NUMAlink discovery, "Global master is
+/hw/module/1/slot/n1", "BASEIO PROM Monitor SGI Version 6.156", the PROM-log complaint, and
+`POD IOC3 Dex>`. LEDs: `0x4d` I2CDONE at 6 ms; `0x0e` SPEEDUP at 5.18 s; `0x4b` MDIRCONFIG at
+10.92 s; `0x06` TESTSCACH at 11.02 s; `0x5b` NMI_INIT at 12.28 s; POD (`0x23`) at 43.84 s.
+9 G cycles (50 s) take about 3 minutes with the profile-guided build (`build/pgo`, see
+"Performance" above) and about 5 with `release`:
+
+[source,shell]
+----
+build/release/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img \
+    --cycles 9000000000 [--console help]
+----
 
 == Regression checkpoints
 
@@ -141,37 +373,77 @@ minutes with the release binary: `ULTRAVIOLENT_BINARY=build/release/ultraviolent
 |pass
 |2026-09-24: LED 0x0e SPEEDUP at 32 s, after the ELSC retries give up
 
+|ip27.prom.led_mdirconfig
+|pass
+|2026-09-26: LED 0x4b MDIRCONFIG at 53.0 s from power-on, after INITII (0x52), INITIODONE
+(0x56), and CONSOLE_GET (0x53/0x54)
+
+|ip27.prom.scache_test
+|pass
+|2026-09-26: LED 0x06 TESTSCACH passes (no 0x85) at 59.1 s from power-on
+
+|ip27.prom.global_master
+|pass
+|2026-09-26: cold run; console "Global master is /hw/module/0/slot/n0" (read with the
+probe); stops at module voting, LED 0xb1, 76.8 s
+
+|ip27.prom.module_vote
+|pass
+|2026-09-26: cold run; "Global master is /hw/module/1/slot/n1" (module from the controller
+NVRAM), "Entering POD mode on node 0" at 31.8 s
+
 |ip27.prom.serial_banner
-|pending
-|
+|pass
+|2026-09-26: cold run; "IP27 PROM SGI Version 6.156" on the emulated IOC3 UART A (standard
+output), `local/runs/cold-console.txt`
 
 |ip27.prom.prompt
-|pending
-|
+|pass
+|2026-09-26: cold run; `POD IOC3 Dex>` at 43.8 s after the BASEIO PROM stops on the PROM log;
+`--console help` prints POD's help
 
 |ip27.scsi.discovery
-|pending
-|
+|pass
+|2026-09-27: "Walking SCSI Adapter 0 ... 1+ ... 6+ ... = 2 device(s)" with `--disk` and
+`--cdrom`; slate's transcript form
 
 |ip27.irix.kernel_entry
-|pending
-|
+|pass
+|2026-09-27: install kernel banner "IRIX Release 6.5 IP27 Version 07202013 System V - 64 Bit"
+(snapshots `local/state/kernel-0.uvstate` onward)
 
 |ip27.irix.root_mounted
-|pending
-|
+|pass
+|2026-09-27: "root on .../scsi_ctlr/0/target/1/lun/0/disk/partition/1/block"; the miniroot
+installer asks "Make new file system on /dev/dsk/realroot" (`kernel-10.uvstate`)
+
+|ip27.irix.installed
+|pass
+|2026-09-27: `inst` finishes from the user's CD images ("Errors occurred during the
+installation": only the defective `libmp.so`) and restarts into the installed system
 
 |ip27.irix.multiuser
-|pending
-|
+|pass
+|2026-09-27: cold boot of the installed disk (menu "1") to "The system is coming up." and
+`IRIS console login:`; `who -r` shows run level 2
+
+|ip27.irix.serial_login
+|pass
+|2026-09-27: root logs in on the console; `hinv`, `uname -a`, `df -k`, `ps -ef`
+
+|ip27.irix.cold_boot_clean
+|pass
+|2026-09-28: power-on with `irix-shut2.img` and `nvram-installed.bin`: autoboot to
+`login:` without input, no "Check the date", BaseIO at `/hw/module/1/slot/io1/baseio`
 
 |ip27.irix.network_up
-|pending
-|
+|pass
+|2026-09-28: `ef0` configured by IRIX; ping with the host both ways over `--ethernet tap`
 
 |rc_alpha.remote_login
-|pending
-|
+|pass (demonstrated)
+|2026-09-28: `telnet 203.0.113.250` from the user's Mac on another segment: IRIX login, root
+shell, `uname -aR`, `w`. The clean one-sequence demonstration is still to do
 |===
 
 == Session log template
@@ -272,3 +544,315 @@ Best checkpoint: ip27.prom.led_speedup
 Next step: MD_MEMORY_CONFIG (see Next task).
 ----
 
+----
+Date: 2026-09-26
+Milestone: M2
+Hypothesis: SPEEDUP through MDIRCONFIG needs Hub registers the PROM programs and an idle,
+  error-free Hub; a register survey from a snapshot lists them.
+Evidence: IRIX-derived LINUX sn0/hubmd.h, hubio.h, hubni.h, hubpi.h, xtalk/xwidget.h;
+  observation of the user's image; PRM LED table.
+Changed: Hub MD_MEMORY_CONFIG, MD_REFRESH_CONTROL, IIO_WID, PI error status, 60+ storage
+  registers (II configuration block, NI age/vector/protection, PI NACK, MD migration), idle
+  ranges (IP27.adoc "Hub"); StateImage snapshots (--save-state/--load-state) for CPU, TLB,
+  FPU, scheduler, Hub, PCF8584, memory; instruction fetch cache; lazy time synchronization;
+  byte-order fast paths; ccache made non-fatal when its cache directory is missing.
+Tests: 5 suites green on dev, gcc, asan, release; clang-tidy clean; clang-format clean;
+  new cases state_image.*, ip27.snapshot_resumes_exactly, ip27.hub.md_memory_config,
+  ip27.hub.no_errors_reported, mips.fetch_sees_remap_and_stores (mutation-checked).
+Newly proven: a snapshot-resumed run is bit-identical to a cold one; the PROM survives a bus
+  error on the Crossbow WIDGET_ID read; MDIRCONFIG begins with a back-door directory
+  type probe.
+Disproven: that the build was green after the ccache directory vanished (it failed with
+  "FAILED" lines while stale binaries passed the tests; check build output for FAILED).
+Unknowns: MD address aliasing for DIMMs smaller than the bank size; directory ECC
+  generation; MD registers 0x2000b0/0x2000b8; Crossbow registers.
+Best checkpoint: ip27.prom.led_mdirconfig
+Next step: Hub MD memory and directory decode (see Next task).
+----
+
+----
+Date: 2026-09-26 (continued)
+Milestone: M2 (completed), M3 (started)
+Hypothesis: MDIRCONFIG and the stages after it need the Hub MD's directory memory; the
+  PROM's diagnostics need architectural state the models lacked.
+Evidence: IRIX-derived LINUX addrs.h (back door), hubmd.h (directory entries, DIMM init,
+  MLAN), hubio.h (BTE); PRM 1.4, 1.5, 2.3, 3.4, 5; UM chapter 10 and 14.21; Linux SN1 bte.c;
+  the user's image (disassembly of its directory probe, sizing, and flash driver; console text
+  read with --probe on its character output routine).
+Changed: DirectoryMemory (back-door protection/directory entries, standard or premium,
+  aliasing, bank layout from memory_bytes); Hub MD_MEM/DIR_DIMM_INIT, MD_MLAN_CTL (empty
+  1-Wire bus), block-transfer engines (copy, zero fill, notification, completion interrupt);
+  RBOOT maps the flash; mips::CacheArrays (CACHE Index/Hit operations on I/D/S tag and data
+  arrays; Status.CH); CP0 ECC is 10 bits; StateImage sparse fields; write-fault traces show
+  the value.
+Tests: 5 suites green on dev, gcc, asan, release; clang-tidy and clang-format clean; new
+  cases ip27.directory.* (7), ip27.hub.md_dimm_init, dir_premium_mode, md_mlan_ctl,
+  bte_copy_and_fill, ip27.back_door_directory, mips.cache_* (5),
+  state_image.sparse_round_trip; mutation-checked (directory aliasing and masks, cache field
+  masks, MRU per set, quadword padding, StateMod, subset invalidation, BTE gating, interrupt,
+  status, zero fill, line size).
+Newly proven: the PROM sizes memory through the directory back door and programs bank 0 =
+  512 MB, standard directory; its scache test needs real tag arrays; the BTEs move 128-byte
+  lines and interrupt at IBIA's level; RBOOT reaches the local flash; the PROM tolerates the
+  missing NIC and flash log but not a missing module number.
+Disproven: MIPS.adoc's hypothesis that firmware does not depend on CACHE tag contents; the
+  8-bit ECC register; the assumption that BTE register writes of zero are harmless (IBCT = 0
+  starts a copy when BUSY is set).
+Unknowns: ELSC protocol; Origin 2000 XBOW port topology; secondary tag ECC algorithm; BTE
+  and MicroLAN timing; MD 0x2000b0/0x2000b8.
+Best checkpoint: ip27.prom.global_master
+Next step: M3 Crossbow (see Next task).
+----
+
+----
+Date: 2026-09-26 (continued)
+Milestone: M3
+Hypothesis: the module number comes from the system controller, reachable once the I²C bus
+  behaves as the PROM's driver expects.
+Evidence: slate (read-only: hinv, hardware graph, controller NVRAM); IRIX-derived Linux
+  ksys/elsc.h and ksys/i2c.h (history tree); the PROM's i2c_arb, nvram read, and slot table
+  (disassembly).
+Changed: devices::I2cBus, I2cEeprom (24C16), Elsc (arbitration tokens, bus release at
+  0x7f); Pcf8584 master transmit/receive, repeated START, bus monitoring; MD_SLOTID_USTAT
+  slot n1 (ID 7); Ip27Config node_slot and module_number; scheduler snapshot loads replace
+  pending events.
+Tests: device_tests 9, machine_tests 33, all suites green on dev; mutation-checked (token
+  base, idle-only tokens, release, NAK-stops-reception, shift-register latch, BB on STOP,
+  EEPROM block and page wrap, slot mapping).
+Newly proven: the SN0 module number is controller NVRAM byte 0x708 (module 1 on slate);
+  node slots n1-n4 are slot IDs 7-4; the controller's tokens also remove the 26 s of
+  timeouts at I2CINIT; the PROM reaches POD mode.
+Disproven: slot ID 0 (it is invalid to the PROM); the idea that the missing controller only
+  cost time.
+Unknowns: token timing and order on real hardware; ELSC command protocol; the Hub's
+  Crossbow port.
+Best checkpoint: ip27.prom.module_vote
+Next step: Crossbow (see Next task).
+----
+
+----
+Date: 2026-09-26 (continued)
+Milestone: M3
+Hypothesis: the console needs the Crossbow, the BaseIO Bridge, PCI, and the IOC3 UART, each
+  modeled from IRIX-derived headers and checked by the PROM's own diagnostics.
+Evidence: IRIX-derived Linux xbow.h, bridge.h, ioc3.h, nic.h; Linux ops-bridge.c and
+  ioc3-eth.c; the PROM's xbow_sanity, bridge_sanity, io_config_space, and serial_pio
+  diagnostics (their messages name each expectation) and disassembly (slot and widget tables,
+  NIC classification); slate (topology, NIC serials, PCI population).
+Changed: xtalk::Link/Widget/Fabric; Hub IO windows and Hub-as-widget (crosstalk interrupts to
+  PI_INT_PEND_MOD); devices::Xbow, Bridge, OneWireBus, Nic, Ioc3, Isp1020, Uart16550;
+  pci::Device and ConfigHeader; backends::ScriptedConsole; --console; Hub IOPRB, PI_IO_PROTECT,
+  NI_PORT_ERROR writes, WCR trace; Hub on Crossbow port by slot (n1 port 9).
+Tests: core, mips, devices (28), machines, all green on dev and gcc (asan and release before
+  the last edits); clang-format and clang-tidy clean; mutation-checked (Xbow target bit,
+  clear-on-read, interrupt gating and target; Bridge DEV_SWAP, config swizzle, control reset;
+  IOC3 endianness; UART loopback; BAR sizing).
+Newly proven: the PROM's console path works end to end; the IOC3 is big-endian on PCI; the
+  Bridge window is address-invariant without DEV_SWAP; the n1 Hub is Crossbow widget 9; the
+  IP27 PROM carries an internal copy of the BASEIO PROM and runs it.
+Disproven: Crossbow revision 5 (the PROM then expects a status source ID); WID_STAT clearing
+  on read; the Hub on Crossbow port 0xa.
+Unknowns: NIC manufacturing data layout; IOC3 serial DMA; the Bridge's external flash; real
+  Crossbow and Bridge revisions.
+Best checkpoint: ip27.prom.prompt
+Next step: flash PROM programming (see Next task).
+----
+
+----
+Date: 2026-09-26 (continued)
+Milestone: M3
+Hypothesis: the BASEIO PROM needs the PROM log in flash; the flash is an Am29F080 wired as the
+  PROM's driver shows.
+Evidence: AMD Am29F080 datasheet; PRM 2.3 and chapter 5; the PROM's flash driver (command
+  addresses << 3, byte-addressed reads) and its erase commands (sector 14 at LBOOT +
+  0x700000); POD's `initlog` messages.
+Changed: devices::Am29f080; AddressSpace read-only memory with a write target, and remap;
+  the machine's flash interface and 8 MB command windows; --flash persistence; scripted
+  console prompts ending in "] ".
+Tests: am29f080 (3), address_space write target and remap; all presets green; clang-tidy and
+  clang-format clean.
+Newly proven: POD `initlog` erases and writes the PROM log; with it the BASEIO PROM assigns a
+  module ID and installs its device drivers.
+Disproven: the flash command window fits in LBOOT's first megabyte.
+Unknowns: flash erase suspend; the ISP1020's mailbox protocol; IOC3 SSRAM parity; PHY model.
+Best checkpoint: ip27.prom.prompt (POD); the BASEIO PROM's diagnostics run
+Next step: ISP1020 (see Next task).
+----
+
+----
+Date: 2026-09-27
+Milestone: M3 (performance prerequisite: slowness was blocking meaningful boot testing,
+  ENGINEERING "Optimization")
+Hypothesis: interpreter overhead, not guest work, sets wall-clock boot time.
+Evidence: perf (cycles and instructions events) from four starting points; about 257 host
+  instructions per guest instruction at the start. The IO6 PROM's hot loop is us_delay
+  polling PI_RT_COUNT (disassembled from the io6-49s snapshot through its TLB entry).
+Changed: Ip27Machine::run runs the interpreter to the next event; Interpreter::run_until;
+  Cpu host page caches for fetch, load, and store and inline fast paths;
+  AddressSpace::writable_memory_bytes; Hub stored-register binary search; event deadline to
+  cycle conversion remembered; snapshot files read in one piece; scripts/build-pgo.sh.
+  VISION "Speed target: host speed, nominal clock" states the user's speed goal.
+Tests: host_page_test (6), mutation-checked (watch guard, store writability); byte-identical
+  console output and snapshots after 50 M cycles from prom-5s, io6-49s, prom-pod-35s, and
+  power-on; all presets green; clang-tidy and clang-format clean.
+Newly proven: 21 -> 30 M instructions/s (release), 45-55 M (profile-guided).
+Disproven: that the single-page fetch cache was enough (PROM code alternates pages).
+Unknowns: how far a switch interpreter can go before a predecoded engine is needed.
+Best checkpoint: ip27.prom.prompt (POD); the BASEIO PROM's diagnostics run
+Next step: ISP1020 (see Next task), comparing against slate's BASEIO transcript.
+----
+
+----
+Date: 2026-09-27 (continued)
+Milestone: M4, M5 (acceptance met); M6 in progress
+Hypothesis: the BaseIO's storage, interrupt, and serial paths are what stand between the
+  BASEIO PROM and an IRIX installation.
+Evidence: public Linux sources (ioc3.h, 8250_ioc3.c, mangle-port.h, pci-xtalk-bridge.c,
+  bridge.h, qlogicisp.c, qla1280.h, ioc3.c, ioc3_serial.c, rtc-m48t35.c, sn0 headers);
+  the PROM's and IRIX's register accesses; slate: SCSI identities (OBS-SLATE-0002), the
+  cold-boot transcript (OBS-SLATE-0003), and its unstripped /unix to name kernel code by
+  byte match and DWARF (local/tools/kname.py; observation only).
+Changed: Bridge byte lanes corrected (DEV_SWAP clear preserves lanes; the IOC3 is an ordinary
+  little-endian device); Bridge DMA (direct map, ATEs, 64-bit addresses), internal ATE RAM,
+  PCI interrupt pins; Crossbow and Hub DMA; Hub big windows, RT/profile comparators, clear
+  packets, 32-bit directory back-door accesses; ISP1020 (mailboxes, RISC RAM, ROM and
+  firmware commands, A64 queues, IOCBs, INTA); SCSI bus, CD-ROM and disk targets on host
+  block stores; IOC3 SIO_CR arbiter status, serial DMA rings, SIO interrupts on INTB, M48T35
+  time of day; scripted console waits for quiet prompts and changes discs ("@cdrom FILE");
+  --cdrom, --disk, --date, --sample-pc.
+Tests: isp1020 (7), scsi targets (3), bridge DMA/ATE/pins, xbow DMA, hub comparators,
+  directory word halves, ioc3 SIO_CR, m48t35 (2), console (3); all presets green;
+  clang-tidy and clang-format clean.
+Newly proven: the BASEIO PROM walks both SCSI buses like slate; sash64 and fx.64 run from
+  the CD; fx labels the disk; the miniroot copies and the IRIX 6.5 IP27 kernel boots,
+  discovers its hardware, mounts the miniroot, takes console input, runs mkfs_xfs on the
+  root disk, and starts inst ("Inst 4.1 Main Menu").
+Disproven: the Bridge's DEV_SWAP-clear window being address-invariant; the IOC3 being a
+  big-endian PCI device; the IOC3's serial interrupt being INTA (it is INTB, Bridge pin 6);
+  selection timeouts reported without STF_TIMEOUT.
+Unknowns: ISP selection-timeout and HCCR read encodings (hypotheses); IOC3 ring timing;
+  ITTE registers; Bridge external SSRAM; the Ethernet block.
+Best checkpoint: ip27.irix.root_mounted; inst at its main menu (local/state/inst-3.uvstate)
+Next step: finish the installation (see Next task).
+----
+
+----
+Date: 2026-09-27/28
+Milestone: M6 (finished), M7
+Hypothesis: the installed system needs only a restart and a cold boot. The remaining
+  warnings name missing hardware identity (NVRAM contents, NICs, topology) rather than
+  guest bugs.
+Evidence: the installed system's boot output; IRIX 6.5.30 kernel behavior by probe and by
+  disassembly of the functions concerned (rtodc, get_nvreg/set_nvreg/ioc_base,
+  nic_mfg_next/nic_read_mfg/nic_read_one_page), named from slate's /unix; the user's PROM
+  image (IO slot tables); Linux ip27-timer.c 2.6.12, rtc-m48t35.c, pci-xtalk-bridge.c and
+  drivers/mfd/ioc3.c 5.10; slate hinv -mvv (OBS-SLATE-0004).
+Changed: Crossbow link reset resets the Bridge and its PCI devices; M48T35 year base (1970 on
+  IP27) and battery-backed persistence (--nvram, the clock resumes from the file);
+  BaseIO moved to Crossbow port 8 (rack io1), with old snapshots refused; board NICs as
+  DS2502 parts with SGI manufacturing records and page CRC-16 (board_nic_memory,
+  dallas_crc16); the IOC3's INTB on Bridge pin 4; R10000 revision 3.4; console shell
+  prompts; timekeeper clock accesses traced under ioc3.
+Tests: m48t35 (3), one_wire.dallas_crc16, ip27.board_nic_record, console.shell_prompts; all
+  presets green; clang-tidy and clang-format clean.
+Newly proven: the install restarts into the installed IRIX; the installed disk cold-boots
+  with no input once NVRAM persists; serial login, shell, process, and filesystem work;
+  writes persist across clean shutdown and cold boot; IRIX's "Check the date" comes from
+  its NVRAM leap-day byte (0x3883), which it writes only through
+  module/%M/slot/io1/baseio/pci/2/ioc3; the PROM's rack slot table puts io1 on Crossbow
+  port 8; SGI NIC manufacturing records (layout, CRC, space padding); IRIX picks the IOC3
+  serial interrupt pin by board identity (pin 4 on a BASEIO).
+Disproven: the timekeeper's year being 2000-based; the date warning being about the clock's
+  value or the filesystem's timestamps (it warned for 2006, 2019, and 2026 clocks, and for
+  a clock later than every file); the PROM stopping at its menu because of failed
+  diagnostics (it was AutoLoad=N after NVRAM reinitialization); the IOC3's INTB being
+  Bridge pin 6 on the BaseIO (that is the generic mapping IRIX uses for an unidentified
+  board).
+Unknowns: what selects the PROM's deskside slot table; the node's MODULEID and midplane
+  NICs; the last 6 bytes of the part field; the Ethernet block.
+Best checkpoint: ip27.irix.cold_boot_clean (irix-shut2.img, nvram-installed.bin; snapshot
+  local/state/login.uvstate at a root shell)
+Next step: M8 (see Next task).
+----
+
+----
+Date: 2026-09-28
+Milestone: M7 follow-up (interactive console), before M8
+Hypothesis: a terminal backend can feed the console without guest-visible changes, since
+  the UART pulls input when software polls it.
+Evidence: the SerialSource contract (uart16550.hpp); runs through a pipe and a pseudo-terminal.
+Changed: backends::TerminalInput (raw input mode, reads at most once per host millisecond,
+  Ctrl-] escape, terminal restored on exit); ScriptedConsole::then_read hands input to it
+  after the script and flushes partial output lines; --interactive; SIGTERM and SIGHUP stop
+  a run gracefully like SIGINT.
+Tests: terminal_input (2); all presets green.
+Newly proven: from the root-shell snapshot, typed commands run; Ctrl-C interrupts a guest
+  `sleep` rather than the emulator; Ctrl-] ends the run with exit status 0 and the host
+  terminal back in canonical mode.
+Disproven: none.
+Unknowns: typing ahead while the guest is busy (the UART's receiver holds one byte; the
+  rest wait in the backend, as on a real line with flow control).
+Best checkpoint: ip27.irix.cold_boot_clean
+Next step: M8 (see Next task).
+----
+
+----
+Date: 2026-09-28
+Milestone: M8
+Hypothesis: IRIX's ef driver and the PROM's Ethernet diagnostics need only the IOC3 MAC's
+  documented register semantics, a clause-22 PHY, and the observed details the diagnostics
+  check.
+Evidence: Linux ioc3.h and ioc3-eth.c (v5.10); the PROM's enet_* diagnostics (expected
+  values they print); IRIX nic_eaddr, ef_ioc3reset, ef_recv (disassembly, names from
+  slate's /unix); frames captured with --ethernet pcap; the user's TAP and LAN.
+Changed: MAC NIC record (length, address reversed, CRC-16); devices::Ioc3Ethernet
+  (EMCR reset and arbiter idle, SSRAM with parity, MII, TX/RX DMA rings, checksum, filter,
+  internal loopback, INTA on Bridge pin 2); devices::Dp83840 (clause 22, vendor registers,
+  negotiation, loopback modes, reset pin); IOC3 GPIO with pin 5 as the PHY reset;
+  EthernetLink, backends::TapLink, backends::PcapLink; --ethernet tap:IFNAME|pcap:FILE.
+Tests: ioc3_ethernet (10), dp83840 (1), ip27.ethernet_nic_record; all presets green;
+  clang-tidy clean.
+Newly proven: every PROM Ethernet diagnostic passes; IRIX configures ef0 and exchanges IP
+  traffic with the host and, routed, with a Mac on another segment; telnet login works.
+Disproven: EMCR_RST clearing the ring bases; internal loopback adding an FCS; the receive
+  status word lacking the length (it holds it in bits 2:0 and 12:3).
+Unknowns: ETCDC and other counters; the RX timer's ERTR delay; the PHY's vendor registers
+  beyond what the PROM checks; the receive status for bad frames.
+Best checkpoint: rc_alpha.remote_login (demonstrated, not yet in one clean sequence)
+Next step: the RC-IP27 clean demonstration (see Next task).
+----
+
+----
+Date: 2026-09-28 (evening)
+Milestone: RC-IP27 release work
+Hypothesis: the clean demonstration (scripts/rc-ip27-demo.py) runs from blank state without
+  help.
+Evidence: the first clean run hung in inst's exit commands: IRIX's flash utility, now that
+  the board is a BASEIO, checked the BaseIO PROM, failed ("Unknown manufacture/device code",
+  errno 22), and without a terminal retried forever. Slate (read-only flash -V, flash -v -V,
+  strings) showed what a working check looks like.
+Changed: MTC0 to a 64-bit CP0 register writes all 64 bits (UM Table 14-26; the model had
+  sign-extended the low 32, losing EntryLo's uncached attribute, so every mapped uncached
+  I/O page read memory); the Hub translates big windows through the ITTEs; the Bridge's
+  external flash port (16-bit) with the BaseIO PROM as an Am29LV800BT-style word-mode part
+  (--io6prom); the flash model's instance names and word mode; the monitor escape (Ctrl-]
+  then q, cdrom FILE, eject); the demonstration driver.
+Tests: mips.cp0_move_widths corrected to the manual; ip27.hub.big_window_itte; all presets
+  green.
+Newly proven: the IP27 PROM loads the BASEIO PROM from flash (slate's build, 11:26:28);
+  IRIX's flash -v -V shows the same io6prom header as slate; flash -i reports "prom not
+  flashed" and exits 0 without a terminal.
+Disproven: MTC0 sign-extending into 64-bit CP0 registers (M1's reading); the ITTEs being
+  untouched by IRIX; the BaseIO PROM being byte-wide.
+Unknowns: the exact SN0 Hub ITTE layout (Bedrock's used); the BaseIO flash part and its
+  boot sectors.
+Result: the clean demonstration passed end to end (A 2.7 min, B 70.9 min, C 18.7 min,
+  D 8.2 min; 1.68 h); release notes, README license, and hygiene scans done; the driver
+  answers the TERM prompt only when asked (telnet sessions pass a terminal type).
+Best checkpoint: rc_alpha.remote_login, from a clean run (local/rc).
+History cleaned: the unpushed tip commit rebuilt with the user's address and without a
+  home path (backup bundle: local/history-backup-f1b69da.bundle); slate's barcodes and
+  laser serials replaced with synthetic ones in code, tests, and docs; home-directory
+  references removed from the docs.
+Next step: the tag; then Node NICs or performance.
+----

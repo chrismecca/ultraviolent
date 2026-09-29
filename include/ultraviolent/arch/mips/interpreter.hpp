@@ -22,6 +22,10 @@ class Interpreter {
         }
     }
 
+    // Steps while the CPU's cycle count is below `limit`, which the caller may lower while
+    // this runs (for instance from a device access that schedules an event).
+    void run_until(const std::uint64_t& limit);
+
   private:
     Cpu& cpu_;
 };
