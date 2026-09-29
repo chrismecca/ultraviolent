@@ -282,6 +282,48 @@ const test::Registration event_boundaries{
         t.check_equal(machine.cpu().state().gpr[t2], std::uint64_t{38});
     }};
 
+const test::Registration tier0_engine{
+    "ip27.tier0_engine_matches_reference", [](test::Context& t) {
+        // The same program on both engines: identical architectural state (IR.adoc "Stages").
+        const auto prom = program({lui(t0, 0xa800), dsll32(t0, t0, 0), addiu(t1, zero, 7),
+                                   sd(t1, 0x100, t0), ld(t2, 0x100, t0), mfc0(t3, mips::cp0::count),
+                                   tlbwr(), daddu(t1, t1, t2), beq(zero, zero, -24), nop()});
+        Ip27Machine reference{small_config(), prom};
+        Ip27Machine tier0{small_config(), prom};
+        tier0.set_execution_engine(mips::ExecutionEngine::tier0);
+        for (Ip27Machine* machine : {&reference, &tier0}) {
+            machine->cpu().mtc0(mips::cp0::status, mips::status::kx);
+            machine->run(5000);
+        }
+        t.check(reference.cpu().capture() == tier0.cpu().capture(), "same CPU state");
+        t.check(reference.now() == tier0.now(), "same virtual time");
+        t.check(tier0.block_statistics().operations > tier0.block_statistics().entries,
+                "blocks of more than one operation ran");
+    }};
+
+const test::Registration tier0_event_boundaries{
+    "ip27.tier0_events_run_at_cycle_boundaries", [](test::Context& t) {
+        // ip27.events_run_at_cycle_boundaries on the tier-0 engine.
+        const auto prom = program({lui(t0, 0xa800), dsll32(t0, t0, 0), lw(t1, 0x100, t0),
+                                   daddu(t2, t2, t1), beq(zero, zero, -12), nop()});
+        Ip27Machine machine{small_config(), prom};
+        machine.set_execution_engine(mips::ExecutionEngine::tier0);
+        machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
+        std::uint64_t fired_at = 0;
+        auto& scheduler = machine.scheduler();
+        const EventId dma = scheduler.add_event("test.dma", [&] {
+            fired_at = machine.cpu().cycles();
+            const auto bytes = machine.bus().writable_memory_bytes(PhysicalAddress{0x100}, 4);
+            if (t.check_equal(bytes.size(), std::size_t{4})) {
+                store_unsigned(bytes, 1, ByteOrder::big);
+            }
+        });
+        scheduler.schedule_at(dma, time_at_cycles(50, small_config().cpu_clock));
+        machine.run(200);
+        t.check_equal(fired_at, std::uint64_t{50});
+        t.check_equal(machine.cpu().state().gpr[t2], std::uint64_t{38});
+    }};
+
 const test::Registration snapshot{
     "ip27.snapshot_resumes_exactly", [](test::Context& t) {
         // Saving at cycle N and resuming must match running straight through.

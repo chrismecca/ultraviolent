@@ -2,7 +2,8 @@
 
 Status: design, reviewed with the user (2026-09-28, 2026-09-29). Stages A (this document
 and the boundary tests), B (decode and shared semantics), C (the differential harness), and
-D (block construction) are implemented; E-H are not.
+D (block construction), and E (the uncached tier-0 executor, experimental) are
+implemented; F-H are not. Review with the user before F.
 
 This document designs the representation between the MIPS decoder and the fast execution
 engines (ARCHITECTURE "The CPU is not the interpreter", "Future JIT architecture"): what a
@@ -198,6 +199,19 @@ At every instruction boundary, conservatively:
   through the host fast path into the block's page). Until stage F's frame generations, this
   per-operation load and compare is what keeps stores into code exact; it also covers the
   executing block, which is never freed.
+
+Implemented as `BlockInterpreter` (`block_interpreter.hpp`, stage E). It builds the block at
+pc on every entry (no cache until stage F), and records why it left each block
+(`BlockExit`): completed, run limit, pending exception, exception, host path, left block
+(pc is not the next operation's), code changed. A barrier includes the first access to a page
+the host page cache has not seen, which goes through the bus. The machine runs it only when
+selected (`Ip27Machine::set_execution_engine`, `--engine tier0`); tracing and PC probes
+always use the reference interpreter.
+
+Statistics (`BlockStatistics`, printed by `--engine-statistics`, collected per workload by
+`scripts/bench.py --engine tier0 --statistics DIR`) are counted per block entry, not per
+instruction: entries and operations executed; reference steps by `NoBlock` reason; built
+blocks by length and by `BlockEnd`; executed operations per entry and exits by `BlockExit`.
 
 A block starting in a delay slot (after a reference step ran the branch) needs no special
 case: its first operation runs, `apply_flow` sends pc to the branch target, and the pc

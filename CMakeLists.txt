@@ -36,6 +36,7 @@ ultraviolent_enable_sanitizers(ultraviolent_core)
 
 add_library(ultraviolent_mips
     src/arch/mips/block.cpp
+    src/arch/mips/block_interpreter.cpp
     src/arch/mips/cache_arrays.cpp
     src/arch/mips/cpu.cpp
     src/arch/mips/fpu.cpp
