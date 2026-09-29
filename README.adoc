@@ -113,3 +113,5 @@ ultraviolet. The name is not intended to imply compatibility with or endorsement
 Ultraviolent is released under the MIT License (`LICENSE`). The license covers this
 repository's code and documentation only; it grants nothing for SGI firmware, IRIX, or any
 other asset you supply.
+
+Absolutely obviously vibe-coded with Anthropic Opus 5.5
