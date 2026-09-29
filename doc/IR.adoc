@@ -1,7 +1,7 @@
 = Ultraviolent IR
 
-Status: design, reviewed with the user (2026-09-28). Stage A (this document and the
-boundary tests) is implemented; stages B-H are not.
+Status: design, reviewed with the user (2026-09-28). Stages A (this document and the
+boundary tests) and B (decode and shared semantics) are implemented; C-H are not.
 
 This document designs the representation between the MIPS decoder and the fast execution
 engines (ARCHITECTURE "The CPU is not the interpreter", "Future JIT architecture"): what a
@@ -97,34 +97,48 @@ invalidation event.
 == DecodedInstruction
 
 `decode(std::uint32_t word)` is a pure function of the instruction word; `execute(Cpu&,
-const DecodedInstruction&, std::uint64_t pc)` holds the semantics. The reference
-interpreter becomes fetch, `decode`, `execute`, and `apply_flow` (the shared PC and
-delay-slot update that `execute_cycle` does today). There is one copy of the MIPS semantics:
-the reference interpreter and the fast engine call the same `execute`.
+const DecodedInstruction&, std::uint64_t pc)` holds the semantics (`semantics.cpp`). The
+reference interpreter is fetch, `decode`, and `complete_cycle` (execute, `apply_flow`, and
+the cycle accounting). There is one copy of the MIPS semantics: every engine calls the same
+`execute` and `complete_cycle`.
 
 ----
-enum class DecodedOpcode : std::uint16_t {
-    sll, srl, sra, ...        // one value per architectural instruction
-    cop1,                     // the FPU, opaque in tier 0: execute_fpu(cpu, Instruction{word})
-    cop2_unusable,            // COP2, LWC2, SWC2, LDC2, SDC2
-    reserved,                 // words the ISA or the R10000 reserves
+enum class DecodedOpcode : std::uint8_t {
+    sll, srl, sra, ...        // one value per operation
+    cop0_reserved,            // reserved CP0 encodings (CP0 usability is checked first)
+    cop1, cop1x,              // the FPU, opaque in tier 0: execute_fpu(cpu, word)
+    cop2,                     // COP2, LWC2, SWC2, LDC2, SDC2
+    reserved,                 // every other reserved encoding
 };
 
-struct DecodedInstruction {   // 24 bytes; not tuned until measured
+struct DecodedInstruction {   // 8 bytes
     DecodedOpcode opcode;
-    std::uint8_t rs, rt, rd, sa;
-    std::uint8_t requirements;  // which mode checks apply: 64-bit, MIPS IV, CU1, ...
-    std::uint8_t properties;    // branch, likely, ends a block, ...
-    std::uint32_t word;         // for execute_fpu, tracing, diagnostics
-    std::uint64_t immediate;    // pre-extended as the opcode uses it
+    Instruction instruction;  // the word; fields are extracted as the semantics use them
 };
 ----
 
+* `decode` classifies with one lookup in a 240-entry table, the index selected without
+  branches.
 * Checks that depend on Status (64-bit operations, MIPS IV, coprocessor usability) run at
-  execution time in the reference order: `requirements` says which apply, never whether
-  they pass, so a decoded instruction stays correct when Status changes after decoding.
+  execution time, in the reference order, inside each operation's semantics, so a decoded
+  instruction stays correct when Status changes after decoding. The order differs by
+  operation (CP0 operations check usability before reserved encodings; COP1X checks MIPS IV
+  before CU1), so it is code, not a flag set. The MIPS III gate, which the reference checks
+  before anything else, is a table by opcode.
+* Properties that blocks need (branch, ends a block, unsupported) will be a table by opcode
+  in stage D, not per-instruction data.
 * The FPU stays one opaque operation in tier 0.
 * Tracing (`--trace cpu`) and PC probes keep using the reference interpreter.
+
+Measured in stage B (2026-09-29): the first shape (24 bytes, fields pre-extracted into the
+structure, decode out of line) made the reference interpreter 26-44% slower than the
+nested-switch interpreter it replaced; the fields read back through memory and a second
+jump table for the MIPS III gate were most of it. The 8-byte shape, an inline table-driven
+`decode`, and a table gate recovered part of it. What remains (release build, `fs`: 16%
+more host instructions and 23% more branch misses than before; about 25% slower on `fs`,
+8% on `cpu`) is the cost of classifying separately from executing: one more
+data-dependent step per instruction in the reference interpreter. Tier 0 decodes once per
+block, so it pays this only when it builds a block.
 
 == Blocks
 
