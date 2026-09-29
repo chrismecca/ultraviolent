@@ -62,17 +62,17 @@ const TlbEntry& Tlb::entry(std::size_t index) const {
     return entries_[index];
 }
 
-bool Tlb::write(std::size_t index, TlbEntry entry) {
+std::uint64_t Tlb::write(std::size_t index, TlbEntry entry) {
     invariant(index < entry_count, "TLB index out of range");
     entry.enabled = true;
-    bool conflict = false;
+    std::uint64_t conflict = 0;
     for (std::size_t i = 0; i < entry_count; ++i) {
         if (i != index && conflicts(entries_[i], entry)) {
             // hypothesis: an invalidated entry stops matching entirely, so a later reference
             // takes a refill rather than an invalid exception. UM 14.10 says only that the
             // entries are "invalidated".
             entries_[i].enabled = false;
-            conflict = true;
+            conflict |= std::uint64_t{1} << i;
         }
     }
     entries_[index] = entry;

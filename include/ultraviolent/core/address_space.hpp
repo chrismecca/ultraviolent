@@ -93,13 +93,36 @@ class AddressSpace {
     }
 
     // Maps `range` onto `block` starting at `block_offset`. The block must outlive the space.
+    // For a read-only mapping, `write_target` (if any) receives the writes, with offsets from
+    // the range's base: memory a device reads fast but controls writes to, such as flash.
     std::expected<void, MapError> map_memory(PhysicalRange range, MemoryBlock& block,
-                                             std::uint64_t block_offset, MemoryAccess access);
+                                             std::uint64_t block_offset, MemoryAccess access,
+                                             MmioTarget* write_target = nullptr);
 
     // Maps `range` onto a register window. The target must outlive the space.
     std::expected<void, MapError> map_mmio(PhysicalRange range, MmioTarget& target);
 
+    // Replace the mapping of exactly `range` (a mapping made earlier with the same range).
+    std::expected<void, MapError> remap_memory(PhysicalRange range, MemoryBlock& block,
+                                               std::uint64_t block_offset, MemoryAccess access,
+                                               MmioTarget* write_target = nullptr);
+    std::expected<void, MapError> remap_mmio(PhysicalRange range, MmioTarget& target);
+
     std::expected<std::uint64_t, AccessFault> read(PhysicalAddress address, AccessWidth width);
+
+    // The host bytes behind [address, address + size) when one memory mapping covers the
+    // whole range, for execution-engine fast paths. Empty for MMIO and unmapped ranges.
+    // Valid until generation() changes.
+    [[nodiscard]] std::span<const std::byte> memory_bytes(PhysicalAddress address,
+                                                          std::uint64_t size) const;
+    // The same for writable memory: empty unless one read-write memory mapping covers the
+    // range. Writes through it are exactly the bus writes a CPU store would make.
+    [[nodiscard]] std::span<std::byte> writable_memory_bytes(PhysicalAddress address,
+                                                             std::uint64_t size) const;
+    // Changes whenever a mapping is added or replaced.
+    [[nodiscard]] std::uint64_t generation() const {
+        return generation_;
+    }
     std::expected<void, AccessFault> write(PhysicalAddress address, AccessWidth width,
                                            std::uint64_t value);
 
@@ -107,6 +130,7 @@ class AddressSpace {
     struct MemoryMapping {
         std::span<std::byte> bytes;
         MemoryAccess access;
+        MmioTarget* write_target{};
     };
 
     struct Mapping {
@@ -116,6 +140,7 @@ class AddressSpace {
 
     [[nodiscard]] const Mapping* find(PhysicalAddress address) const;
     std::expected<void, MapError> insert(Mapping mapping);
+    std::expected<void, MapError> replace(Mapping mapping);
 
     ByteOrder byte_order_;
     // Sorted by base address; ranges never overlap.
@@ -124,6 +149,7 @@ class AddressSpace {
     // mappings never overlap. Measured: the binary search dominated AddressSpace::read in
     // IP27 PROM runs (callgrind, 2026-09-24).
     mutable std::size_t last_hit_{};
+    std::uint64_t generation_{};
 };
 
 } // namespace ultraviolent

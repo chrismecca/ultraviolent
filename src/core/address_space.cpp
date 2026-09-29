@@ -17,11 +17,40 @@ bool fits_width(std::uint64_t value, AccessWidth width) {
 
 std::expected<void, MapError> AddressSpace::map_memory(PhysicalRange range, MemoryBlock& block,
                                                        std::uint64_t block_offset,
-                                                       MemoryAccess access) {
+                                                       MemoryAccess access,
+                                                       MmioTarget* write_target) {
     if (block_offset > block.size() || range.size > block.size() - block_offset) {
         return std::unexpected(MapError::outside_block);
     }
-    return insert({range, MemoryMapping{block.bytes().subspan(block_offset, range.size), access}});
+    return insert({range, MemoryMapping{block.bytes().subspan(block_offset, range.size), access,
+                                        write_target}});
+}
+
+std::expected<void, MapError> AddressSpace::remap_memory(PhysicalRange range, MemoryBlock& block,
+                                                         std::uint64_t block_offset,
+                                                         MemoryAccess access,
+                                                         MmioTarget* write_target) {
+    if (block_offset > block.size() || range.size > block.size() - block_offset) {
+        return std::unexpected(MapError::outside_block);
+    }
+    return replace({range, MemoryMapping{block.bytes().subspan(block_offset, range.size), access,
+                                         write_target}});
+}
+
+std::expected<void, MapError> AddressSpace::remap_mmio(PhysicalRange range, MmioTarget& target) {
+    return replace({range, &target});
+}
+
+std::expected<void, MapError> AddressSpace::replace(Mapping mapping) {
+    for (Mapping& existing : mappings_) {
+        if (existing.range.base == mapping.range.base &&
+            existing.range.size == mapping.range.size) {
+            existing = mapping;
+            ++generation_;
+            return {};
+        }
+    }
+    return std::unexpected(MapError::invalid_range);
 }
 
 std::expected<void, MapError> AddressSpace::map_mmio(PhysicalRange range, MmioTarget& target) {
@@ -61,12 +90,41 @@ std::expected<void, AccessFault> AddressSpace::write(PhysicalAddress address, Ac
     const std::uint64_t offset = address - mapping->range.base;
     if (const auto* memory = std::get_if<MemoryMapping>(&mapping->target)) {
         if (memory->access == MemoryAccess::read_only) {
+            if (memory->write_target != nullptr) {
+                return memory->write_target->mmio_write(offset, width, value);
+            }
             return std::unexpected(AccessFault::read_only);
         }
         store_unsigned(memory->bytes.subspan(offset, size), value, byte_order_);
         return {};
     }
     return std::get<MmioTarget*>(mapping->target)->mmio_write(offset, width, value);
+}
+
+std::span<const std::byte> AddressSpace::memory_bytes(PhysicalAddress address,
+                                                      std::uint64_t size) const {
+    const Mapping* mapping = find(address);
+    if (mapping == nullptr || size == 0 || !mapping->range.contains(address + (size - 1))) {
+        return {};
+    }
+    const auto* memory = std::get_if<MemoryMapping>(&mapping->target);
+    if (memory == nullptr) {
+        return {};
+    }
+    return memory->bytes.subspan(address - mapping->range.base, size);
+}
+
+std::span<std::byte> AddressSpace::writable_memory_bytes(PhysicalAddress address,
+                                                         std::uint64_t size) const {
+    const Mapping* mapping = find(address);
+    if (mapping == nullptr || size == 0 || !mapping->range.contains(address + (size - 1))) {
+        return {};
+    }
+    const auto* memory = std::get_if<MemoryMapping>(&mapping->target);
+    if (memory == nullptr || memory->access != MemoryAccess::read_write) {
+        return {};
+    }
+    return memory->bytes.subspan(address - mapping->range.base, size);
 }
 
 const AddressSpace::Mapping* AddressSpace::find(PhysicalAddress address) const {
@@ -104,6 +162,7 @@ std::expected<void, MapError> AddressSpace::insert(Mapping mapping) {
         return std::unexpected(MapError::overlap);
     }
     mappings_.insert(next, mapping);
+    ++generation_;
     last_hit_ = 0;
     return {};
 }

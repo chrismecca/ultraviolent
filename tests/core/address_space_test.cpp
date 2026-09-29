@@ -181,4 +181,43 @@ const test::Registration mapping_errors{
                       std::uint64_t{0x8});
     }};
 
+class Recorder final : public MmioTarget {
+  public:
+    std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
+                                                        AccessWidth /*width*/) override {
+        return 0x100 + offset;
+    }
+    std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth /*width*/,
+                                                std::uint64_t value) override {
+        last_offset = offset;
+        last_value = value;
+        return {};
+    }
+    std::uint64_t last_offset = 0;
+    std::uint64_t last_value = 0;
+};
+
+const test::Registration write_target{
+    "address_space.read_only_write_target_and_remap", [](test::Context& t) {
+        AddressSpace space{ByteOrder::big};
+        MemoryBlock block{0x100};
+        block.bytes()[0x10] = std::byte{0x42};
+        Recorder device;
+        const PhysicalRange range{PhysicalAddress{0x1000}, 0x100};
+        t.check(space.map_memory(range, block, 0, MemoryAccess::read_only, &device).has_value());
+        // Reads come from memory; writes go to the target, offset from the range base.
+        t.check_equal(space.read(PhysicalAddress{0x1010}, AccessWidth::bits8).value_or(0),
+                      std::uint64_t{0x42});
+        t.check(space.write(PhysicalAddress{0x1018}, AccessWidth::bits64, 7).has_value());
+        t.check_equal(device.last_offset, std::uint64_t{0x18});
+        t.check_equal(block.bytes()[0x18], std::byte{0});
+        // Remapping the same range to the target changes where reads go.
+        const auto before = space.generation();
+        t.check(space.remap_mmio(range, device).has_value());
+        t.check(space.generation() != before, "remap invalidates fast paths");
+        t.check_equal(space.read(PhysicalAddress{0x1010}, AccessWidth::bits64).value_or(0),
+                      std::uint64_t{0x110});
+        t.check(!space.remap_mmio({PhysicalAddress{0x1000}, 0x80}, device), "exact range only");
+    }};
+
 } // namespace

@@ -41,8 +41,8 @@ class Tlb {
 
     // Writes `entry` at `index`. Any other entry that could match an address also matched by
     // the new entry is invalidated first, as the R10000 does to prevent multiple matches
-    // (UM 14.10 "TS"). Returns true when such a conflict existed.
-    bool write(std::size_t index, TlbEntry entry);
+    // (UM 14.10 "TS"). Returns the invalidated entries, bit n for entry n (nonzero means TS).
+    std::uint64_t write(std::size_t index, TlbEntry entry);
 
     // Entry matching region, VPN2, and ASID of `entry_hi` (TLBP semantics).
     [[nodiscard]] std::optional<std::size_t> probe(std::uint64_t entry_hi) const;
@@ -52,6 +52,14 @@ class Tlb {
 
     // Bytes in one page of the entry, 4 KiB to 16 MiB.
     [[nodiscard]] static std::uint64_t page_size(const TlbEntry& entry);
+
+    [[nodiscard]] const std::array<TlbEntry, entry_count>& entries() const {
+        return entries_;
+    }
+    void restore(const std::array<TlbEntry, entry_count>& entries) {
+        entries_ = entries;
+        last_match_ = 0;
+    }
 
   private:
     std::array<TlbEntry, entry_count> entries_{};

@@ -63,6 +63,20 @@ cmake --build --preset release
 ctest --preset release
 ----
 
+== Fast builds
+
+`scripts/build-pgo.sh` builds `build/pgo/ultraviolent` with profile-guided and link-time
+optimization, trained by running the user's IP27 PROM from power-on:
+
+[source,shell]
+----
+ULTRAVIOLENT_IP27_PROM=assets/firmware/ip27prom.img scripts/build-pgo.sh
+----
+
+It needs Clang and `llvm-profdata`. Guest behavior is identical to `release`; on the
+reference host it is about 1.6 times faster. The profile is derived from a proprietary
+image and stays in `build/`. Use it for long boot runs; use `dev` and `release` for tests.
+
 == GCC build
 
 The secondary compiler has its own preset:
@@ -120,14 +134,22 @@ Use Linux `perf` for low-level profiling.
 
 Do not optimize until a profile identifies the bottleneck.
 
-Useful examples later:
-
 [source,shell]
 ----
-perf stat build/release/ultraviolent ...
-perf record -g build/release/ultraviolent ...
-perf report
+perf stat -e cycles,instructions build/release/ultraviolent ...
+perf record -e instructions -c 100000 build/release/ultraviolent ...
+perf report --no-children --stdio
 ----
+
+Sampling the `instructions` event shows where host instructions go per guest instruction;
+the default `cycles` event also shows stalls. Start from a snapshot (`--load-state`) near
+the code of interest. An optimization must leave the guest unchanged: compare console output
+and a `--save-state` snapshot from before and after over the same cycle count; they must be
+byte-identical.
+
+To see the guest code behind a hot spot, histogram guest PCs with a short `--trace cpu` run,
+translate the PC through the snapshot's TLB if it is mapped, and disassemble the bytes that
+`tools/uvstate_memory.py` copies out of the snapshot.
 
 == AsciiDoc
 
@@ -162,7 +184,9 @@ requires them.
 
 == Ccache
 
-`cmake/Ccache.cmake` uses `ccache` as the compiler launcher when it is installed.
+`cmake/Ccache.cmake` uses `ccache` as the compiler launcher when it is installed and its
+cache directory is usable. A dangling cache directory (for example a broken symlink)
+disables it at configure time, with a message.
 
 A missing cache must never make the build fail; the build then uses the compiler directly.
 

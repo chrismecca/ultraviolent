@@ -1,38 +1,92 @@
 // Command-line entry point. Host integration only: argument parsing, reading asset files, and
 // wiring a trace sink. Machine behavior lives in the machine personality.
 
+#include <ultraviolent/backends/console.hpp>
+#include <ultraviolent/backends/file_block_store.hpp>
+#include <ultraviolent/backends/pcap_link.hpp>
 #include <ultraviolent/backends/stream_trace_sink.hpp>
+#include <ultraviolent/backends/tap_link.hpp>
+#include <ultraviolent/backends/terminal_input.hpp>
+#include <ultraviolent/core/state_image.hpp>
 #include <ultraviolent/core/trace.hpp>
+#include <ultraviolent/devices/am29f080.hpp>
+#include <ultraviolent/devices/m48t35.hpp>
 #include <ultraviolent/machines/ip27/ip27_machine.hpp>
 #include <ultraviolent/machines/ip27/prom_image.hpp>
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
+#include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
-#include <iterator>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include <unistd.h>
+
 namespace {
 
 using namespace ultraviolent;
+
+// Set by SIGINT, SIGUSR1, SIGTERM, or SIGHUP: end the run early but still save the snapshot,
+// flash, NVRAM, and disk.
+volatile std::sig_atomic_t stop_requested = 0;
+
+extern "C" void request_stop(int /*signal*/) {
+    stop_requested = 1;
+}
 
 constexpr int exit_usage = 2;
 constexpr int exit_asset = 3;
 
 void usage() {
-    std::fputs("usage: ultraviolent --machine ip27 --prom FILE [--memory MIB] [--cycles N]\n"
-               "                    [--trace CATEGORY[,CATEGORY...]] [--probe PC]...\n"
-               "\n"
-               "Runs the machine for N processor cycles (default 1000000) from power-on.\n"
-               "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
-               "scsi ethernet irq scheduler firmware machine all\n",
-               stderr);
+    std::fputs(
+        "usage: ultraviolent --machine ip27 --prom FILE [--memory MIB] [--cycles N]\n"
+        "                    [--trace CATEGORY[,CATEGORY...]] [--probe PC]...\n"
+        "                    [--load-state FILE] [--save-state FILE] [--flash FILE]\n"
+        "                    [--nvram FILE] [--io6prom FILE]\n"
+        "                    [--console LINE]... [--cdrom FILE] [--disk FILE]\n"
+        "                    [--sample-pc NS] [--date DATE] [--stop-at-prompt]\n"
+        "                    [--interactive] [--ethernet tap:IFNAME|pcap:FILE]\n"
+        "\n"
+        "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
+        "from a snapshot. Snapshots are for exploration; checkpoints need a cold run.\n"
+        "The guest console (IOC3 port A) is standard output; each --console LINE is\n"
+        "typed when the guest waits for input after a prompt ending in \"> \", \"] \",\n"
+        "\"? \", \": \", \") \", \"# \", \"$ \", or \"% \". --flash keeps the flash PROM (and its\n"
+        "log) in FILE, created from the PROM image if missing. --nvram keeps the timekeeper's\n"
+        "battery-backed NVRAM (the PROM environment) and clock in FILE, created if missing;\n"
+        "the clock resumes from the time FILE holds unless --date is given.\n"
+        "--cdrom puts a disc image in the CD-ROM drive (SCSI bus 0, ID 6); a --console line\n"
+        "\"@cdrom FILE\" changes the disc when its turn comes, \"@expect A|B\" waits for one of\n"
+        "the strings in the output, \"@stop\" ends the run. --disk attaches an\n"
+        "existing image file as the system disk (bus 0, ID 1), written in place.\n"
+        "--sample-pc NS prints the program counter every NS ns of virtual time.\n"
+        "--io6prom FILE loads the BaseIO's own flash PROM (for example io6prom.img); without it\n"
+        "the IP27 PROM uses its internal copy of the BASEIO PROM.\n"
+        "--ethernet tap:IFNAME plugs the BaseIO Ethernet port into an existing Linux TAP\n"
+        "interface you own (sudo ip tuntap add dev IFNAME mode tap user $USER); without it\n"
+        "the port is unplugged. --ethernet pcap:FILE records the frames the guest sends in FILE\n"
+        "(libpcap format, virtual time) and delivers none; runs stay deterministic.\n"
+        "--interactive passes what you type to the console once the --console lines are\n"
+        "used up (Ctrl-C and the like go to the guest). Ctrl-] starts a monitor command: q\n"
+        "ends the run, cdrom FILE changes the disc, eject empties the drive. Such runs are\n"
+        "not deterministic.\n"
+        "--stop-at-prompt ends the run when the console script is used up and the guest\n"
+        "waits at a prompt (--cycles is then a limit). SIGINT, SIGUSR1, SIGTERM, or SIGHUP\n"
+        "ends a run early; the snapshot, flash, NVRAM, and disk are still written.\n"
+        "--date YYYY-MM-DD[THH:MM:SS] sets the time-of-day clock at power-on (UTC; default\n"
+        "2026-01-01): virtual time runs it from there.\n"
+        "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
+        "scsi ethernet irq scheduler firmware machine all\n",
+        stderr);
 }
 
 std::optional<std::uint64_t> parse_number(std::string_view text) {
@@ -54,18 +108,28 @@ std::optional<TraceCategory> parse_category(std::string_view name) {
     return std::nullopt;
 }
 
+bool write_file(const std::string& path, std::span<const std::byte> bytes) {
+    std::ofstream stream{path, std::ios::binary | std::ios::trunc};
+    stream.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    return static_cast<bool>(stream);
+}
+
 std::optional<std::vector<std::byte>> read_file(const std::string& path) {
-    std::ifstream stream{path, std::ios::binary};
+    std::ifstream stream{path, std::ios::binary | std::ios::ate};
     if (!stream) {
         return std::nullopt;
     }
-    std::vector<char> bytes{std::istreambuf_iterator<char>{stream},
-                            std::istreambuf_iterator<char>{}};
-    if (stream.bad()) {
+    const std::streamoff size = stream.tellg();
+    if (size < 0) {
         return std::nullopt;
     }
-    std::vector<std::byte> result(bytes.size());
-    std::ranges::transform(bytes, result.begin(), [](char c) { return static_cast<std::byte>(c); });
+    std::vector<std::byte> result(static_cast<std::size_t>(size));
+    stream.seekg(0);
+    stream.read(reinterpret_cast<char*>(result.data()), size);
+    if (!stream) {
+        return std::nullopt;
+    }
     return result;
 }
 
@@ -76,12 +140,56 @@ struct Options {
     std::uint64_t cycles{1'000'000};
     std::vector<TraceCategory> trace;
     std::vector<std::uint64_t> probes;
+    std::string load_state;
+    std::string save_state;
+    std::vector<std::string> console_lines;
+    std::string flash;
+    std::string nvram;
+    std::string io6prom;
+    std::string ethernet;
+    std::string cdrom;
+    std::string disk;
+    std::uint64_t sample_pc_ns{};
+    std::optional<std::int64_t> date;
+    bool stop_at_prompt{};
+    bool interactive{};
 };
+
+// "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" (UTC) as Unix seconds.
+std::optional<std::int64_t> parse_date(std::string_view text) {
+    int year = 0;
+    unsigned month = 0;
+    unsigned day = 0;
+    unsigned hour = 0;
+    unsigned minute = 0;
+    unsigned second = 0;
+    const std::string copy{text};
+    const int fields = std::sscanf(copy.c_str(), "%d-%u-%uT%u:%u:%u", &year, &month, &day, &hour,
+                                   &minute, &second);
+    if (fields != 3 && fields != 6) {
+        return std::nullopt;
+    }
+    const std::chrono::year_month_day date{std::chrono::year{year}, std::chrono::month{month},
+                                           std::chrono::day{day}};
+    if (!date.ok() || hour > 23 || minute > 59 || second > 59) {
+        return std::nullopt;
+    }
+    return std::chrono::sys_days{date}.time_since_epoch().count() * std::int64_t{86'400} +
+           std::int64_t{hour} * 3600 + std::int64_t{minute} * 60 + second;
+}
 
 std::optional<Options> parse(std::span<char*> arguments) {
     Options options;
     for (std::size_t i = 0; i < arguments.size(); ++i) {
         const std::string_view flag = arguments[i];
+        if (flag == "--stop-at-prompt") {
+            options.stop_at_prompt = true;
+            continue;
+        }
+        if (flag == "--interactive") {
+            options.interactive = true;
+            continue;
+        }
         if (i + 1 >= arguments.size()) {
             std::fprintf(stderr, "missing value for %.*s\n", static_cast<int>(flag.size()),
                          flag.data());
@@ -92,6 +200,43 @@ std::optional<Options> parse(std::span<char*> arguments) {
             options.machine = value;
         } else if (flag == "--prom") {
             options.prom = value;
+        } else if (flag == "--load-state") {
+            options.load_state = value;
+        } else if (flag == "--save-state") {
+            options.save_state = value;
+        } else if (flag == "--flash") {
+            options.flash = value;
+        } else if (flag == "--nvram") {
+            options.nvram = value;
+        } else if (flag == "--io6prom") {
+            options.io6prom = value;
+        } else if (flag == "--ethernet") {
+            if (!value.starts_with("tap:") && !value.starts_with("pcap:")) {
+                std::fprintf(stderr, "--ethernet takes tap:IFNAME or pcap:FILE\n");
+                return std::nullopt;
+            }
+            options.ethernet = value;
+        } else if (flag == "--cdrom") {
+            options.cdrom = value;
+        } else if (flag == "--disk") {
+            options.disk = value;
+        } else if (flag == "--console") {
+            options.console_lines.emplace_back(value);
+        } else if (flag == "--date") {
+            options.date = parse_date(value);
+            if (!options.date) {
+                std::fprintf(stderr, "not a date (YYYY-MM-DD[THH:MM:SS]): %.*s\n",
+                             static_cast<int>(value.size()), value.data());
+                return std::nullopt;
+            }
+        } else if (flag == "--sample-pc") {
+            const auto number = parse_number(value);
+            if (!number || *number == 0) {
+                std::fprintf(stderr, "not a sampling interval: %.*s\n",
+                             static_cast<int>(value.size()), value.data());
+                return std::nullopt;
+            }
+            options.sample_pc_ns = *number;
         } else if (flag == "--memory" || flag == "--cycles") {
             const auto number = parse_number(value);
             if (!number) {
@@ -139,6 +284,10 @@ std::optional<Options> parse(std::span<char*> arguments) {
     if (options.machine != "ip27" || options.prom.empty()) {
         return std::nullopt;
     }
+    if (options.interactive && options.stop_at_prompt) {
+        std::fprintf(stderr, "--interactive and --stop-at-prompt do not combine\n");
+        return std::nullopt;
+    }
     return options;
 }
 
@@ -153,6 +302,9 @@ int main(int argc, char** argv) {
 
     ip27::Ip27Config config;
     config.memory_bytes = options->memory_mib << 20;
+    if (options->date) {
+        config.clock_epoch = *options->date;
+    }
 
     const auto file = read_file(options->prom);
     if (!file) {
@@ -175,6 +327,22 @@ int main(int argc, char** argv) {
     ip27::Ip27Machine machine{config, *prom};
     backends::StreamTraceSink sink{stderr};
     machine.tracer().set_sink(&sink);
+    // The guest console: the IOC3's first serial port, on standard output, with scripted input.
+    backends::ScriptedConsole console{stdout, options->console_lines, !options->load_state.empty()};
+    machine.connect_console(console);
+    machine.connect_console_input(console);
+    if (options->stop_at_prompt) {
+        console.on_script_done([&machine] { machine.request_stop(); });
+    }
+    console.on_stop([&machine] { machine.request_stop(); });
+    // After the script, an interactive run reads the user's terminal (standard input).
+    std::optional<backends::TerminalInput> terminal;
+    if (options->interactive) {
+        terminal.emplace(STDIN_FILENO);
+        console.then_read(*terminal);
+        std::fprintf(stderr,
+                     "interactive console: Ctrl-] then q ends the run (Ctrl-] then ? for help)\n");
+    }
     for (const TraceCategory category : options->trace) {
         machine.tracer().enable(category);
     }
@@ -185,8 +353,187 @@ int main(int argc, char** argv) {
         machine.tracer().enable(TraceCategory::cpu);
     }
 
-    machine.run(options->cycles);
+    std::unique_ptr<backends::FileBlockStore> cdrom;
+    if (!options->cdrom.empty()) {
+        cdrom = backends::FileBlockStore::open(options->cdrom, false);
+        if (!cdrom) {
+            std::fprintf(stderr, "cannot open CD-ROM image %s\n", options->cdrom.c_str());
+            return exit_asset;
+        }
+        machine.insert_cdrom(cdrom.get());
+    }
+    // Disc changes the console script asks for ("@cdrom PATH"). Replaced images stay open
+    // until the machine is done with them.
+    std::vector<std::unique_ptr<backends::FileBlockStore>> changed_discs;
+    const auto change_disc = [&](const std::string& path) {
+        std::unique_ptr<backends::FileBlockStore> disc;
+        if (!path.empty()) {
+            disc = backends::FileBlockStore::open(path, false);
+            if (!disc) {
+                std::fprintf(stderr, "cannot open CD-ROM image %s; drive left empty\n",
+                             path.c_str());
+            }
+        }
+        std::fprintf(stderr, "disc change to %s\n", path.empty() ? "(none)" : path.c_str());
+        machine.insert_cdrom(disc.get());
+        changed_discs.push_back(std::move(disc));
+    };
+    console.on_disc_change(change_disc);
+    // Monitor commands after Ctrl-] in an interactive run.
+    if (terminal) {
+        terminal->on_command([&](std::string_view line) {
+            if (line == "q" || line == "quit") {
+                machine.request_stop();
+            } else if (line.starts_with("cdrom ")) {
+                change_disc(std::string{line.substr(6)});
+            } else if (line == "eject") {
+                change_disc("");
+            } else {
+                std::fprintf(stderr, "monitor commands: q (end the run; the snapshot, flash, "
+                                     "NVRAM, and disk are still written), cdrom FILE, eject\n");
+            }
+        });
+    }
 
+    std::unique_ptr<backends::FileBlockStore> disk;
+    if (!options->disk.empty()) {
+        disk = backends::FileBlockStore::open(options->disk, true);
+        if (!disk) {
+            std::fprintf(stderr, "cannot open disk image %s\n", options->disk.c_str());
+            return exit_asset;
+        }
+        machine.attach_disk(*disk);
+    }
+
+    // The flash persists in a host file: its PROM log survives runs (IP27.adoc "Boot PROM").
+    // A snapshot's flash contents take precedence over the file.
+    if (!options->flash.empty()) {
+        if (const auto contents = read_file(options->flash)) {
+            if (contents->size() != machine.flash_contents().size()) {
+                std::fprintf(stderr, "flash file %s is not %zu bytes\n", options->flash.c_str(),
+                             machine.flash_contents().size());
+                return exit_asset;
+            }
+            machine.load_flash(*contents);
+        }
+    }
+
+    // The BaseIO's own flash PROM. A snapshot's contents take precedence (loaded below).
+    if (!options->io6prom.empty()) {
+        const auto image = read_file(options->io6prom);
+        if (!image || image->size() > devices::Am29f080::size) {
+            std::fprintf(stderr, "cannot use BaseIO PROM image %s\n", options->io6prom.c_str());
+            return exit_asset;
+        }
+        machine.load_baseio_flash(*image);
+    }
+
+    // The timekeeper's NVRAM persists in a host file, as its battery keeps it: the PROM
+    // environment survives, and the clock resumes from the time the file holds unless --date
+    // sets it. A snapshot's timekeeper takes precedence over the file.
+    if (!options->nvram.empty()) {
+        if (const auto contents = read_file(options->nvram)) {
+            if (contents->size() != devices::M48t35::size) {
+                std::fprintf(stderr, "NVRAM file %s is not %zu bytes\n", options->nvram.c_str(),
+                             devices::M48t35::size);
+                return exit_asset;
+            }
+            std::vector<std::uint8_t> bytes(contents->size());
+            std::ranges::transform(*contents, bytes.begin(),
+                                   [](std::byte b) { return std::to_integer<std::uint8_t>(b); });
+            machine.load_nvram(bytes, !options->date);
+        }
+    }
+
+    if (!options->load_state.empty()) {
+        const auto data = read_file(options->load_state);
+        const auto image = data ? StateImage::deserialize(*data) : std::nullopt;
+        if (!image) {
+            std::fprintf(stderr, "cannot read snapshot %s\n", options->load_state.c_str());
+            return exit_asset;
+        }
+        if (auto loaded = machine.load_state(*image); !loaded) {
+            std::fprintf(stderr, "cannot load snapshot %s: %s\n", options->load_state.c_str(),
+                         loaded.error().c_str());
+            return exit_asset;
+        }
+    }
+
+    // The Ethernet cable, after any snapshot: this run's configuration decides whether the
+    // port is plugged in.
+    std::unique_ptr<EthernetLink> cable;
+    if (options->ethernet.starts_with("tap:")) {
+        std::string error;
+        cable = backends::TapLink::open(options->ethernet.substr(4), error);
+        if (!cable) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return exit_asset;
+        }
+    } else if (options->ethernet.starts_with("pcap:")) {
+        const std::string path = options->ethernet.substr(5);
+        cable = backends::PcapLink::open(path, machine.clock());
+        if (!cable) {
+            std::fprintf(stderr, "cannot write capture %s\n", path.c_str());
+            return exit_asset;
+        }
+    }
+    machine.connect_ethernet(cable.get());
+
+    // Diagnostic: the program counter every N ns of virtual time, on standard error. Pure
+    // observation (an event that only reads the PC).
+    const VirtualDuration interval{options->sample_pc_ns};
+    auto& scheduler = machine.scheduler();
+    EventId sample{};
+    if (options->sample_pc_ns != 0) {
+        sample = scheduler.add_event("diagnostic.sample_pc", [&] {
+            std::fprintf(stderr, "sample %llu pc %#018llx\n",
+                         static_cast<unsigned long long>(machine.now().nanoseconds),
+                         static_cast<unsigned long long>(machine.cpu().state().pc));
+            scheduler.schedule_after(sample, interval);
+        });
+        scheduler.schedule_after(sample, interval);
+    }
+
+    // A host signal ends the run at the next check; the check only reads a host flag.
+    const EventId stop_check = scheduler.add_event("host.stop_check", [&] {
+        if (stop_requested != 0) {
+            machine.request_stop();
+            return;
+        }
+        scheduler.schedule_after(stop_check, VirtualDuration{10'000'000});
+    });
+    scheduler.schedule_after(stop_check, VirtualDuration{10'000'000});
+    std::signal(SIGINT, request_stop);
+    std::signal(SIGUSR1, request_stop);
+    std::signal(SIGTERM, request_stop);
+    std::signal(SIGHUP, request_stop);
+
+    machine.run(options->cycles);
+    scheduler.cancel(stop_check); // snapshots carry no host events
+    terminal.reset();             // the user's terminal back to normal before any messages
+    if (options->sample_pc_ns != 0) {
+        scheduler.cancel(sample);
+    }
+
+    if (!options->flash.empty() && machine.flash_dirty() &&
+        !write_file(options->flash, machine.flash_contents())) {
+        std::fprintf(stderr, "cannot write flash %s\n", options->flash.c_str());
+        return exit_asset;
+    }
+
+    if (!options->nvram.empty() &&
+        !write_file(options->nvram, std::as_bytes(machine.nvram_contents()))) {
+        std::fprintf(stderr, "cannot write NVRAM %s\n", options->nvram.c_str());
+        return exit_asset;
+    }
+
+    if (!options->save_state.empty() &&
+        !write_file(options->save_state, machine.save_state().serialize())) {
+        std::fprintf(stderr, "cannot write snapshot %s\n", options->save_state.c_str());
+        return exit_asset;
+    }
+
+    machine.insert_cdrom(nullptr);
     const auto& state = machine.cpu().state();
     std::fprintf(stderr, "stopped after %llu cycles at virtual %llu ns, pc %#018llx\n",
                  static_cast<unsigned long long>(machine.cpu().cycles()),

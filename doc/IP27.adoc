@@ -62,9 +62,11 @@ From LINUX `addrs.h` (`inferred`):
 128 KB is flipped by address bit 16 for CPU B, so each CPU has private low memory.
 |`0x10000000`–`0x1fffffff` |LBOOT |the local Hub's boot PROM and other directory-bus devices
 (PRM names `h:256m` = `0x9000000010000000` LBOOT: `documented`)
-|`0x30000000`– |RBOOT |remote boot PROM
-|upper half of node space |back door |directory and ECC memory (PRM Table 3-4 `L:`, `H:`,
-`P:`, `E:`)
+|`0x30000000`–`0x3fffffff` |RBOOT |the boot PROM of the node whose HSPEC space this is
+(`NODE_RBOOT_BASE`, "Hub's RBOOT space")
+|`0x80000000`–`0xbfffffff` |back door ECC |memory ECC (PRM Table 3-4 `E:`)
+|`0xc0000000`–`0xffffffff` |back door directory |protection and directory entries (PRM Table
+3-4 `L:`, `H:`, `P:`); see "Memory and directory"
 |===
 
 The R10000 reset vector `0xffffffffbfc00000` is an uncached attribute-0 reference to physical
@@ -81,6 +83,14 @@ The R10000 reset vector `0xffffffffbfc00000` is an uncached attribute-0 referenc
   (processor interface) `0x000000`, MD (memory/directory) `0x200000`, MD junk bus
   `0x220000` (LEDs `MD_LED0` `0x220050` for CPU A and `MD_LED1` `0x220058` for CPU B), II/IIO
   (I/O interface) `0x400000`, NI (network interface) `0x600000`.
+* Big windows (M mode, LINUX `sn0/addrs.h`): seven of 512 MB from I/O offset 512 MB, each
+  translated to a widget and crosstalk offset by its IIO_ITTE register at every access
+  (`Hub::BigWindow`). Fields (`hypothesis`: as the IRIX-derived Linux 2.4
+  `asm-ia64/sn/sn1/hubio.h` gives them for the Bedrock): crosstalk offset bits 4:0 in 512 MB
+  units, widget bits 11:8. `observed`: the PROM writes every ITTE 0 at 5.3 s; IRIX keeps
+  ITTE 7 at 0 (widget 0: the top window "as a surrogate for the first small window",
+  `sn0/hubio.h` SWIN0_BIGWIN) and parks ITTEs 1–6 at `0x300`. `hypothesis`: an ITTE resets
+  to 0.
 
 == Boot PROM
 
@@ -107,19 +117,69 @@ vectors at `0xbfc00000` + 0x000/0x200/0x280/0x300/0x380 (UM Table 17-1). The pro
 executed the payload from `0x1fc00000` coherently. `observed`.
 * The flash is visible at the base of LBOOT: the PROM reads its `ip27conf` block at HSPEC
   `0x10000060`–`0x1000008f` (`observed`). It is also visible at HSPEC `0x1fc00000`, where the
-  reset vector points. `hypothesis`: those are the only two 1 MB windows. Where the rest of
-  LBOOT decodes (mirrors, other directory-bus devices) is unknown.
+  reset vector points, and at the base of RBOOT (`observed`: the PROM reads the processor
+  clock at RBOOT + `0x70` and divides it by 10^6). `hypothesis`: those are the only 1 MB
+  windows. Where the rest of LBOOT and RBOOT decodes is unknown.
 * `hypothesis`: flash bytes the image does not provide read as `0xff` (erased NOR flash).
   The PROM log pages start erased until a persistent flash backing exists (M3).
-* Flash writes and AMD command sequences are not modeled in M2. Writes are refused and
-  traced.
+* The flash is `devices::Am29f080` (AMD Am29F080 datasheet): read array; reset (`F0`);
+  autoselect (manufacturer `0x01`, device `0xd5`, sectors unprotected); byte program
+  (clears bits only); sector and chip erase; while a program (7 µs) or erase (1 s per sector)
+  runs, reads return status: DQ7 data polling, DQ6 toggle, DQ5 for a program that tries to
+  set bits, DQ3 during an erase. Command cycles decode A10–A0. Erase suspend is not modeled.
+* Wiring, `observed` in the PROM's flash driver: command and program writes put flash address
+  A at LBOOT + (A << 3) with the data in bits 7:0, so they span 8 MB of LBOOT (sector 14's
+  erase goes to LBOOT + `0x700000`); reads are byte-addressed (manufacturer ID at +0, device
+  ID at +1). The machine maps the first megabyte of LBOOT, the reset-vector window, and RBOOT
+  onto the flash array for reads while the flash is in read-array mode and remaps them to
+  the flash in command modes; writes always reach the flash, and LBOOT/RBOOT + 1 MB to 8 MB
+  take writes only (`hypothesis`).
+* Persistence: `ultraviolent --flash FILE` loads the flash from FILE when it exists and writes
+  it back when a run changed it; the PROM image file is never written. Snapshots carry the
+  flash contents.
+* `observed`: with the flash modeled, POD's `initlog` (after `go cac`; "Can't initialize PROM
+  log while running out of PROM" in Dex mode) erases the PROM log sectors and writes its
+  header; the next boot's BASEIO PROM gets past "Cannot assign moduleid".
 
-== Memory
+== Memory and directory
 
+* `Ip27Config::memory_bytes` fills 512 MB banks from bank 0; a final partial bank must be a
+  power of two of at least 8 MB (MD_SIZE_8MB, IRIX-derived `hubmd.h`). The default is one
+  512 MB bank. Each bank has two memory DIMMs and one directory DIMM slot (PRM 1.4).
 * `hypothesis`: installed memory is contiguous from physical 0 (bank 0 first, banks 512 MB
   apart per PRM). It is reached by cached references (CAC), uncached attribute-3 references
-  (UNCAC), and uncached attribute-0 references within UALIAS (first 256 MB).
+  (UNCAC), and uncached attribute-0 references within UALIAS (first 256 MB). The bank sizes
+  programmed in MD_MEMORY_CONFIG do not change the decode yet, and memory addresses beyond
+  a bank's installed size are unmapped rather than aliased.
 * The CPU B UALIAS flip is not modeled, because the target has one CPU (slice A).
+
+=== Directory memory
+
+`DirectoryMemory` is the back-door view of the directory at HSPEC + 3 GB (IRIX-derived
+`addrs.h` BDDIR_ENTRY_LO/HI and BDPRT_ENTRY; PRM Table 3-4, whose `L:0x2100560` =
+`0x90000000c08402a0` is a unit test). Each 4 KB page of memory has 1 KB: 64 protection
+doublewords (one per region), then (address bit 9) 32 directory entries of two doublewords,
+one per 128-byte line. Bank b's entries start at b × 128 MB.
+
+* Directory DIMMs are standard (`Ip27Config::directory`, default; `hypothesis`: the
+  configuration that needs no directory DIMMs) or premium. An entry holds 16 bits
+  (MD_SDIR_MASK) or, with premium DIMMs while MD_MEMORY_CONFIG DIR_PREMIUM is set, 48 bits
+  (MD_PDIR_MASK). Bits beyond the entry, including MD_DIR_FORCE_ECC, are not stored.
+* `hypothesis`: a bank's DIMMs ignore address bits above their size, so back-door addresses
+  beyond the installed directory alias within it.
+* `hypothesis`: an empty bank's directory reads zero and ignores writes.
+* `hypothesis`: ECC fields hold what is written; hardware ECC generation and checking are
+  not modeled. The ECC back door (HSPEC + 2 GB) is not modeled.
+* Only doubleword accesses are modeled.
+
+`observed` (flash `0x1fc28290`, `0x1fc28460`): MDIRCONFIG sizes each bank through the
+directory. It writes a pattern to the bank's first protection entry and a different value to
+the next, and reads the first back: 48 bits intact means premium, low 16 bits `0x5555`
+standard, anything else an empty bank. It then writes the entry for base + size/2 for sizes
+512 MB down to 32 MB and checks whether the base entry changed (aliasing). For a 512 MB bank
+it also checks that data 64 MB apart does not alias. With the default configuration it
+programs MD_MEMORY_CONFIG = `0x00101fa80f000007`: bank 0 is 512 MB (code 7), the other
+banks empty, DIR_PREMIUM clear.
 
 == Processor
 
@@ -153,10 +213,11 @@ The processor clock defaults to 180 MHz, consistent with the block.
 
 == Machine loop and time
 
-* After every CPU step, the machine advances the scheduler to the virtual time of the CPU's
-  completed cycles: `time_at_cycles(cycles, processor clock)`. Devices therefore see the time
-  at the start of the instruction that accesses them, and events fire at the first cycle
-  boundary at or after their deadline. Deterministic by construction (ADR-005, ADR-018).
+* Virtual time is `time_at_cycles(cycles, processor clock)` of the CPU's completed cycles.
+  The machine brings the scheduler up to that time at the first cycle boundary at or after
+  the next event deadline (events fire there), and immediately before any device access
+  (devices see the time at the start of the accessing instruction). Deterministic by
+  construction (ADR-005, ADR-018).
 
 == Hub
 
@@ -185,9 +246,12 @@ PROM's local arbitration (LED `0x24`) reads both.
 interrupt `level` (0–127). See "Hub interrupts".
 |`0x000098`, `0x0000a0` |PI_INT_PEND0/1 |Pending interrupt bits 0–63 and 64–127.
 |`0x0000a8`–`0x0000c0` |PI_INT_MASK0/1_A/B |Per-CPU masks.
-|`0x000108`, `0x000110` |PI_RT_COMPARE_A/B |Storage. The PROM writes early boot and failure
-codes (`0x5e`, `0x5f`, `0x60`, `0xb4`) here per CPU (`observed`). The compare interrupt is
-not modeled.
+|`0x000108`, `0x000110`, `0x000118` |PI_RT_COMPARE_A/B, PI_PROFILE_COMPARE |When
+PI_RT_COUNT reaches a compare value the comparator latches its pending bit (see "Hub
+interrupts"). The PROM also writes early boot and failure codes (`0x5e`, `0x5f`, `0x60`,
+`0xb4`) to RT_COMPARE per CPU (`observed`).
+|`0x000120`–`0x000158` |PI_RT_PEND_A/B, PI_PROF_PEND_A/B, PI_RT_EN_A/B, PI_PROF_EN_A/B |Bit 0.
+A write sets the pending bit to bit 0 (`hypothesis`; IRIX writes 0 to clear).
 |`0x000160` |PI_RT_LOCAL_CTRL |Storage only (`hypothesis`).
 |`0x000418`, `0x000420` |PI_ERR_STACK_ADDR_A/B |Storage that survives a Hub local reset.
 See "Hub local reset".
@@ -199,7 +263,7 @@ modeled.
 |`0x220000`, `0x220008` |MD_UREG0_0/1 |The junk-bus PCF8584 I²C controller's S0 and S1. See
 "Junk bus".
 |`0x220048` |MD_SLOTID_USTAT |FPROMRDY (bit 4) = 1; I2CINTR (bit 3) = PCF8584 interrupt
-output; SN0 slot ID (2:0) = 0 (`hypothesis`); other bits 0 (`hypothesis`).
+output; SN0 slot ID (2:0) from the machine (see "Machine type"); other bits 0 (`hypothesis`).
 |`0x220050`, `0x220058` |MD_LED0/1 |Eight-bit progress LEDs for CPU A/B (PRM 3.1). Traced
 under `firmware` as `led A 0x..`. `hypothesis`: they read back their last value.
 |`0x400128` |IIO_ILCSR |LLP control/status. Link status (bits 13:12) reads
@@ -216,9 +280,106 @@ no CrayLink cable). The PROM reads the node ID with mask `0x1ff00` (`observed`).
 requesting store completes. PORTRESET (bit 7) has no link to reset on one node.
 |`0x600010` |NI_PROTECTION |Storage (`hypothesis`: no effect on one node).
 |`0x600100`, `0x600108` |NI_SCRATCH_REG0/1 |Scratch storage.
+|`0x200018` |MD_MEMORY_CONFIG |Resets to MMC_RESET_DEFAULTS (`0x001e7fbc3fffffff`, IRIX-derived
+`hubmd.h`: every bank at 512 MB). "Bits not used by the MD are used by software", so all bits
+are stored as written. Writes are traced as `md memory config`. The PROM's SPEEDUP (LED
+`0x0e`) reads it first (`observed`). The bank sizes do not yet change the memory map.
+|`0x200020` |MD_REFRESH_CONTROL |Resets to MRC_RESET_DEFAULTS (`0x400`); stored.
+|`0x2000a8` |MD_MLAN_CTL |MicroLAN (1-Wire) master for the node's NIC serial-number chip. See
+"MicroLAN".
+|`0x410000`–`0x410028`, `0x420000`–`0x420028` |IIO_IBLS/IBSA/IBDA/IBCT/IBNA/IBIA_0/1 |The
+block-transfer engines. See "Block-transfer engines".
+|`0x400000` |IIO_WID |The Hub's own XIO widget ID: revision 31:28 (= Hub revision,
+`hypothesis`), part `0xc101`, manufacturer `0x036` (IRIX-derived `hubio.h`, `xwidget.h`).
+|`0x000400` |PI_ERR_INT_PEND |Reads 0; writes (clears) accepted. No modeled error source.
+|`0x000430`–`0x000468` |PI_ERR_STATUS0/1_A/B (+ `_RCLR`) |Read 0: no errors recorded.
+|`0x608008`, `0x608088` |NI_PORT_ERROR, _CLEAR |Read 0: no link, so no LLP errors.
 |===
 
 `hypothesis`: undocumented reset values are zero.
+
+==== Storage-only registers
+
+These hold what software writes (masked to their fields where the header gives them) and have
+no other modeled effect yet. Each is named in `hub.cpp`'s `stored_registers` table. The PROM
+programs all of them during INITII, SPEEDUP, and the NI/PI setup (`observed` with the survey
+below). Offsets and names are from the IRIX-derived Linux headers.
+
+* PI: CALIAS_SIZE, CRB_SFACTOR, RT_COMPARE_A/B, RT_LOCAL_CTRL, ERR_INT_MASK_A/B,
+  ERR_STACK_SIZE, SYSAD_ERRCHK_EN, NACK_CNT_A/B, NACK_CMP.
+* MD: MIG_DIFF_THRESH, MIG_VALUE_THRESH, MOQ_SIZE, PERF_SEL, PERF_CNT0–5, MEM_DIMM_INIT and
+  DIR_DIMM_INIT (DIMM select 35:32, SDRAM mode 11:0; MDIRINIT writes `(n << 32) | 0x29` for
+  each DIMM, `observed`).
+* II: SCRATCH_REG0/1 (mask `0x0000000f00f11fff`), WCR, ILAPR, ILAPO, IOWA, IIWA, IIDEM,
+  IIDSR, IGFX_0/1, ITTE 1–7 (`0x400160`–`0x400190`, `inferred` from IIO_NUM_ITTES and the
+  gap before IOPRB_0), IXCC, IMEM, IXTT, IBCN, IPCA, PRTE_0–7, IPDR, ICDR, IFDR, IIAP, ICMR,
+  ICCR, ICTO, ICTP, IPCR, IPPR.
+* NI: PROTECTION, GLOBAL_PARMS, DIAG_PARMS, PORT_PARMS, SCRATCH_REG0/1, AGE_* (`0x600500`–
+  `0x600538`), IO_PROTECT, IO_PROT_OVRRD, VECTOR_PARMS, VECTOR, VECTOR_DATA (`hypothesis`:
+  launching a vector PIO on an unlinked node does nothing).
+
+==== Idle ranges
+
+Registers that report an idle, error-free Hub read 0. Nothing modeled raises errors, keeps
+requests in flight, or runs a block-transfer engine.
+
+[cols="1,3,1"]
+|===
+|Offsets |Registers |Writes
+
+|`0x200050`–`0x200088` |MD_DIR/PROTOCOL/MEM/MISC_ERROR and `_CLR` |accepted
+|`0x400008` |IIO_WSTAT |accepted
+|`0x400130` |IIO_ILLR (LLP error counts) |accepted
+|`0x400198`–`0x4001d8` |IIO_IOPRB_0, _8.._F |refused
+|`0x4001f8` |IIO_IECLR |accepted
+|`0x400400`–`0x4005d8` |IIO_ICRB_A..D(0..14); zeroed by INITII (`observed`) |accepted
+|`0x600300`–`0x600310` |NI_VECTOR_STATUS, RETURN_VECTOR, VECTOR_READ_DATA |accepted
+|`0x600380` |NI_VECTOR_CLEAR |refused
+|===
+
+=== MicroLAN
+
+MD_MLAN_CTL (IRIX-derived `hubmd.h` MLAN_*): PHI1 33:27 and PHI0 26:20 (timing), PULSE 19:10
+(low-pulse length), SAMPLE 9:2 (sample time), DONE 1, RD_DATA 0 (the sampled line). A write
+starts a pulse and sample; it resets to PHI1 = PHI0 = `0x31`.
+
+`observed`: the PROM's first operation is a 520-unit pulse sampled at 65, a 1-Wire reset
+and presence detect; it tries three times and continues without a serial number.
+
+Model: nothing is attached to the bus, so no device answers with a presence pulse or pulls a
+slot low, and the pulled-up line samples 1. `hypothesis`: an operation completes before the
+next access. A NIC device (serial and part numbers, which IRIX reports) is not modeled.
+
+=== Block-transfer engines
+
+Two engines, at `0x410000` and `0x420000` (IRIX-derived `hubio.h`): IBLS length/status
+(length 15:0, ERROR 16, BUSY 20), IBSA source, IBDA destination, IBCT control (ZFIL_MODE 0,
+NOTIFY 4, POISON 8), IBNA notification address, IBIA interrupt address (level 22:16, node
+8:0).
+
+`observed` (NMI_INIT, LED `0x5b`): the PROM writes IBLS = BUSY | `0x1000`, the source and
+destination (cached xkphys addresses), IBIA = level 63 (BTE 0) or 62 (BTE 1), then IBCT =
+0, and polls PI_INT_PEND0 for both levels. The public Linux SN1 BTE driver uses the same
+sequence (IBCT starts the transfer).
+
+Model:
+
+* Writing IBCT while IBLS.BUSY is set runs the transfer: IBLS length × 128 bytes (`inferred`:
+  the PROM splits a region between the engines at `0x1000` lines = 512 KB) from IBSA to IBDA,
+  or zeros with ZFIL_MODE, through the node's address space using address bits 39:0
+  (`hypothesis`).
+* `hypothesis`: without BUSY, writing IBCT starts nothing (INITII zeroes every register).
+* On completion IBLS reads 0 (ERROR if an access failed), the final IBLS is written to IBNA
+  with NOTIFY, and IBIA's level is set in PI_INT_PEND when IBIA names node 0.
+* `hypothesis`: a transfer completes before the next access; its duration is not modeled.
+  POISON is not modeled.
+
+==== Register survey
+
+To list the Hub registers a stretch of PROM execution touches, build a temporary binary that
+answers every unmodeled Hub read with 0 and logs the offset, run it from a snapshot, and
+model each register from its evidence. The survey binary is never committed and its answers
+are never evidence: a register enters `hub.cpp` only with a cited source.
 
 === Hub interrupts
 
@@ -229,7 +390,14 @@ From the IRIX-derived `asm/sn/intr.h` (`inferred`):
 * Each CPU slice has INT_MASK0/1. CPU A's `INT_PEND0 & INT_MASK0_A` drives R10000 IP2, and
   `INT_PEND1 & INT_MASK1_A` drives IP3 ("L2 = INT_PEND0, L3 = INT_PEND1"). The machine
   connects them to CPU interrupt inputs 0 and 1.
-* L4 (RTC), L5 (profiling timer), and L6 (Hub errors) are not modeled yet.
+* L4 (RTC): `PI_RT_PEND_x & PI_RT_EN_x` drives IP4 (HUB_IP_RT); L5 (profiling):
+  `PI_PROF_PEND_x & PI_PROF_EN_x` drives IP5 (HUB_IP_PROF); machine inputs 2 and 3. The RT
+  comparator for a CPU pends when PI_RT_COUNT reaches PI_RT_COMPARE_x; the profile comparator
+  pends both CPUs. `inferred`: a pending bit stays set until software writes it, and a compare
+  value already passed does not fire until the counter comes round (IRIX's clock tick).
+* Crosstalk interrupt packets to PI_INT_PEND_MOD set their vector's level; clear packets (a
+  Bridge's INT_MODE) clear it (`hypothesis`).
+* L6 (Hub errors) is not modeled.
 
 The PROM sets level 113 (`IP27_INTR_4`, "reserved for PROM use") during its first barrier
 (LED `0x28`) and reads it back from INT_PEND1 (`observed`).
@@ -250,26 +418,56 @@ registers except PI_ERR_STACK_ADDR_A/B, and gives the CPU a cold reset.
 `0xc0`. That is the PCF8584 I²C controller's sequence: select own address, write `0x7f`,
 select clock, 12 MHz / 90 kHz, enable serial output. It then reads the own address back
 (LED `0x4c` I2CINIT; PRM Table 3-1 names the PCF8584). So UREG0_0 is S0 and UREG0_1 is S1.
+It later sets the own address to `0x08`.
 
-`devices::Pcf8584` models the chip from the public Linux driver definitions. Nothing is
-attached to its I²C bus: an addressed byte is never acknowledged, and a byte takes nine SCL
-periods of virtual time.
+`devices::Pcf8584` models the chip from the datasheet and the public Linux driver
+definitions, on a `devices::I2cBus`. As master it runs START, repeated START (S1 = `0x45`,
+then the address in S0), transmission with the target's acknowledge in LRB, and reception
+(each S0 read returns a byte and starts the next; the first is a dummy read; S1.ACK clear
+NAKs the next byte). A byte takes nine SCL periods of virtual time. When it is not master,
+its shift register latches every byte other masters send, and BB follows their STOP.
+`hypothesis`: after a NAKed byte, reading S0 starts no further reception. Slave operation is
+not modeled.
 
-`observed`: after I2CINIT the PROM waits up to 5 s (timeout `0x4c4b40` µs) for S0 to
-change. With nothing on the bus it times out at 5.006 s of virtual time, reports LED `0x4d`
-I2CDONE, and continues.
+== System controller
 
-The I²C peer is the system controller. The PROM's strings name it ELSC ("Switching to ELSC
-UART", "ELSC not responding.", "Can't talk to elsc!", "System controller response timeout",
-"Timed out getting ELSC lock"), and it has `i2c_master_xmit`/`i2c_master_recv` routines
-(`observed`). After I2CDONE it calls a master transmit that first waits up to 1 s
-(`0xf4240` µs) for the bus, and it retries once per second (`observed` with `--probe`).
+The I²C bus is shared with the module's system controller, the ELSC (PROM strings: "ELSC not
+responding.", "Can't talk to elsc!", "Timed out getting ELSC lock"). Sources: the IRIX-derived
+Linux headers `ksys/elsc.h` and `ksys/i2c.h` (history tree v2.5.20 and v2.5.0: API, error
+codes, `i2c_arb` "Timeout waiting for sysctlr arb"), the PROM's I²C driver (disassembly), and
+slate's controller (read-only `sn0msc -r` reads of its NVRAM).
 
-`observed`: the PROM tolerates a missing system controller. It stops retrying after about
-21 s (at 26 s of virtual time) and continues with the MSC probe (LED `0x1a`). No public
-source documents the ELSC protocol, so modeling one would need new evidence: SGI
-documentation, a real ELSC's traffic, or its firmware. Without one, every boot spends about
-26 virtual seconds here.
+`observed` in the PROM's driver:
+
+* Arbitration (`i2c_arb`, flash `0x1fc3978c`): with the bus idle, the CPU waits until S0 shows
+  its token and it stays for 250 µs; it first waits for a stale copy to disappear. The token
+  is `0xde + 2 × slot code + CPU slice` (slot codes 1–4 for n1–n4), or that plus 8 when the
+  controller has a message for it. A transaction ends with a repeated START addressed to
+  `0x7f` (byte `0xfe`) instead of a STOP.
+* NVRAM (`elsc_nvram_read`, flash `0x1fc3d138`): each byte is an I²C random read of a
+  24C16-style EEPROM at `0x50 | address[10:8]`, under a software lock in MD_PERF_CNT0 bit 15.
+  The probe checks for magic `0x37` at `0x700` (else ELSC_ERROR_NVMAGIC, -124), bytes
+  `0x700`–`0x70f` are cached, and the SN0 module number is byte `0x708`.
+* Commands go to `0x20` and messages to `0x08`.
+
+Real hardware (slate, module 1): the NVRAM is 2048 bytes; `0x700`–`0x70f` hold `'7'`, "none"
+(the password), zeros, the module number `0x01` at `0x708`, and `0x78` at `0x70b`; `0x000`
+onward holds board-inventory text records.
+
+Model:
+
+* `devices::I2cEeprom` (24C16 protocol) holds the NVRAM, initially erased except for the
+  `0x700` block as slate has it, with `Ip27Config::module_number` (default 1) at `0x708`
+  (`initial_controller_nvram`).
+* `devices::Elsc` models arbitration only. `hypothesis`: it offers the eight node-CPU tokens
+  (`0xe0`–`0xe7`) in turn, 1 ms each, while the bus is idle; it never has a message; it frees
+  the bus 100 µs after being addressed at `0x7f`. Its command and message addresses do not
+  answer, so ELSC commands (display, DIP switches, NIC, heartbeat) fail fast with
+  I2C_ERROR_NAK and the PROM carries on ("MSC DIP switches unavailable").
+* The NVRAM is not persisted across runs yet.
+
+Before this model the PROM spent 5 s waiting at I2CINIT and 21 s retrying the controller,
+and module voting failed (modid -1).
 
 == Machine type
 
@@ -277,33 +475,492 @@ documentation, a real ELSC's traffic, or its firmware. Without one, every boot s
 at LBOOT + `0x90`. It is 0 in the user's image, so the PROM configures itself as an SN0 node.
 That matches IP27-TARGET.adoc's Origin 2000 personality. The flash is not altered.
 
+The node's module slot comes from MD_SLOTID_USTAT bits 2:0. `observed`: for SN0 the PROM maps
+slot IDs 0–7 through the table `0xf0, 0xf0, 0x52, 0x51, 4, 3, 2, 1` (`0xf0` invalid), so node
+slots n1–n4 are IDs 7–4. `Ip27Config::node_slot` (default n1, as slate's first node board)
+selects it. Slot ID 0 had given "cpu in SLOT Invalid0" and `/hw/module/0/slot/n0`.
+
+== Xtalk
+
+`xtalk::Link` is a crosstalk link's far end: PIO requests name a widget (0–15) and an offset
+in its space. `xtalk::Widget` is a port's view of a widget: PIO to its space, and interrupts
+(a write of a vector to its INTDEST address). The Hub's II turns PIO to IO small window w
+(every widget but 1, whose window holds the Hub's own registers) into a request on its link;
+with no link it fails. The Hub is itself a widget: `inferred`, its II registers are laid out
+as a standard crosstalk widget (IIO_WID at `0x400000` holds WIDGET_ID, IIO_WSTAT
+WIDGET_STATUS, IIO_WCR WIDGET_CONTROL), so its widget space is II offset 0 up, with 32-bit
+registers in the low half of each doubleword. `observed` (xbow_sanity): an interrupt whose
+address is PI_INT_PEND_MOD through the Hub's IO window (`0x01800090`) sets the level named
+by its vector in PI_INT_PEND.
+
+`observed`: INITII sets the Hub's widget number in IIO_WCR bits 3:0 from the node slot, using
+the PROM's SN0 table n1 → 9, n2 → `0xa`, n3 → `0xa`, n4 → 9. The machine cables the Hub to
+that Crossbow port (`hub_xbow_port`).
+
+=== Crossbow
+
+`devices::Xbow` (IRIX-derived Linux v2.6.12 `arch/ia64/sn/include/xtalk/xbow.h`; real
+topology: see "IO slot numbering" below) answers widget 0 and forwards 8–15 to
+attached widgets. Registers are 32-bit at offset 4 mod 8 (a doubleword access carries the
+register in its low half, `hypothesis`).
+
+* WIDGET_ID: part `0x0000`, manufacturer 0, bit 0 set (the JTAG IDCODE layout; the PROM
+  rejects a widget ID whose LSB is 0). `hypothesis`: revision 4 (XBOW_REV_1_3). For
+  revisions from 5 the PROM's xbow_sanity expects a source-ID field in the status register,
+  which is not modeled.
+* Per-port link registers at `0x100 + 0x40 × (port & 7)`: STATUS (and STATUS_CLR) reads
+  LINKALIVE for an attached widget, AUX_STATUS reads PRESENT; control and arbitration
+  registers are storage (the PROM uses port F's upper arbitration register as a lock).
+* Storage: WIDGET_CONTROL, REQ_TIMEOUT, INTDEST, LLP_CFG, ARB_RELOAD, performance counters.
+* LINK_RESET (`0x34` in a port's link registers) resets the widget on that port
+  (`xtalk::Widget::xtalk_reset`); the Bridge's reset clears its registers, ATEs, and
+  interrupt state and drives PCI RST# to its slots (`pci::Device::pci_reset`). `observed`:
+  the PROM writes it for the BaseIO's port as it boots. Without it, the PROM that IRIX
+  restarts into found the ISPs as IRIX left them, and IRIX's `ql_isr` then reported
+  errors. `hypothesis`: reset reaches the widget and its PCI devices; ISP RISC RAM survives
+  it.
+* IO slot numbering (`observed`: four tables of 32-bit klconfig slot codes, indexed by
+  widget − 8, in the user's PROM image at payload offset `0xd1dd0`; `0x2n` is IO slot n,
+  `0x5n` and `0x0n` node slots). Deskside ("Kego", one Crossbow): 8 io4, 9 n2, `0xa` n1,
+  `0xb` io2, `0xc` io6, `0xd` io5, `0xe` io3, `0xf` io1, as on slate (Kona on 8 is io4,
+  MENET on 13 io5, BaseIO on 15 io1). Rack module, Crossbow 0: 8 io1, 9 n1, `0xa` n3,
+  `0xb` io4, `0xc` io2, `0xd` io6, `0xe` io5, `0xf` io3; Crossbow 1 holds n2, n4, io7–io12.
+  The rack tables agree with the PROM's Hub widget numbers (n1 9, n2 `0xa`, n3 `0xa`,
+  n4 9). With the BaseIO on port 15 (slate's port), this machine's PROM named it io3, so
+  it uses the rack table. What selects the deskside table is not known. The machine
+  therefore cables the BaseIO to port 8, the rack module's io1 (`ip27::baseio_port`).
+  `observed` after the move: the PROM reports "Console has moved from
+  /hw/module/1/slot/io3 to /hw/module/1/slot/io1", walks SCSI on `.../io1`, and IRIX
+  installed with the old topology boots unchanged.
+* `observed` in xbow_sanity (whose failures name each check): INTDEST_UPPER reads its fields
+  (`0xff0fffff`) with target bit 19 set; a write to a read-only register (WIDGET_ID,
+  ERR_UPPER, ERR_LOWER) completes, sets REG_ACC_ERR (`0x20`) in WID_STAT, and with
+  REG_ACC_IE in WIDGET_CONTROL sends an interrupt to INTDEST; WID_STAT does not clear on
+  read, STAT_CLR (`0x54`) does.
+* `hypothesis`: no link ever reports an error, credits and arbitration have no effect,
+  counters do not count, and the NIC register (`0x74`) is not modeled.
+
+=== Bridge
+
+`devices::Bridge` is the BaseIO's crosstalk-to-PCI widget on Crossbow port 8 (io1), from the
+IRIX-derived Linux `arch/mips/include/asm/pci/bridge.h`. Registers are 32-bit at offset 4 mod
+8.
+
+* WIDGET_ID: part `0xc002`, manufacturer `0x036`, `hypothesis` revision 4 (BRIDGE_REV_D).
+* `observed` reset values (the PROM's bridge_sanity names each): status PCI_GIO_N (bit 5)
+  set; WIDGET_CONTROL `0x7f0033f0` with the widget ID (the Crossbow port) in bits 3:0;
+  REQ_TIMEOUT `0xfffff`; DEVICE0–7 `0x18001000`, `0x18001002`, `0x18001004`–`0x18001009`
+  (ERR_LOCK_EN, PAGE_CHK_DIS, DEV_IO_MEM, and each window's PCI offset in megabytes).
+* An access to an offset `bridge.h` does not define sets INT_STATUS INVLD_ADDR (bit 24; a
+  write completes, a read fails). Error bits enabled in INT_ENABLE send one interrupt to the
+  widget INTDEST address with INT_HOST_ERR's vector (`observed`: bridge_sanity expects it in
+  PI_INT_PEND0). INT_RST_STAT clears by the BRIDGE_IRR_* groups.
+* BRIDGE_NIC is a MicroLAN master (see "NICs").
+* Configuration space (`0x20000 + 0x1000 × slot`, function 0 only): 32-bit accesses see the
+  PCI dword's value; narrower ones address byte `offset ^ (4 − size)` (Linux
+  `arch/mips/pci/ops-bridge.c`). An empty slot fails the access (a bus error), which the
+  PROM's enumeration expects.
+* Device windows (DEVIO0/1 2 MB at `0x200000`/`0x400000`, DEVIO2–7 1 MB from `0x600000`):
+  PCI address = DEVICE(x) offset × 1 MB + offset in window, memory or I/O space by
+  DEV_IO_MEM. `inferred`: with DEV_SWAP clear the window preserves byte lanes, like
+  configuration space: an access narrower than 32 bits at window byte A reaches PCI byte
+  A ^ (4 − size), and values pass unchanged. With DEV_SWAP set bytes keep their addresses and
+  wider values arrive byte-reversed. Evidence: IP27 Linux swizzles I/O byte and halfword
+  addresses by 3 and 2 with data unchanged (`asm/mach-ip27/mangle-port.h`); the PROM, with
+  DEV_SWAP clear, writes 16550 register n of the IOC3 at window byte base + n, which is PCI
+  byte base + (n ^ 3) where `ioc3.h` puts it (`iu_lcr` first; Linux `8250_ioc3.c` reads
+  register n at `offset ^ 3`); and it polls the ISP1020's semaphore (PCI `0x0c`) at window
+  byte `0x0e` and writes its HCCR (PCI `0xc0`) at `0xc2`. (Until 2026-09-27 the model had
+  both the Bridge and the IOC3 inverted, which cancelled for the IOC3 and broke the ISP.)
+  An access no device claims sets PCI_MST_TIMEOUT and fails.
+* DMA (`pci::DmaPort` per slot): the 32-bit direct map (PCI `0x80000000` up, 2 GB) goes to
+  the widget and 2 GB crosstalk block DIR_MAP names; a 64-bit PCI address names the widget in
+  bits 63:60 and attributes in 59:48 (`PCI64_ATTR_*`; IP27 Linux DMA addresses are
+  `masterwid << 60 | PCI64_ATTR_BAR | physical`), with the crosstalk address in 47:0.
+  `hypothesis`: attributes other than VIRTUAL do not change the data. With the device's
+  SWAP_DIR set, PCI bytes keep their addresses; `hypothesis`: without it DMA preserves byte
+  lanes like PIO (PCI byte X is crosstalk byte X ^ 3). The PROM programs the ISPs' DEVICE
+  registers without SWAP_DIR, and the ISP's little-endian IOCBs then decode correctly
+  (target, LUN, CDB), which supports the hypothesis. The Crossbow routes DMA to the widget on
+  the target port; the Hub delivers it to node memory (`hypothesis`: crosstalk address bits
+  39:0 are the physical address, coherent and immediate).
+* ATE RAM (`b_int_ate_ram`): 128 entries written as doublewords at `0x10000`; a word read at
+  entry + 4 returns the high word, and at `0x11000` + 8n + 4 the low word. ATE-mapped DMA (PCI
+  `0x40000000`–`0x7fffffff`, 4 KB pages or 16 KB with BRIDGE_CTRL_PAGE_SIZE) uses a valid
+  entry's crosstalk address (47:12) and widget (11:8). External ATE SSRAM (`0x80000` up):
+  `hypothesis` none fitted on the BaseIO; accesses complete, reads return 0 (IRIX sizes it by
+  a write and read-back per size and treats a mismatch as absence).
+* PCI interrupts (Linux `pci-xtalk-bridge.c`): pins INT0–7 (slot k's INTA is pin k, INTB
+  generically pin k ^ 4; the BaseIO wires the IOC3's INTB, its SIO interrupts, to pin 4:
+  Linux 5.10 `bridge_setup_ip27_baseio`, `int_mapping[2][1] = 4`) show in
+  INT_STATUS 7:0. An enabled pin sends an interrupt to INTDEST with the vector in INT_ADDR(n)
+  bits 7:0 when it rises (or when enabled while high), and with its INT_MODE bit a clear
+  packet when it falls. `hypothesis`: the address is INTDEST's (INT_ADDR's host bits name the
+  node, and there is one).
+* External flash PROM 0 at `0xC00000` (bridge.h BRIDGE_EXTERNAL_FLASH): the BaseIO's own
+  PROM, loaded from the user's `io6prom.img` with `--io6prom` (the raw promgen image, header
+  first). `observed` (the IP27 PROM's flash driver, by disassembly): the port is 16 bits
+  wide; commands are halfword stores at twice the word address, and identification reads
+  the halfwords at 0 and 2, accepting 8-bit parts (AMD `0x01`/`0xd5`, `0xad`) and 16-bit ones
+  (AMD or Fujitsu `0x22da`). `observed` (IRIX's `flash` utility reads the image byte by byte
+  and, with the 16-bit part, reports the same header as on slate): the part is a 16-bit one
+  in word mode (modeled as `Am29f080` in word mode with device `0x22da`, the Am29LV800BT;
+  `hypothesis`: uniform 64 KB sectors, the boot sectors not modeled), so data is
+  byte-linear. Writes reach it only with WIDGET_CONTROL FLASH_WR_EN (bit 31), which IRIX's
+  `pcibr_map` sets when it maps the flash. With it the IP27 PROM loads the BASEIO PROM from
+  flash (the build slate runs, 11:26:28, where the internal copy is 11:05:48), and `flash -i`
+  reports "prom file version 6.156 is the same as current version 6.156: prom not flashed".
+  Without the image the port is empty and the PROM falls back to its internal copy.
+* Not modeled: FORCE_PIN/FORCE_ALWAYS, and errors other than invalid addresses and master
+  aborts.
+
+=== PCI
+
+`pci::Device` is a PCI function 0 as the Bridge sees it: configuration dwords with byte
+enables, and memory and I/O accesses it decodes through its BARs. `pci::ConfigHeader` holds a
+type-0 header: identity, command, a constant status, BARs sized by their address masks, and
+the interrupt line and pin.
+
+The BaseIO population follows slate (OBS-SLATE-0001): ISP1020-family SCSI controllers in
+slots 0 and 1 (`0x1077:0x1020`, class `0x0100`; `hypothesis`: revision 5, a 256-byte I/O BAR
+and a 4 KB memory BAR) and the IOC3 in slot 2 (`0x10a9:0x0003`; `hypothesis`: class 0,
+revision 1, one 1 MB memory BAR). `observed` (io_config_space): status reads `0x0200` for the
+ISPs and `0x0280` for the IOC3 after reset.
+
+=== IOC3
+
+`devices::Ioc3` (register map: the IRIX-derived Linux `asm/sn/ioc3.h`).
+
+* An ordinary little-endian PCI device: 32-bit registers hold their values in PCI byte lane
+  order (through the lane-preserving window the PROM's values arrive intact: MCR `0x82104` is
+  a MicroLAN reset pulse).
+* UART A (16550 register n at PCI byte `0x20178 + (n ^ 3)`, `struct ioc3_uartregs`) and UART B
+  (`0x20170 + (n ^ 3)`) are `devices::Uart16550`
+  (PC16550D): divisor latch, FIFOs, loopback, LSR/MSR. `hypothesis`: transmission takes no
+  time and interrupts are not modeled. UART A is the console (see "Console").
+* MCR (`0x30`) is a MicroLAN master on the Ethernet-address NIC (see "NICs").
+* SIO_CR (`0x28`) bits 22:19 are read-only arbiter status; with serial DMA unmodeled they read
+  ARB_DIAG_IDLE (`observed`: IRIX waits for it after "Setting rbaud to 19200").
+* Every other register is traced storage (the PROM's register tests pass on storage).
+* Serial DMA (Linux `ioc3.h`, `drivers/serial/ioc3_serial.c` v2.6.16): SBBR_H/L hold the ring
+  buffer's PCI address (SBBR_L bit 0: 4 KB rings, else 1 KB), rings TX A, RX A, TX B, RX B;
+  each port has SSCR, STPIR, STCIR, SRPIR, SRCIR, SRTR, SHADOW (port A at `0xb8`, B at
+  `0xd4`). With SSCR DMA_EN and not PAUSE, the engine sends TX entries (8 bytes: 4 data, 4
+  status/control; TXCB_VALID bytes go out, TXCB_INT_WHEN_DONE raises TX_EXPLICIT) from STCIR
+  to STPIR, one entry per character time (`hypothesis`: 9600 baud), and writes each console
+  input byte as its own RX entry (RXSB_DATA_VALID | MODEM_VALID) at SRPIR, raising RX_TIMER
+  (`hypothesis`: the four-byte packer and RX timer are not modeled). `inferred`: entry bytes
+  are in memory order, most significant byte first in each PCI dword through the
+  lane-preserving Bridge. PAUSE reads back PAUSE_STATE at once (`observed`: IRIX pauses the
+  ring and waits for it). SSCR_RESET empties the rings; RX_DRAIN completes at once.
+* SIO interrupts: SIO_IR (TX_MT a level while a TX ring is empty, `hypothesis`; other bits
+  latch until written back), SIO_IES/SIO_IEC set and clear the enables; any pending enabled
+  bit asserts the IOC3's INTB, Bridge pin 4. `observed`: IRIX chooses the pin by board. While
+  the BaseIO's NICs carried no manufacturing record, IRIX knew the board only as a generic
+  widget and enabled pin 6 (slot ^ 4). With the records it names the board BASEIO and
+  enables pin 4, and an IOC3 still on pin 6 left the console without input.
+* Not modeled: the parallel port and keyboard/mouse. The PROM's serial_dma diagnostic still
+  fails ("Timeout on uartA dma").
+* Bytebus device 0 (`0x80000`) is an M48T35 timekeeper (`devices::M48t35`; Linux `ioc3.c`
+  ip27_baseio_setup adds an "m48t35"): 32 KB of NVRAM with a BCD clock at `0x7ff8`, device
+  byte n at PCI byte n ^ 3 (`observed`: IRIX writes the control byte at PCI `0x87ffb`). The
+  clock runs on virtual time from `Ip27Config::clock_epoch` (`--date`, default 2026-01-01
+  UTC); READ freezes it, WRITE loads it. The chip keeps no century; the year register
+  counts from 1970 on this machine (Linux `ip27-timer.c` 2.6.12 adds 1970, and
+  `rtc-m48t35.c` adds 70 to `tm_year`; `observed`: IRIX, having set its clock to 2006 from
+  the root filesystem, wrote year `0x36`). With the year read as 2000-based, the 2026 epoch
+  looked like 1996 to IRIX ("Check the date to make sure it is correct").
+* The 32 KB (PROM environment, clock) persists in a host file with `--nvram FILE`, as the
+  chip's battery keeps it. The file is written at the end of a run, with the running time
+  latched into the clock registers. On the next power-on the clock resumes from that time
+  (no virtual time passes while the machine is off) unless `--date` sets it. A snapshot's
+  timekeeper state takes precedence. `observed`: without it, each power-on finds "NVRAM
+  checksum is incorrect: reinitializing" and the defaults (`AutoLoad=N`), so the PROM stops
+  at its menu. With a file in which `setenv AutoLoad Yes` was run once, it boots the
+  installed disk without input.
+* `observed` (IRIX 6.5.30 kernel, `rtodc`, by probe and disassembly of the installed
+  kernel; names from slate's `/unix`): after reading the clock, IRIX reads NVRAM byte
+  `0x3883` through `get_nvreg` and warns "Check the date to make sure it is correct" unless
+  it is 1 or 2. The value takes part in a leap-day correction: the chip's own leap years are
+  multiples of four in the register's count, which from a 1970 base are not the real ones.
+  `wtodc` stores the byte through `set_nvreg`. That walks the nodes and writes through
+  `ioc_base(node)`, which finds the BaseIO's IOC3 at hardware-graph path
+  `module/%M/slot/io1/baseio/pci/2/ioc3` (or `.../io1/MotherBoard/...`). When there is no
+  such path, the write is skipped. The IOC3 was once at
+  `/hw/module/1/slot/io3/xwidget/pci/2/ioc3`, and IRIX then warned on every clock read. With
+  the BaseIO at io1 ("Crossbow", slot numbering) and named from its NICs ("NICs"), it is at
+  `/hw/module/1/slot/io1/baseio/pci/2/ioc3` as on slate, IRIX stores the byte, and a boot
+  that finds it prints no warning.
+
+=== IOC3 Ethernet
+
+`devices::Ioc3Ethernet` is the IOC3's Ethernet MAC, and `devices::Dp83840` its PHY. Sources:
+the IRIX-derived Linux `ioc3.h` and `ioc3-eth.c` (v5.10), and the observed behavior of the
+BASEIO PROM's Ethernet diagnostics (enet_ssram, enet_phy_reg, enet_nic, enet_ioc3_loop,
+enet_phy_loop, enet_tw_loop, all passing) and IRIX's `ef` driver (disassembly of
+`ef_ioc3reset` and `ef_recv`, names from slate's `/unix`).
+
+* EMCR: `observed` (ef_ioc3reset): after EMCR_RST, IRIX polls EMCR for ARB_DIAG_IDLE
+  (`0x00200000`) for up to a million microseconds, then reports "IOC3 reset timed out". DMA
+  completes within an event here, so the arbiter always reads idle. `observed`
+  (enet_ioc3_loop): software sets the ring bases before EMCR_RST and the pointers after it, so
+  the reset keeps ETBR and ERBR and clears the pointers, EISR, and EIER (`hypothesis` for the
+  other registers).
+* SSRAM (`0x40000`–`0x7ffff`): 64K words of 16 data bits and a parity bit (bit 16). Written
+  bit 17 is dropped; with EMCR_RAMPAR, a read sets bit 17 when the 17 stored bits have odd
+  weight (`observed`: enet_ssram's address walk and parity patterns `0xaa55`, `0x157aa`,
+  `0xbad1`, `0x1bad0`). All 128 KB are present (IRIX's `ssram_discovery` and the walk find
+  no aliasing).
+* MII: MICR names the PHY and register (READTRIG reads into MIDR_R; otherwise MIDR_W is
+  written), completing at once (`hypothesis`). An empty address reads `0xffff`. The PHY is at
+  address 31 (`observed`: the PROM addresses 31 and expects it in register 25).
+* PHY: clause 22 registers with the reset values the PROM's enet_phy_reg expects
+  (identifier `0x2000`/`0x5c00`, BMCR `0x3100`, BMSR `0x7809`, ANAR `0x01e1`, vendor
+  registers 23 `0x8040`, 25 `0x005f`, 28 `0x0039`) and its writable bits. Loopback: BMCR
+  bit 14, or a mode in register 24 bits 9:8 (`observed`: enet_tw_loop writes `0x0100` for
+  "TWISTER LOOPBACK"). The cable is a machine setting (`--ethernet`): with a link partner,
+  auto-negotiation completes 1.5 s (`hypothesis`) after the PHY leaves reset, at 100 Mb/s full
+  duplex. IOC3 GPIO 5 is the PHY's active-low reset (`observed`: the PROM pulses GPPR[5] 0
+  then 1 before enet_phy_reg and expects the link still down).
+* Transmit: a ring of 128 or 512 descriptors of 128 bytes at ETBR (big-endian `cmd`,
+  `bufcnt`, `p1`, `p2`, 104 bytes of data); ETPIR and ETCIR are byte offsets. The frame is the
+  descriptor's data (D0V), buffer 1 (B1V), and buffer 2 (B2V), bounded by the byte count. With
+  DOCHECKSUM, the complement of the ones' complement sum of the whole frame goes at CHKOFF
+  (`inferred`: Linux leaves the corrections there). INTWHENDONE raises TXEXPLICIT; an empty
+  ring raises TXEMPTY. The next descriptor starts after the frame's time at 100 Mb/s.
+* Receive: a ring of 512 big-endian buffer addresses at ERBR; ERPIR (with ARM) offers
+  buffers, and the MAC advances ERCIR. A frame goes at EMCR_RXOFF half-words into its buffer,
+  then the status word and the valid word are written: V, the byte count with the FCS, and
+  the ones' complement sum of frame and FCS (`observed`: enet_phy_loop's expected
+  `0x8131fade`). The status is GOODPKT, the length with the FCS in bits 2:0 and 12:3
+  (`observed`: enet_phy_loop expects `0x40261000` for 305 bytes), and broadcast or multicast.
+  Frames from the wire are padded to 60 bytes and get their FCS. The IOC3's internal loopback
+  returns the frame as sent, without FCS, with status 0 (`observed`: enet_ioc3_loop); the
+  PHY's returns it like a received frame. RXTIMERINT goes up when armed; a frame delivered
+  while disarmed is announced when software arms again (`hypothesis`). Frames that find no
+  buffer wait, up to 64.
+* Filter: the station address (EMAR_L bytes 0–3 least significant first, EMAR_H bytes 4–5),
+  broadcast, the multicast hash (EHAR, bit = the bit-reversed low six bits of the
+  little-endian CRC-32 of the address, Linux `ioc3_hash`), or everything with EMCR_PROMISC.
+* Interrupt: EISR & EIER drive the IOC3's INTA, Bridge pin 2. EISR bits clear when written
+  with 1.
+* Host side: `EthernetLink` (`core/ethernet_link.hpp`) is the cable. `backends::TapLink`
+  attaches to an existing Linux TAP interface the user owns; `backends::PcapLink` records the
+  guest's frames in a capture file with virtual time and delivers none (deterministic). The
+  MAC polls its link every 100 µs of virtual time while receiving (`hypothesis`).
+
+=== ISP1020
+
+`devices::Isp1020` models the QLogic controller at its host interface, from the public Linux
+driver `drivers/scsi/qlogicisp.c` (2.6.12): 16-bit little-endian registers, the mailbox
+handshake, RISC RAM, and each mailbox command's effect. It does not execute the downloaded
+RISC firmware.
+
+* Registers: PCI ID, CFG0 (`hypothesis`: `ISP_CFG0_1040B`, slate's QL1040B), CFG1,
+  PCI_INTF_CTL (ISP_RESET self-clears and resets the RISC), PCI_INTF_STS (bit 2 RISC
+  interrupt), the semaphore (bit 0), mailboxes 0–7 (the host writes an incoming set and reads
+  an outgoing set), HCCR (commands in bits 15:12; `hypothesis` reads: bit 7 host interrupt
+  pending, bit 5 paused, from Linux `qla1280.h`). Other registers are traced storage.
+* Handshake: HCCR SET_HOST_INTR starts the command in the incoming mailboxes unless the RISC
+  is paused or reset (HCCR RESET, PAUSE; RELEASE resumes); `hypothesis`: it completes 10 µs
+  later, putting status in outgoing mailbox 0, setting the semaphore and the RISC interrupt.
+  CLEAR_RISC_INTR clears the interrupt; the host clears the semaphore.
+* ROM monitor commands: NO_OP, LOAD_RAM and DUMP_RAM (DMA, little-endian words; a refused
+  transfer is HOST_INTERFACE_ERROR), EXECUTE_FIRMWARE, WRITE/READ_RAM_WORD, MAILBOX_REG_TEST
+  (echo), VERIFY_CHECKSUM (`inferred` from Linux's firmware image: the length is the image's
+  fourth word and that many words sum to zero). Others: INVALID_COMMAND.
+* Firmware commands (after EXECUTE_FIRMWARE; `hypothesis`: QLogic's firmware as Linux uses
+  it): ABOUT_FIRMWARE (`hypothesis`: the version the image's banner names; the PROM's image
+  says "ISP1020 Firmware Version 02.55"), INIT_REQ/RES_QUEUE and their 64-bit forms (`0x52`,
+  `0x53`: address bits 63:48 in mailbox 6, 47:32 in 7; the PROM uses these), GET/SET
+  parameters (stored; target and device parameters keyed by mailbox 1), queue control and
+  abort commands (accepted), STOP_FIRMWARE. A reset discards the queues and parameters.
+* Queues: writing mailbox 4 (the request in-pointer) makes the firmware fetch 64-byte IOCBs
+  by DMA: command (type 1, four data segments; A64 type 9, two segments with high address
+  words), continuation (2; A64 `0xa`), marker (4, no response). Each command runs on the SCSI
+  bus at once and posts a status entry (type 3) to the response queue: SCSI status,
+  completion (COMPLETE, INCOMPLETE with state GOT_BUS only for a selection timeout, DATA
+  UNDERRUN with the residual, DMA_ERROR), state flags, and automatic REQUEST SENSE data after
+  CHECK CONDITION. Outgoing mailbox 4 is the request out-pointer, 5 the response in-pointer.
+  ISP1040 firmware commands from Linux `qla1280.h` are accepted too: SET_RESET_DELAY (0x3a),
+  SET_SYSTEM_PARAMETER (0x45), SET_FIRMWARE_FEATURES (0x4a), ENABLE_TARGET_MODE (0x55),
+  SET_DATA_OVERRUN_RECOVERY (0x5a), and the A64 RAM load and dump (0x09, 0x0a).
+* INTA: `hypothesis` asserted while the RISC interrupt is pending and PCI_INTF_CTL has both
+  ISP_EN_INT and ISP_EN_RISC (Linux `isp1020_enable_irqs`); the IRIX kernel's driver is
+  interrupt-driven (`observed`).
+* Not modeled: a full response queue, asynchronous events, transfer time.
+
+=== SCSI
+
+`scsi::Bus` holds targets by ID; a target executes a CDB for a LUN and drives the data phases
+through the initiator's `scsi::DataPhase`. Host storage is a `BlockStore` (backend
+`backends::FileBlockStore`), separate from the guest-visible device.
+
+* `scsi::CdRom` at bus 0 ID 6 (slate's position): slate's drive identity, TOSHIBA CD-ROM
+  XM-6201TA 1037 (OBS-SLATE-0002). `hypothesis`: 512-byte logical blocks at power-on, the
+  sector size in the SGI volume headers of IRIX media (MODE SELECT may choose 2048).
+  `--cdrom FILE`.
+* `scsi::Disk` at bus 0 ID 1 (slate's system disk position; sash installs to `dksc(0,1,*)`):
+  identity IBM HUS103036FL3800 RPQR (OBS-SLATE-0002), 512-byte blocks, `hypothesis` geometry
+  16 heads × 64 sectors in mode pages 3 and 4. `--disk FILE` (an existing image, written in
+  place; `truncate -s 9G` makes a blank one).
+* A disc change makes the CD-ROM's next command (other than INQUIRY and REQUEST SENSE) fail
+  with UNIT ATTENTION, NOT READY TO READY CHANGE (06/28/00).
+* Not modeled: disconnection, tagged queuing, transfer timing, unit attention after reset.
+
+`observed` with the user's PROM and IRIX 6.5.30 media: the BASEIO PROM walks both adapters
+with INQUIRY ("1+ … 6+ … = 2 device(s)"), the install menu offers "Local SCSI CD-ROM drive 6,
+on controller 0", reads the CD's volume header, and loads `sash64` (block 38033). From the
+Command Monitor, `boot -f dksc(0,6,8)sash64 dksc(0,6,7)stand/fx.64 --x` runs IRIX's fx, which
+labels the blank disk (writes blocks 0 and 2).
+
+=== NICs
+
+Board NICs are Dallas 1-Wire add-only memories ("Number In a Can"). `devices::OneWireBus`
+resolves each time slot as a wired-AND of the master and every device; `devices::Nic` is a
+DS2502-family part (ROM ID with Dallas CRC-8; Read, Match, Skip, and Search ROM; Read Memory,
+Read Data/Generate CRC, Read Status; 128 bytes in four pages, 8 status bytes). Sources: the
+DS2502 datasheet, application note 937, and Linux `drivers/net/ioc3-eth.c` (2.4.20: slot
+timings, the search algorithm, family `0x91` for SGI's parts).
+
+MicroLAN masters (Hub MD_MLAN_CTL, BRIDGE_NIC, IOC3 MCR) share the MCR encoding of the
+IRIX-derived Linux `asm-ia64/sn/nic.h` (`MCR_PACK(pulse, sample)`, DONE bit 1, DATA bit 0). A
+pulse of 400 µs or more is a reset (a present device pulls the sampled line low), up to 15 µs a
+read or write-1 slot, longer a write-0 slot, 0 a wait.
+
+* Manufacturing record (`observed`: IRIX 6.5.30 `nic_mfg_next` and `nic_read_mfg`, by
+  disassembly; names from slate's `/unix`). IRIX reads it from parts of family `0x09`
+  (DS2502: pages 0 and 1, following status-byte redirection) or `0x0b` (DS2505, read with
+  CRC-16 checks). Other families yield only a laser serial. Each 32-byte page is read with
+  Read Memory (for a DS2502, after the address CRC-8) and must pass a Dallas CRC-16 over all
+  32 bytes with residue `0xb001`: bytes 30–31 hold the complemented CRC of bytes 0–29, low
+  byte first (`devices::dallas_crc16`). `observed`: without it, the PROM with family `0x09`
+  parts never reached its console (LED `0x22`, then `0x80` blinking once a second). With page 0 = A and page 1 = B,
+  the record is parsed when A[0] is 1: A[1..10] serial (barcode), A[11..29] then B[0..5]
+  part number, B[6..9] revision, B[10] group, B[11..14] capability, B[15] variety, B[16..29]
+  name. IRIX formats it as
+  `Part:...;Name:...;Serial:...;Revision:...;Group:..;Capability:..;Variety:..;Laser:...;`,
+  keeping printable characters. The PROM prints the same fields ("Found family 0x0b Mfg.
+  Board data", "Serial #", "Part #", "Revision", "Group/Capability/Variety", "Part Name").
+  `ip27::board_nic_memory` builds the record. Text is padded with spaces (`observed`: slate's
+  `hinv -mvv` shows spaces after a barcode, where NUL padding shows as dots). `hypothesis`:
+  the other bytes are unprogrammed.
+* The BaseIO's NIC bus (BRIDGE_NIC) holds its two board NICs as DS2502 parts with slate's
+  records (OBS-SLATE-0004) and synthetic serials: MIO (laser `0x1`, barcode UVX001,
+  030-0880-003 rev C) and BASEIO (laser `0x2`, UVX002, 030-0734-003 rev A), group `ff`,
+  capability `ffffffff`, variety `ff`. The PROM and IRIX only display the serials. `observed`: with the parts present the PROM treats the board as a BaseIO.
+  With the records it prints "using BaseIO nic" where it had printed "no BaseIO, using
+  random value".
+  With family `0x91` and no record, the PROM's klconfig board had `brd_nic` all ones and no
+  name, and IRIX named the board `xwidget`.
+* The IOC3's NIC bus holds the Ethernet address NIC: `Ip27Config::ethernet_address`
+  (`hypothesis` default `08:00:69:0e:17:01`, SGI's OUI; not slate's) stored so that Linux's
+  reader finds it (address byte j at memory byte 11 − j).
+* The Hub's MicroLAN bus is empty (the node board's NICs are not modeled).
+
+=== Console
+
+The guest console is the IOC3's UART A. `backends::ScriptedConsole` writes its output to
+standard output and types each `--console LINE` when the guest polls for input after a
+prompt: output ending in `> `, `] `, `? `, `: `, `) `, or a shell prompt (`# `, `$ `, `% `)
+followed by 200 input polls without more
+output, or any output followed by 20000 (`hypothesis`: then it is waiting; `observed`: the
+BASEIO PROM drains typeahead just before its "press <enter>" prompts, so a line released on
+the first poll is lost). On a run resumed from a snapshot the
+first line is typed at the first input poll. A script line `@cdrom FILE` is not typed: when
+its turn comes the disc changes (the CD-ROM then reports UNIT ATTENTION) and the next line
+follows. `--stop-at-prompt` ends the run when the script is used up and the guest waits at a
+prompt, so snapshots land at the next question. The UART takes an input byte when software reads LSR or RBR with
+its receiver empty, so input depends only on guest behavior: runs stay deterministic.
+
+`--interactive` hands the console to the user once the script is used up
+(`backends::TerminalInput`). Standard input is read without blocking, at most once per
+millisecond of host time, and a terminal is put in raw input mode, so Ctrl-C and other
+control keys reach the guest. Ctrl-] ends the run as a signal does: the snapshot, flash,
+NVRAM, and disk are still written, and the terminal is restored. Output is flushed before
+each read, so prompts without a newline appear. Interactive runs are not deterministic;
+checkpoints and tests use scripts.
+
 == Observation log (user's PROM image)
 
-Reproduce with `scripts/ip27-prom-checkpoint.sh` (set `ULTRAVIOLENT_IP27_PROM`). Virtual
-times are from power-on.
+Reproduce with `scripts/ip27-prom-checkpoint.sh` (set `ULTRAVIOLENT_IP27_PROM`), and read the
+console with the probe under "Diagnostics". Virtual times are from power-on (cold run
+2026-09-26, `local/runs/cold-pod-35s.txt`).
 
 . Reads PI_CPU_NUM, stores `0x5e` in PI_RT_COMPARE_A, checks Config against the flash mode
   word, initializes the PCF8584, and performs the "Rst0" Hub local reset.
-. LED `0x01` INITCPU, `0x02` TESTCP1, `0x5d` Hub I/O reset (ILCSR warm reset), `0x03`
-  RUNTLB, `0x35`/`0x36` RTCINIT, `0x04`/`0x05` cache tests, `0x0a`–`0x0c` invalidate
-  caches, `0x2a` MAKESTACK, `0x2b` MAIN, `0x0d` INMAIN (about 5.8 ms).
-. Reads NI_STATUS_REV_ID, clears the MD performance counters, LED `0x24` LOCALARB (CPU
-  present/enable), `0x28` BARRIER (Hub interrupt level 113), `0x38`, `0x00`, `0x4c` I2CINIT.
-. Waits 5 s for the system controller; LED `0x4d` I2CDONE at 5.006 s. Writes
-  NI_PROTECTION.
-. Calls `i2c_master_xmit` to the ELSC; waits 1 s for the bus and retries every second.
-. Gives up at 26 s: LED `0x1a` MSCPROBE, `0x1c` DONEPROBE, `0x1d`/`0x1e` UART init, `0x80`
-  about once per second for five seconds, then `0x0e` SPEEDUP ("about to increase PROM
-  access speed") at 32 s.
-. Reads MD_MEMORY_CONFIG (`0x200018`). **Current stop**: unmodeled, so the read takes a bus
-  error. POD mode follows (LEDs `0x53`/`0x54` CONSOLE_GET, a CacheErr read).
+. LED `0x01` INITCPU, `0x02` TESTCP1, `0x5d` Hub I/O reset, `0x03` RUNTLB, `0x35`/`0x36`
+  RTCINIT, `0x04`/`0x05` cache tests, `0x0a`–`0x0c`, `0x2a` MAKESTACK, `0x2b` MAIN, `0x0d`
+  INMAIN (5.8 ms), `0x24` LOCALARB, `0x28` BARRIER, `0x4c` I2CINIT.
+. `0x4d` I2CDONE at 6 ms: the system controller's tokens appear on the bus. The PROM reads
+  the controller NVRAM (magic, password, module number) byte by byte (see "System
+  controller"). Console: "MSC DIP switches unavailable", the DIP switch legend, "Starting
+  PROM Boot process".
+. The first I/O console probe reads the Crossbow WIDGET_ID ("Reading link 0 (addr
+  0x9200000000000004) failed", "Exception while probing for I/O console by cpu in SLOT n1",
+  "A I/O console could not be found"); the banner "IP27 PROM SGI Version 6.156 built
+  11:27:56 AM Nov 18, 2003"; "no BaseIO, using random value".
+. `0x0e` SPEEDUP at 5.18 s; the stash and II set-up (`0x57`–`0x59`, `0x52`, `0x56`);
+  `0x4a` MDIRINIT and `0x4b` MDIRCONFIG at 10.31 s (memory sizing through the directory);
+  TEST_INTS; flash autoselect finds no known part; "Testing/Initializing memory ... DONE",
+  "Copying PROM code to memory ... DONE"; `0x3c`/`0x3d`; `0x06` TESTSCACH passes (10.40 s);
+  stack test; `0x3e`/`0x3f`; `0x5b` NMI_INIT (11.67 s) with both BTEs.
+. NUMAlink discovery ("Local hub NUMAlink is down", "Found 1 objects (1 hubs, 0
+  routers)"); "No other nodes present; becoming global master"; "Global master is
+  /hw/module/1/slot/n1" (the module number from the controller NVRAM).
+. "Testing/Initializing all memory ... DONE", "Checking partitioning information ... DONE",
+  "No other nodes present; becoming partition master", LED `0x51` (31.28 s) and `0x50`.
+. Console (from here on on the emulated IOC3 UART): the Crossbow, Bridge, and BaseIO
+  diagnostics (xbow_sanity, bridge_sanity, io_config_space, serial_pio pass; serial_dma
+  fails on the unmodeled serial DMA and the PROM continues), "Loading BASEIO prom ... Bus
+  error trying to access BASEIO PROM at 0x920000000fc00000", "Retrying using the IP27 PROM
+  internal copy of BASEIO PROM", "BASEIO PROM Monitor SGI Version 6.156 built 11:05:48 AM
+  Nov 18, 2003 (BE64)", "1 CPUs on 1 nodes found."
+. **Current stop** (43.8 s): "Cannot assign moduleid on nasid 0. ip27log is either corrupt
+  or uninitialized. Try doing a initlog or a initalllogs from POD.", then "Software entry
+  into POD mode from IO6 POD mode" and the interactive prompt `POD IOC3 Dex>`.
+
+Earlier stops, since resolved: POD mode without a console (31.8 s, before the Crossbow and
+BaseIO), MD_MEMORY_CONFIG (32 s before the controller model),
+back-door directory memory, the secondary cache tag test, MD_MLAN_CTL, RBOOT, the BTEs, and
+module voting ("Assign module #s to MSC", LED `0xb1`). Older runs (at about 42 s) showed
+writes of `0x4000000000000000` to MD `0x2000b0` and `0x2000b8`, whose names no public source
+gives; they stay unmodeled (not rechecked since the controller model).
 
 === Diagnostics
 
 `ultraviolent --probe PC` traces a0–a3, ra, and v0 whenever execution reaches `PC`. It is
 the cheap way to see a PROM routine's arguments without an instruction trace.
 
+The PROM prints messages before any console device exists; its output vector discards them.
+To read them, probe the PROM's character output routine and decode a0. In the user's image
+it is at `0xc00000001fc32740`:
+
+[source,shell]
+----
+build/release/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img \
+    --cycles N --probe 0xc00000001fc32740 --trace cpu |
+  awk '/probe/ {print $6}' |
+  python3 -c 'import sys; print("".join(chr(int(x, 16) & 0xff) for x in sys.stdin.read().split()))'
+----
+
+This observes only; the address is specific to that image and is never used by the model.
+
+=== Snapshots
+
+`ultraviolent --save-state FILE` writes the machine state when the run ends, and
+`--load-state FILE` resumes from one. The state is a `StateImage` of named fields (CPU, TLB,
+FPU, scheduler events, Hub, PCF8584, and memory as sparse 64 KiB pages). Loading checks the
+memory size, processor clock, and an FNV-1a hash of the flash, and fails on a mismatch. A
+resumed run is bit-identical to an uninterrupted one (`ip27.snapshot_resumes_exactly`).
+
+Snapshots only shorten exploration (for example, skipping the 26 s ELSC wait). A checkpoint
+in STATUS.adoc is established only by a run from power-on.
+
 == Not yet modeled
 
-The rest of the Hub (the RTC, profiling and error interrupts, directory, BTE), XIO/Crossbow,
-BaseIO, the module system controller.
+The rest of the Hub (the RTC, profiling and error interrupts, the ECC back door, memory
+decode by MD_MEMORY_CONFIG, the effects of the stored II/NI configuration), flash erase
+suspend, NIC manufacturing data, crosstalk DMA and big windows, Bridge DMA and PCI
+interrupts, the BaseIO flash, IOC3 serial DMA and Ethernet, the ISP1020's behavior, and the
+system controller's command interface.

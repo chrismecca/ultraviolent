@@ -84,6 +84,7 @@ Start here, in order:
 . `doc/IP27-TARGET.adoc`
 . `doc/ROADMAP.adoc`
 . `doc/RC-IP27.adoc`
+. `doc/RELEASE-NOTES-RC-IP27.adoc`
 . `doc/ENGINEERING.adoc`
 . `doc/AGENTIC-BUILD.adoc`
 . `doc/TESTING.adoc`
@@ -106,3 +107,9 @@ documented in `assets/README.adoc`.
 
 "Ultraviolent" is a deliberate play on the SGI color/optics lineage: IRIS, Indigo,
 ultraviolet. The name is not intended to imply compatibility with or endorsement by SGI.
+
+== License
+
+Ultraviolent is released under the MIT License (`LICENSE`). The license covers this
+repository's code and documentation only; it grants nothing for SGI firmware, IRIX, or any
+other asset you supply.

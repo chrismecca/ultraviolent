@@ -1,0 +1,136 @@
+= RC-IP27 Release Notes
+
+RC-IP27 is the first release candidate: a telnet login, from another host, to an unmodified
+IRIX 6.5.30 installed by IRIX's own tools on a virtual IP27 (Origin 200/2000-class, one
+R10000). See `RC-IP27.adoc` for the definition and `STATUS.adoc` for the evidence.
+
+Ultraviolent ships no SGI firmware, media, or disk images. You supply your own
+(`assets/README.adoc`); the hashes below identify the files the release was demonstrated
+with.
+
+== Build
+
+[cols="1,3"]
+|===
+| Ultraviolent | commit/tag: _filled in when tagged_
+| Host | Debian GNU/Linux 13 (trixie), Linux 6.12 x86-64 (Intel Core i5-3470T)
+| Compilers | Clang 19.1.7 (demonstration build, `scripts/build-pgo.sh`); GCC 14.2 (`gcc` preset)
+| CMake | 3.31
+|===
+
+There are no third-party dependencies: the build uses only the C++23 standard library and
+the Linux headers for the TAP device.
+
+The `dev`, `gcc`, `asan`, and `release` presets build and pass `ctest`. The demonstration
+used the profile-guided build (`DEVELOPMENT.adoc` "Fast builds"); a `release` build runs the
+same guest, only slower.
+
+== Private assets
+
+[cols="2,1,4"]
+|===
+| File | Bytes | SHA-256
+
+| `firmware/ip27prom.img` (IP27 PROM) | 912848 | `0dbd5d5f7027e380383ce81523e1f614d58343ca82e07ec48bb4740b287eba0e`
+| `firmware/io6prom.img` (BASEIO PROM) | 365328 | `024d2f28b526933e8f00d964fefdfcd9b0e873d504a43d9307099579e2b59ae9`
+| `media/IRIX 6.5.30 Installation Tools and Overlays (1 of 3).iso` | 475160576 | `6450dbd77d4519fa40ac5fef5bf07a0be6b8b3c6717bb23cc50811c173154dbe`
+| `media/IRIX 6.5.30 Overlays (2 of 3).iso` | 407363584 | `1cdc8e44274c1a6a52a1129fd82718c6badd35a5052d7b75116072f75614e82a`
+| `media/IRIX 6.5.30 Overlays (3 of 3).iso` | 614719488 | `785edd7c7c249e352ca36212894da8796d6ea28a30d495cf215d21e4e4a0cbf6`
+| `media/IRIX-6.5-Foundation1.iso` | 574840832 | `bf9776fedf9bb2ef58949f6d9b9c2b1bea5c083dc8861527482788f3be9ecc01`
+| `media/IRIX-6.5-Foundation2.iso` | 270622720 | `cb321c58d624a0e43ebbd7774c45685c4371c29ae3fb4bb5da64ed253ac492ee`
+|===
+
+== Machine configuration
+
+One module: IP27 node board (one R10000 revision 3.4 at 180 MHz, 512 MB), Crossbow, a
+BASEIO board in io1 (Bridge; two QL1040B SCSI controllers; IOC3 with two serial ports,
+Ethernet with a DP83840 PHY, and the M48T35 timekeeper), a 9 GB SCSI disk at controller 0
+unit 1, and a SCSI CD-ROM at unit 6. The console is the first IOC3 serial port on the
+host terminal.
+
+== Launch
+
+`scripts/rc-ip27-demo.py` runs the whole demonstration from blank state: PROM log
+initialization, installation from the five discs, a cold boot, a telnet login, and a
+persistence check. It records its steps in `WORK/driver.log` and the result in
+`WORK/results.txt`.
+
+----
+scripts/build-pgo.sh
+python3 scripts/rc-ip27-demo.py --work local/rc --media assets/media --tap uv0
+----
+
+After installation, the machine boots with:
+
+----
+build/pgo/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img \
+    --io6prom assets/firmware/io6prom.img --flash local/rc/flash.bin \
+    --nvram local/rc/nvram.bin --disk local/rc/disk.img \
+    --ethernet tap:uv0 --interactive --cycles 100000000000000
+----
+
+`--interactive` connects the console to the terminal. Ctrl-] followed by a command
+controls the machine: `q` stops it (write back the disk only after IRIX has shut down),
+`cdrom FILE` inserts a disc, and `eject` removes it.
+
+== Network setup
+
+The guest's Ethernet is a Linux TAP device owned by the user who runs Ultraviolent. Two
+setups have been used:
+
+Private link (host only)::
++
+----
+sudo ip tuntap add dev uv0 mode tap user $USER
+sudo ip addr add 192.168.77.1/24 dev uv0
+sudo ip link set uv0 up
+----
++
+The guest uses `192.168.77.2`, set with `ifconfig ef0 192.168.77.2 netmask 0xffffff00 up`
+or persistently in `/etc/hosts` and `/etc/config/ifconfig-1.options`.
+
+On the LAN (proxy ARP)::
++
+----
+sudo ip tuntap add dev uv0 mode tap user $USER
+sudo ip link set uv0 up
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv4.conf.$LAN_IF.proxy_arp=1
+sudo sysctl -w net.ipv4.conf.uv0.proxy_arp=1
+sudo ip route replace $GUEST_IP/32 dev uv0 src $HOST_LAN_IP
+----
++
+The guest takes an unused LAN address and needs a default route to the LAN router
+(`/etc/config/static-route.options`) to answer hosts on other segments.
+
+== Known limitations
+
+* One CPU, one node; no SMP, graphics, or other machine types (roadmap).
+* An interpreter only. The guest runs well below real time; installation from five discs
+  takes hours of host time (see Performance). Guest time is virtual time, so the guest
+  does not see the slowdown.
+* The console is a serial terminal; there is no keyboard, mouse, or framebuffer.
+* Ethernet is 10/100 through a TAP device; there is no built-in NAT or user-mode network.
+* Behavior of undocumented hardware follows recorded observations and hypotheses
+  (`IP27.adoc`); anything IRIX has not exercised is unmodeled.
+* The user's Overlays 2 image has one unreadable file (`/usr/lib32/mips4/libmp.so`); inst
+  reports it, and the system works without it.
+
+== Performance
+
+The clean demonstration (2026-09-28, profile-guided Clang build, i5-3470T) from blank
+state to the persistence check took 1.68 hours of host time. Guest cycles are 180 MHz
+R10000 cycles of virtual time.
+
+[cols="3,1,1,1,1"]
+|===
+| Phase | Host time | Guest cycles | Virtual time | Cycles per host second
+
+| A. first power-on, PROM log initialization | 2.7 min | 8.75 G | 48.6 s | 54 M
+| B. installation from five discs, through Restart | 70.9 min | 186.7 G | 1037 s | 44 M
+| C. cold boot, console login, telnet session, shutdown | 18.7 min | 53.4 G | 297 s | 48 M
+| D. cold boot, persistence check, shutdown | 8.2 min | 23.7 G | 132 s | 48 M
+|===
+
+The interpreter runs the guest at about a quarter of real time. A cold boot from power-on
+to `login:` takes about 6 minutes of host time. Speed is the next milestone (ROADMAP).

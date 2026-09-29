@@ -49,6 +49,36 @@ Create subsection notes as implementation starts for:
 Do not import undocumented assumptions from the old prototype without reclassifying them
 as observations or hypotheses.
 
+In use:
+
+* Hub: Linux `arch/mips/include/asm/sn/sn0/hub*.h`, `asm/sn/addrs.h`, `asm/sn/intr.h`
+  (IRIX-derived). Block-transfer engine sequence: Linux `arch/ia64/sn/kernel/bte.c` (SN1,
+  public driver source).
+* Xtalk widgets: Linux `arch/mips/include/asm/xtalk/xwidget.h` (IRIX-derived).
+* XBOW: Linux v2.6.12 `arch/ia64/sn/include/xtalk/xbow.h` (IRIX-derived, "Copyright (C)
+  1992-1997"; its structs describe byte-swizzled ia64 access, but its `#define` offsets are the
+  hardware's).
+* Flash PROM: AMD Am29F080 (PRM 2.3, chapter 5). The AMD datasheet is the reference for its
+  command set when flash programming is modeled.
+* PCF8584: Philips/NXP datasheet (`doc/PCF8584.pdf`, not committed) and Linux
+  `i2c-algo-pcf.h`.
+* System controller: Linux history tree (git.kernel.org tglx/history.git)
+  `include/asm-ia64/sn/ksys/elsc.h` (v2.5.20) and `ksys/i2c.h` (v2.5.0), IRIX-derived. The
+  same tree's `arch/ia64/sn/io/` has IRIX-derived xbow.c, xtalk.c, and pcibr.c (SN1 era),
+  leads for M3.
+* Serial EEPROM: 24C16 protocol (for example the Atmel AT24C16 datasheet).
+* Bridge byte lanes and DMA: Linux v6.6 `arch/mips/include/asm/pci/bridge.h` (IRIX-derived:
+  DEVICE bits, DIR_MAP, `PCI64_ATTR_*`), `arch/mips/pci/pci-xtalk-bridge.c` (DMA address
+  form, SWAP_DIR use), `arch/mips/include/asm/mach-ip27/mangle-port.h` (I/O address
+  swizzle), public driver source.
+* IOC3: Linux v6.6 `arch/mips/include/asm/sn/ioc3.h` (`struct ioc3_uartregs`), and
+  `drivers/tty/serial/8250/8250_ioc3.c` (register n at `offset ^ 3`).
+* ISP1020: Linux v2.6.12 `drivers/scsi/qlogicisp.c` and `qlogicisp_asm.c` (register map,
+  mailbox commands and parameter counts, handshake, IOCB layouts, firmware image format),
+  public driver source; ISP1040 HCCR read bits from Linux `drivers/scsi/qla1280.h`.
+* SCSI: ANSI X3.131-1994 (SCSI-2) for CDBs, INQUIRY, sense data, and mode pages.
+* Local copies of these public files are in `local/sources/` (git-ignored).
+
 == Observational evidence
 
 Private local observations may be indexed without embedding proprietary data.
@@ -62,6 +92,55 @@ Question: Hub register reset value
 Capture: private trace path
 Conclusion: ...
 Confidence: observed once / reproduced N times
+----
+
+Recorded observations (real hardware):
+
+----
+OBS-SLATE-0001
+Source: slate, Onyx2 deskside, IRIX 6.5, IP27 PROM 6.156, read-only commands (2026-09-26)
+Question: module topology and system controller NVRAM
+Capture: hinv -v; ls /hw/module/1/slot/*; sn0msc -r -x /hw/module/1/elsc/nvram
+Conclusion: Hub revision 6; node boards in slots n1 and n2; the Crossbow is widget 0 with
+  Kona graphics on port 8, MENET on 13, BaseIO on 15; the controller NVRAM is 2048 bytes,
+  0x700-0x70f = '7' "none" 00 00 00 01 00 00 78 00 00 00 00 (module 1 at 0x708).
+Confidence: observed once
+----
+
+----
+OBS-SLATE-0002
+Source: slate, read-only commands (2026-09-27)
+Question: SCSI device identities
+Capture: hinv -c disk; scsicontrol -i /dev/scsi/sc0d6l0; scsicontrol -i /dev/scsi/sc0d1l0
+Conclusion: controller 0 ID 6 is a CD-ROM, "TOSHIBA CD-ROM XM-6201TA" revision "1037", ANSI
+  version 2, supports reladdr, synch, linkedcmds; ID 1 is a disk, "IBM HUS103036FL3800"
+  revision "RPQR", ANSI version 4, supports 16bit, synch, linkedcmds, cmdqueing.
+Confidence: observed once
+----
+
+----
+OBS-SLATE-0003
+Source: slate serial console capture of a cold boot, power-on to login
+  (captured by the user 2026-09-21; kept outside the repository)
+Question: what the IP27 and BASEIO PROMs print on healthy hardware
+Conclusion: after "Installing PROM Device drivers" no per-test diagnostic output; "Base I/O
+  Ethernet set to /dev/ethernet/ef0"; each SCSI adapter walked ("1+ 2+ 3+ 4- 5- 6+ ... = 4
+  device(s)"); inventory check; "ALL DIAGS PASSED"; "Starting up the system...".
+Confidence: observed once
+----
+
+----
+OBS-SLATE-0004
+Source: slate, read-only command (2026-09-28); capture in local/slate/hinv-mvv.txt
+Question: board NIC manufacturing data
+Capture: hinv -mvv
+Conclusion: /hw/module/1/slot/io1/baseio: MIO board, part 030-0880-003, rev C; BASEIO
+  board, part 030-0734-003, rev A; both Group ff, Capability ffffffff, Variety ff; each with
+  a six-character barcode and a 48-bit laser serial (not recorded here: they identify the
+  user's hardware). Node n1's bus also carries MODULEID (a barcode, no part) and the
+  midplane 4P1G5_MPLN (030-1066-002 rev K); each node has IP31 and IP31PIMMR12KS NICs; io4
+  has a GE16-4, io5 a MENET.
+Confidence: observed once
 ----
 
 == Source classes
@@ -79,9 +158,17 @@ Public driver source:: other public drivers and emulators, read only for facts s
 register bits (for example Linux `i2c-algo-pcf.h` for the PCF8584). Supports `inferred`.
 Observed PROM behavior:: what the user's unmodified firmware does when run: its accesses,
 the values it tests, the paths it takes. This includes disassembly of the lawfully held
-image to see which bits it examines. Supports `observed`.
+image to see which bits it examines. The same holds for the unmodified IRIX kernel the
+emulated machine runs (the user's installation media, and slate's `/unix` for symbol
+names): its accesses and the values it tests, read by probe and by disassembly of the
+function concerned. Supports `observed`.
 Real hardware:: readings from a physical machine, for example POD register dumps. Supports
 `observed` and confirms everything above.
+
+Not used without a user decision:: IRIX's own installed headers (`/usr/include/sys/SN/...`
+from a real IRIX system). They are SGI-copyrighted and shipped with IRIX rather than secret,
+but AGENTS.md restricts IRIX sources. The previous prototype cited them. Until the user
+decides, use them only as leads, and confirm each fact from a class above.
 
 When classes disagree, record the conflict and prefer the stronger class unless a real-hardware
 observation settles it.

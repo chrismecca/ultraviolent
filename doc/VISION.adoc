@@ -97,6 +97,19 @@ Fast mode may later use:
 
 Reference and fast modes must share the same guest-visible architectural model.
 
+=== Speed target: host speed, nominal clock
+
+The goal is a guest that executes as fast as the host allows while observing its nominal
+hardware: `hinv` reports the configured processor clock (180 or 200 MHz for R10000), the
+Count register and every device timer advance in that clock's virtual time, and the guest
+simply gets through more of its work per wall-clock second than the original machine could.
+
+This follows from the time rule in `ARCHITECTURE.adoc`: guest-visible time is Ultraviolent
+virtual time, derived from guest progress, never from host duration. Nothing guest-visible
+changes when the host gets faster; only the ratio of virtual to wall-clock time does.
+Wall-clock pacing, where needed for interactive use, is a backend choice and never a
+correctness input.
+
 == The anti-goal
 
 Ultraviolent must not become a pile of boot-path exceptions.

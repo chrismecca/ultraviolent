@@ -21,6 +21,9 @@ perf.data
 perf.data.old
 /core
 /core.[0-9]*
+
+# Python bytecode
+__pycache__/
 # User-supplied proprietary assets and manuals (CLEANROOM.adoc). Only the asset README is
 # tracked; firmware, media, disks, and PDF manuals never enter Git.
 /assets/*
