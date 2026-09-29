@@ -13,8 +13,7 @@ std::optional<NoBlock> build_block(Cpu& cpu, std::uint64_t pc, Block& block,
         return NoBlock::not_host_backed;
     }
     block.start_pc = pc;
-    block.page = page->bytes;
-    block.order = page->order;
+    block.code = *page;
 
     constexpr std::uint64_t page_size = 0x1000;
     const auto at = [&](std::uint64_t offset) {

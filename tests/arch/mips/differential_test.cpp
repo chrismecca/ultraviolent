@@ -67,6 +67,8 @@ const test::Registration arithmetic_blocks{"mips.differential.blocks.arithmetic"
                                            arithmetic<BlockSteppingEngine>};
 const test::Registration arithmetic_tier0{"mips.differential.tier0.arithmetic",
                                           arithmetic<Tier0Engine>};
+const test::Registration arithmetic_tier0_tiny{"mips.differential.tier0_tiny_cache.arithmetic",
+                                               arithmetic<Tier0TinyCacheEngine>};
 
 template <class Engine> void sixty_four_bit(test::Context& t) {
     // In User mode MIPS III operations are reserved unless UX is set (UM 17).
@@ -94,6 +96,9 @@ const test::Registration sixty_four_bit_blocks{"mips.differential.blocks.sixty_f
                                                sixty_four_bit<BlockSteppingEngine>};
 const test::Registration sixty_four_bit_tier0{"mips.differential.tier0.sixty_four_bit_gating",
                                               sixty_four_bit<Tier0Engine>};
+const test::Registration sixty_four_bit_tier0_tiny{
+    "mips.differential.tier0_tiny_cache.sixty_four_bit_gating",
+    sixty_four_bit<Tier0TinyCacheEngine>};
 
 template <class Engine> void branches(test::Context& t) {
     DifferentialWith<Engine> d;
@@ -119,6 +124,8 @@ const test::Registration branches_blocks{"mips.differential.blocks.branches_and_
                                          branches<BlockSteppingEngine>};
 const test::Registration branches_tier0{"mips.differential.tier0.branches_and_delay_slots",
                                         branches<Tier0Engine>};
+const test::Registration branches_tier0_tiny{
+    "mips.differential.tier0_tiny_cache.branches_and_delay_slots", branches<Tier0TinyCacheEngine>};
 
 template <class Engine> void likely(test::Context& t) {
     DifferentialWith<Engine> d;
@@ -159,6 +166,8 @@ const test::Registration likely_predecoded{"mips.differential.predecoded.branch_
 const test::Registration likely_blocks{"mips.differential.blocks.branch_likely",
                                        likely<BlockSteppingEngine>};
 const test::Registration likely_tier0{"mips.differential.tier0.branch_likely", likely<Tier0Engine>};
+const test::Registration likely_tier0_tiny{"mips.differential.tier0_tiny_cache.branch_likely",
+                                           likely<Tier0TinyCacheEngine>};
 
 template <class Engine> void exceptions(test::Context& t) {
     DifferentialWith<Engine> d;
@@ -185,6 +194,8 @@ const test::Registration exceptions_blocks{"mips.differential.blocks.exceptions"
                                            exceptions<BlockSteppingEngine>};
 const test::Registration exceptions_tier0{"mips.differential.tier0.exceptions",
                                           exceptions<Tier0Engine>};
+const test::Registration exceptions_tier0_tiny{"mips.differential.tier0_tiny_cache.exceptions",
+                                               exceptions<Tier0TinyCacheEngine>};
 
 template <class Engine> void coprocessor_unusable(test::Context& t) {
     // With CU1 clear, FPU operations and MOVF/MOVT raise coprocessor unusable.
@@ -207,6 +218,9 @@ const test::Registration coprocessor_unusable_blocks{
     "mips.differential.blocks.coprocessor_unusable", coprocessor_unusable<BlockSteppingEngine>};
 const test::Registration coprocessor_unusable_tier0{"mips.differential.tier0.coprocessor_unusable",
                                                     coprocessor_unusable<Tier0Engine>};
+const test::Registration coprocessor_unusable_tier0_tiny{
+    "mips.differential.tier0_tiny_cache.coprocessor_unusable",
+    coprocessor_unusable<Tier0TinyCacheEngine>};
 
 template <class Engine> void fpu(test::Context& t) {
     DifferentialWith<Engine> d;
@@ -224,6 +238,8 @@ template <class Engine> void fpu(test::Context& t) {
 const test::Registration fpu_predecoded{"mips.differential.predecoded.fpu", fpu<PredecodedEngine>};
 const test::Registration fpu_blocks{"mips.differential.blocks.fpu", fpu<BlockSteppingEngine>};
 const test::Registration fpu_tier0{"mips.differential.tier0.fpu", fpu<Tier0Engine>};
+const test::Registration fpu_tier0_tiny{"mips.differential.tier0_tiny_cache.fpu",
+                                        fpu<Tier0TinyCacheEngine>};
 
 template <class Engine> void loads_stores(test::Context& t) {
     DifferentialWith<Engine> d;
@@ -274,6 +290,8 @@ const test::Registration loads_stores_blocks{"mips.differential.blocks.loads_and
                                              loads_stores<BlockSteppingEngine>};
 const test::Registration loads_stores_tier0{"mips.differential.tier0.loads_and_stores",
                                             loads_stores<Tier0Engine>};
+const test::Registration loads_stores_tier0_tiny{
+    "mips.differential.tier0_tiny_cache.loads_and_stores", loads_stores<Tier0TinyCacheEngine>};
 
 template <class Engine> void count_compare(test::Context& t) {
     // Compare a few cycles ahead with the timer interrupt enabled: the interrupt is taken
@@ -298,6 +316,9 @@ const test::Registration count_compare_blocks{"mips.differential.blocks.count_co
                                               count_compare<BlockSteppingEngine>};
 const test::Registration count_compare_tier0{"mips.differential.tier0.count_compare_boundaries",
                                              count_compare<Tier0Engine>};
+const test::Registration count_compare_tier0_tiny{
+    "mips.differential.tier0_tiny_cache.count_compare_boundaries",
+    count_compare<Tier0TinyCacheEngine>};
 
 template <class Engine> void random_and_tlb(test::Context& t) {
     // TLBWR at Random while exceptions (SYSCALL) take cycles that retire nothing; Wired
@@ -322,6 +343,9 @@ const test::Registration random_and_tlb_blocks{"mips.differential.blocks.random_
                                                random_and_tlb<BlockSteppingEngine>};
 const test::Registration random_and_tlb_tier0{"mips.differential.tier0.random_and_tlb_writes",
                                               random_and_tlb<Tier0Engine>};
+const test::Registration random_and_tlb_tier0_tiny{
+    "mips.differential.tier0_tiny_cache.random_and_tlb_writes",
+    random_and_tlb<Tier0TinyCacheEngine>};
 
 template <class Engine> void interrupt_lines(test::Context& t) {
     // External interrupt lines raised and lowered between specific cycles.
@@ -355,6 +379,8 @@ const test::Registration interrupt_lines_blocks{"mips.differential.blocks.interr
                                                 interrupt_lines<BlockSteppingEngine>};
 const test::Registration interrupt_lines_tier0{"mips.differential.tier0.interrupt_lines",
                                                interrupt_lines<Tier0Engine>};
+const test::Registration interrupt_lines_tier0_tiny{
+    "mips.differential.tier0_tiny_cache.interrupt_lines", interrupt_lines<Tier0TinyCacheEngine>};
 
 template <class Engine> void fetch_faults(test::Context& t) {
     // Jumps to a misaligned address and to an unmapped user address fault on the fetch;
@@ -385,6 +411,8 @@ const test::Registration fetch_faults_blocks{"mips.differential.blocks.fetch_fau
                                              fetch_faults<BlockSteppingEngine>};
 const test::Registration fetch_faults_tier0{"mips.differential.tier0.fetch_faults",
                                             fetch_faults<Tier0Engine>};
+const test::Registration fetch_faults_tier0_tiny{"mips.differential.tier0_tiny_cache.fetch_faults",
+                                                 fetch_faults<Tier0TinyCacheEngine>};
 
 template <class Engine> void self_modifying(test::Context& t) {
     // Stores rewrite instructions ahead in the same block (through kseg0, the host fast
@@ -409,6 +437,8 @@ const test::Registration self_modifying_blocks{"mips.differential.blocks.self_mo
                                                self_modifying<BlockSteppingEngine>};
 const test::Registration self_modifying_tier0{"mips.differential.tier0.self_modifying_code",
                                               self_modifying<Tier0Engine>};
+const test::Registration self_modifying_tier0_tiny{
+    "mips.differential.tier0_tiny_cache.self_modifying_code", self_modifying<Tier0TinyCacheEngine>};
 
 // Random programs over most integer operations, with loads and stores into the data area
 // and short forward branches.
@@ -543,5 +573,7 @@ const test::Registration random_programs_blocks{"mips.differential.blocks.random
                                                 random_programs<BlockSteppingEngine>};
 const test::Registration random_programs_tier0{"mips.differential.tier0.random_programs",
                                                random_programs<Tier0Engine>};
+const test::Registration random_programs_tier0_tiny{
+    "mips.differential.tier0_tiny_cache.random_programs", random_programs<Tier0TinyCacheEngine>};
 
 } // namespace

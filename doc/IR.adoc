@@ -2,8 +2,8 @@
 
 Status: design, reviewed with the user (2026-09-28, 2026-09-29). Stages A (this document
 and the boundary tests), B (decode and shared semantics), C (the differential harness), and
-D (block construction), and E (the uncached tier-0 executor, experimental) are
-implemented; F-H are not. Review with the user before F.
+D (block construction), E (the tier-0 executor, experimental), and F (the block cache and
+its invalidation) are implemented; G and H are not. Review with the user before G.
 
 This document designs the representation between the MIPS decoder and the fast execution
 engines (ARCHITECTURE "The CPU is not the interpreter", "Future JIT architecture"): what a
@@ -240,6 +240,35 @@ A block depends on the translation that found its bytes and on the bytes.
   lookups happen only between blocks, so the block being executed stays intact even when
   its own code is written. The store completes, the barrier leaves the block, and the next
   lookup rebuilds.
+
+=== The block cache (stage F)
+
+* `BlockInterpreter` keeps a direct-mapped table of blocks, a power of two in size (default
+  4096 entries, `--tier0-cache-entries`), indexed by `(pc >> 2) & (entries - 1)` and tagged by
+  pc and translation context. An entry owns its block's operations; replacing it reuses
+  their storage.
+* An entry records its dependencies when built: the code epoch (`Cpu::code_epoch`, advanced
+  whenever the host page caches are flushed: Config, reset, snapshot loads, bus remapping),
+  a pointer to its frame's generation and the value, and the TLB entry that translated the
+  page with that entry's generation (`Cpu::tlb_generation`, advanced for the entries a TLB
+  write writes or invalidates). A lookup compares pc, context, epoch, frame generation, and
+  TLB generation, and on a hit runs the cached operations: no fetch, decode, translation, or
+  per-operation word check.
+* Frames: `MemoryBlock` holds a mark and a generation per 4 KiB frame.
+  `AddressSpace::write` and `writable_memory_bytes` report writes; a write to a marked
+  frame advances its generation and clears the mark (`AddressSpace::code_writes` counts
+  them). Building a block claims its frame (`Cpu::claim_code_frame`): the frame is marked and
+  the CPU drops any writable data page it cached for it, and it never caches a writable
+  page for a marked frame. So a CPU store into code always reaches the bus: it is a
+  barrier, classified `code_store`, and the frame's blocks go stale. A write that clears the
+  mark lets later stores to the frame take the fast path again until a block claims it again.
+* Barriers are classified by the access that reached the bus (`Cpu::BusAccess`): a memory
+  fill (a cached load or store that missed the host page cache), a device (MMIO or
+  unmapped), uncached memory, a code store, or other (partial-word and conditional stores,
+  watchpoints).
+* Aliases: kseg0 and kseg1 views of the same code differ only above the index bits and share
+  an entry, replacing each other; aliases through other virtual pages coexist and go stale
+  together.
 
 == Correctness method
 

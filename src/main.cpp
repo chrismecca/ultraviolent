@@ -15,6 +15,7 @@
 #include <ultraviolent/machines/ip27/prom_image.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -56,6 +57,7 @@ void usage() {
         "                    [--sample-pc NS] [--date DATE] [--stop-at-prompt]\n"
         "                    [--interactive] [--ethernet tap:IFNAME|pcap:FILE]\n"
         "                    [--engine reference|tier0] [--engine-statistics]\n"
+        "                    [--tier0-cache-entries N]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
         "from a snapshot. Snapshots are for exploration; checkpoints need a cold run.\n"
@@ -87,60 +89,69 @@ void usage() {
         "2026-01-01): virtual time runs it from there.\n"
         "--engine reference|tier0 selects the execution engine (default reference, the\n"
         "oracle; tier0 is experimental, doc/IR.adoc). --engine-statistics prints tier 0's\n"
-        "block statistics at the end of the run.\n"
+        "block statistics at the end of the run. --tier0-cache-entries N sizes its block\n"
+        "cache (a power of two; default 4096).\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
         "scsi ethernet irq scheduler firmware machine all\n",
         stderr);
 }
 
-// Tier 0's block statistics (IR.adoc "Stages" E), for benchmark review.
-void print_block_statistics(const mips::BlockStatistics& s) {
+// Tier 0's block statistics (IR.adoc "Stages" E, F), for benchmark review.
+void print_block_statistics(const mips::BlockStatistics& s, std::size_t marked_frames,
+                            std::uint64_t code_frame_stores) {
     const auto share = [](std::uint64_t part, std::uint64_t whole) {
         return whole == 0 ? 0.0 : 100.0 * static_cast<double>(part) / static_cast<double>(whole);
     };
+    const auto ratio = [](std::uint64_t a, std::uint64_t b) {
+        return b == 0 ? 0.0 : static_cast<double>(a) / static_cast<double>(b);
+    };
+    const auto u = [](std::uint64_t n) { return static_cast<unsigned long long>(n); };
     std::uint64_t fallbacks = 0;
     for (const std::uint64_t n : s.fallbacks) {
         fallbacks += n;
     }
-    std::uint64_t built = 0;
     std::uint64_t built_operations = 0;
     for (std::size_t n = 0; n < s.built_lengths.size(); ++n) {
-        built += s.built_lengths[n];
         built_operations += n * s.built_lengths[n];
     }
-    std::fprintf(
-        stderr,
-        "tier0: %llu block entries, %llu decoded operations (%.2f per entry; built "
-        "blocks average %.2f), %llu reference steps, %llu interrupts at entry\n",
-        static_cast<unsigned long long>(s.entries), static_cast<unsigned long long>(s.operations),
-        s.entries == 0 ? 0.0 : static_cast<double>(s.operations) / static_cast<double>(s.entries),
-        built == 0 ? 0.0 : static_cast<double>(built_operations) / static_cast<double>(built),
-        static_cast<unsigned long long>(fallbacks),
-        static_cast<unsigned long long>(s.pending_at_entry));
+    std::fprintf(stderr,
+                 "tier0: %llu block entries, %llu decoded operations (%.2f per entry, %.2f per "
+                 "lookup; %llu from cache hits), %llu reference steps, %llu interrupts at entry\n",
+                 u(s.entries), u(s.operations), ratio(s.operations, s.entries),
+                 ratio(s.operations, s.lookups), u(s.cached_operations), u(fallbacks),
+                 u(s.pending_at_entry));
+    std::fprintf(stderr,
+                 "tier0 cache: %llu lookups, %llu hits (%.2f%%), %llu blocks built (average "
+                 "%.2f operations), reuse mean %.1f max %llu, %zu marked code frames, %llu "
+                 "stores to code frames\n",
+                 u(s.lookups), u(s.hits), share(s.hits, s.lookups), u(s.blocks_built),
+                 ratio(built_operations, s.blocks_built), ratio(s.hits, s.blocks_built),
+                 u(s.max_reuse), marked_frames, u(code_frame_stores));
+    const auto rows = [&](const char* title, const auto& counts, const auto& names,
+                          std::uint64_t whole) {
+        for (std::size_t i = 0; i < counts.size(); ++i) {
+            std::fprintf(stderr, "tier0 %-14s %-18s %12llu (%5.1f%%)\n", title, names[i],
+                         u(counts[i]), share(counts[i], whole));
+        }
+    };
+    constexpr const char* misses[] = {"cold", "tag", "epoch", "code frame", "tlb entry"};
+    rows("cache miss:", s.misses, misses, s.lookups);
     constexpr const char* no_block[] = {"not host-backed", "unsupported", "delay slot"};
-    for (std::size_t i = 0; i < s.fallbacks.size(); ++i) {
-        std::fprintf(stderr, "tier0 reference step: %-16s %12llu (%5.1f%%)\n", no_block[i],
-                     static_cast<unsigned long long>(s.fallbacks[i]),
-                     share(s.fallbacks[i], fallbacks));
-    }
+    rows("reference:", s.fallbacks, no_block, fallbacks);
     constexpr const char* ends[] = {"control flow", "state change",  "unsupported",
                                     "delay slot",   "page boundary", "length limit"};
-    for (std::size_t i = 0; i < s.built_ends.size(); ++i) {
-        std::fprintf(stderr, "tier0 block end:      %-16s %12llu (%5.1f%%)\n", ends[i],
-                     static_cast<unsigned long long>(s.built_ends[i]),
-                     share(s.built_ends[i], built));
-    }
-    constexpr const char* exits[] = {"completed", "run limit",  "pending exception", "exception",
-                                     "host path", "left block", "code changed"};
-    for (std::size_t i = 0; i < s.exits.size(); ++i) {
-        std::fprintf(stderr, "tier0 block exit:     %-17s %11llu (%5.1f%%)\n", exits[i],
-                     static_cast<unsigned long long>(s.exits[i]), share(s.exits[i], s.entries));
-    }
+    rows("block end:", s.built_ends, ends, s.blocks_built);
+    constexpr const char* exits[] = {"completed", "run limit", "pending exception",
+                                     "exception", "host path", "left block"};
+    rows("block exit:", s.exits, exits, s.entries);
+    constexpr const char* barriers[] = {"memory fill", "device", "uncached memory", "code store",
+                                        "other"};
+    rows("barrier:", s.barriers, barriers, s.entries);
     const auto histogram = [&](const char* name, const auto& lengths) {
         std::fprintf(stderr, "tier0 %s lengths:", name);
         for (std::size_t n = 0; n < lengths.size(); ++n) {
             if (lengths[n] != 0) {
-                std::fprintf(stderr, " %zu:%llu", n, static_cast<unsigned long long>(lengths[n]));
+                std::fprintf(stderr, " %zu:%llu", n, u(lengths[n]));
             }
         }
         std::fprintf(stderr, "\n");
@@ -215,6 +226,7 @@ struct Options {
     bool interactive{};
     mips::ExecutionEngine engine{mips::ExecutionEngine::reference};
     bool engine_statistics{};
+    std::uint64_t block_cache_entries{mips::BlockInterpreter::default_cache_entries};
 };
 
 // "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" (UTC) as Unix seconds.
@@ -312,6 +324,13 @@ std::optional<Options> parse(std::span<char*> arguments) {
                 return std::nullopt;
             }
             options.sample_pc_ns = *number;
+        } else if (flag == "--tier0-cache-entries") {
+            const auto number = parse_number(value);
+            if (!number || !std::has_single_bit(*number)) {
+                std::fprintf(stderr, "--tier0-cache-entries takes a power of two\n");
+                return std::nullopt;
+            }
+            options.block_cache_entries = *number;
         } else if (flag == "--memory" || flag == "--cycles") {
             const auto number = parse_number(value);
             if (!number) {
@@ -401,6 +420,7 @@ int main(int argc, char** argv) {
 
     ip27::Ip27Machine machine{config, *prom};
     machine.set_execution_engine(options->engine);
+    machine.set_block_cache_entries(options->block_cache_entries);
     backends::StreamTraceSink sink{stderr};
     machine.tracer().set_sink(&sink);
     // The guest console: the IOC3's first serial port, on standard output, with scripted input.
@@ -611,7 +631,8 @@ int main(int argc, char** argv) {
 
     machine.insert_cdrom(nullptr);
     if (options->engine_statistics) {
-        print_block_statistics(machine.block_statistics());
+        print_block_statistics(machine.block_statistics(), machine.marked_code_frames(),
+                               machine.cpu().code_frame_stores());
     }
     const auto& state = machine.cpu().state();
     std::fprintf(stderr, "stopped after %llu cycles at virtual %llu ns, pc %#018llx\n",

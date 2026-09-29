@@ -352,6 +352,7 @@ std::expected<std::uint64_t, Exception> Cpu::read(const Translation& translation
     }
     const PhysicalAddress address = bus_address(translation, width);
     left_host_path_ = true;
+    last_bus_access_ = classify_bus_access(address, width, translation.uncached);
     auto value = bus_.read(address, width);
     check_host_pages();
     if (!value) {
@@ -372,7 +373,13 @@ std::expected<void, Exception> Cpu::write(const Translation& translation, Access
     }
     const PhysicalAddress address = bus_address(translation, width);
     left_host_path_ = true;
+    last_bus_access_ = classify_bus_access(address, width, translation.uncached);
+    const std::uint64_t code_writes = bus_.code_writes();
     auto result = bus_.write(address, width, value);
+    if (bus_.code_writes() != code_writes) {
+        last_bus_access_ = BusAccess::code_store;
+        ++code_frame_stores_;
+    }
     check_host_pages();
     if (!result) {
         // Only reads can take bus errors on the R10000 (UM 17 "Bus Error Exception" lists
@@ -392,7 +399,9 @@ std::expected<std::uint64_t, Exception> Cpu::load_slow(std::uint64_t address, Ac
     if (!translation) {
         return std::unexpected(translation.error());
     }
+    filling_ = true;
     auto value = read(*translation, width, AccessKind::load);
+    filling_ = false;
     if (value) {
         remember_page(address, *translation, AccessKind::load);
     }
@@ -409,7 +418,9 @@ std::expected<void, Exception> Cpu::store_slow(std::uint64_t address, AccessWidt
     if (!translation) {
         return std::unexpected(translation.error());
     }
+    filling_ = true;
     auto result = write(*translation, width, value);
+    filling_ = false;
     if (result) {
         remember_page(address, *translation, AccessKind::store);
     }
@@ -424,7 +435,8 @@ std::optional<Cpu::CodePage> Cpu::code_page(std::uint64_t address) {
     const auto hit = [&]() -> std::optional<CodePage> {
         const HostPage& entry = code_pages_[host_page_slot(address)];
         if (entry.page == page && entry.context == translation_context()) {
-            return CodePage{entry.bytes, bus_.byte_order()};
+            return CodePage{entry.bytes, bus_.byte_order(), entry.block, entry.frame,
+                            entry.tlb_index};
         }
         return std::nullopt;
     };
@@ -440,7 +452,32 @@ std::optional<Cpu::CodePage> Cpu::code_page(std::uint64_t address) {
     return hit();
 }
 
+void Cpu::claim_code_frame(const CodePage& page) {
+    page.block->mark_code(page.frame);
+    for (HostPage& entry : data_pages_) {
+        if (entry.writable_bytes == page.bytes) {
+            entry = {};
+        }
+    }
+}
+
+Cpu::BusAccess Cpu::classify_bus_access(PhysicalAddress address, AccessWidth width,
+                                        bool uncached) const {
+    if (bus_.memory_bytes(address, byte_count(width)).empty()) {
+        return BusAccess::device;
+    }
+    if (uncached) {
+        return BusAccess::uncached_memory;
+    }
+    return filling_ ? BusAccess::memory_fill : BusAccess::other;
+}
+
 void Cpu::forget_tlb_pages(std::uint64_t entries) {
+    for (std::size_t index = 0; index < Tlb::entry_count; ++index) {
+        if ((entries >> index & 1) != 0) {
+            ++tlb_generations_[index];
+        }
+    }
     for (auto* pages : {&code_pages_, &data_pages_}) {
         for (HostPage& page : *pages) {
             if (page.tlb_index >= 0 && (entries >> page.tlb_index & 1) != 0) {
@@ -459,18 +496,33 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
     check_host_pages();
     const std::uint64_t page = address & ~page_offset_mask;
     const PhysicalAddress frame{translation.address.value & ~page_offset_mask};
+    const auto memory = bus_.memory_frame(frame);
+    if (!memory) {
+        return;
+    }
     if (kind == AccessKind::store) {
+        // A frame holding decoded code is never writable through the host page cache: its
+        // stores must reach the bus to advance its generation.
+        if (memory->block->holds_code(memory->offset)) {
+            return;
+        }
         const auto bytes = bus_.writable_memory_bytes(frame, page_size);
         if (bytes.size() == page_size) {
-            data_pages_[host_page_slot(address)] = {page, bytes.data(), bytes.data(),
-                                                    translation_context(), translation.tlb_index};
+            data_pages_[host_page_slot(address)] = {page,
+                                                    bytes.data(),
+                                                    bytes.data(),
+                                                    translation_context(),
+                                                    translation.tlb_index,
+                                                    memory->block,
+                                                    memory->offset};
         }
         return;
     }
     const auto bytes = bus_.memory_bytes(frame, page_size);
     if (bytes.size() == page_size) {
         (kind == AccessKind::fetch ? code_pages_ : data_pages_)[host_page_slot(address)] = {
-            page, bytes.data(), nullptr, translation_context(), translation.tlb_index};
+            page,          bytes.data(),  nullptr, translation_context(), translation.tlb_index,
+            memory->block, memory->offset};
     }
 }
 

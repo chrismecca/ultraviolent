@@ -294,8 +294,55 @@ class Cpu final : public InterruptSink {
     struct CodePage {
         const std::byte* bytes;
         ByteOrder order;
+        // The memory block and offset of the 4 KiB frame (code-frame tracking).
+        MemoryBlock* block;
+        std::uint64_t frame;
+        // The TLB entry that translated it, or -1 for unmapped segments.
+        std::int8_t tlb_index;
     };
     [[nodiscard]] std::optional<CodePage> code_page(std::uint64_t address);
+    // Marks the page's frame as holding decoded code and drops any cached writable host
+    // page for it, so every later store to the frame goes through the bus, where it advances
+    // the frame's generation (IR.adoc "Keeping blocks valid").
+    void claim_code_frame(const CodePage& page);
+
+    // Validity inputs of decoded blocks (IR.adoc "Keeping blocks valid"): the translation
+    // context (mode bits and ASID); a generation per TLB entry, advanced when the entry is
+    // written or invalidated; and an epoch advanced whenever translation or the bus mappings
+    // change in a way the others do not capture (Config, reset, snapshot loads, remapping).
+    [[nodiscard]] std::uint64_t code_context() const {
+        return translation_context();
+    }
+    [[nodiscard]] std::uint64_t tlb_generation(std::size_t index) const {
+        return tlb_generations_[index];
+    }
+    [[nodiscard]] std::uint64_t code_epoch() const {
+        return code_epoch_;
+    }
+
+    // What the last access that reached the bus was (IR.adoc "Slow bus paths are barriers").
+    enum class BusAccess : std::uint8_t {
+        // Cached-attribute access to memory by a load or store that missed the host page
+        // cache: transparent, a fill.
+        memory_fill,
+        // An access to a device (MMIO) or to unmapped space.
+        device,
+        // An uncached access to memory.
+        uncached_memory,
+        // A store that wrote a frame holding decoded code.
+        code_store,
+        // Anything else that reaches the bus: partial-word and conditional stores, LWL/LWR,
+        // accesses while a watchpoint is armed.
+        other,
+    };
+    static constexpr std::size_t bus_access_count = 5;
+    [[nodiscard]] BusAccess last_bus_access() const {
+        return last_bus_access_;
+    }
+    // Stores that went through the bus because their frame held decoded code.
+    [[nodiscard]] std::uint64_t code_frame_stores() const {
+        return code_frame_stores_;
+    }
 
     // Set by every access that reaches the bus (read, write): the access left the host fast
     // path and may have synchronized devices. Execution engines clear it before an
@@ -503,6 +550,7 @@ class Cpu final : public InterruptSink {
     // a run (synchronize_host_pages) and after every bus access (read, write).
     void check_host_pages() {
         if (!host_pages_current()) {
+            ++code_epoch_;
             code_pages_.fill({});
             data_pages_.fill({});
             host_pages_translation_generation_ = translation_generation_;
@@ -516,6 +564,9 @@ class Cpu final : public InterruptSink {
     }
     // Drops cached pages that TLB entries in `entries` (bit n: entry n) translated.
     void forget_tlb_pages(std::uint64_t entries);
+    // What an access to `address` that reaches the bus is (BusAccess), before it is made.
+    [[nodiscard]] BusAccess classify_bus_access(PhysicalAddress address, AccessWidth width,
+                                                bool uncached) const;
     // Records the page of a successful access to `address` (kind fetch, load, or store).
     void remember_page(std::uint64_t address, const Translation& translation, AccessKind kind);
     [[nodiscard]] std::uint64_t read_cp0(unsigned reg) const;
@@ -545,6 +596,12 @@ class Cpu final : public InterruptSink {
     bool timer_interrupt_{};
     bool watch_pending_{};
     bool left_host_path_{};
+    BusAccess last_bus_access_{BusAccess::other};
+    // Set while load_slow and store_slow make the access that fills the host page cache.
+    bool filling_{};
+    std::uint64_t code_frame_stores_{};
+    std::array<std::uint64_t, Tlb::entry_count> tlb_generations_{};
+    std::uint64_t code_epoch_{};
 
     // Per-instruction work kept out of the instruction loop; transparent (the same values
     // the direct computation gives, which debug builds check). Measured: the interrupt
@@ -576,6 +633,9 @@ class Cpu final : public InterruptSink {
         std::byte* writable_bytes{};
         std::uint64_t context{};
         std::int8_t tlb_index{-1};
+        // The memory block and offset of the frame (code-frame tracking).
+        MemoryBlock* block{};
+        std::uint64_t frame{};
     };
     static constexpr std::size_t host_page_count = 64;
     [[nodiscard]] bool host_pages_current() const {

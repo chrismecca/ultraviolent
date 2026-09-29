@@ -73,7 +73,8 @@ def copy(source, destination):
 def base_command(args, scratch):
     return [args.binary, "--machine", "ip27", "--prom", args.prom, "--io6prom", args.io6prom,
             "--flash", os.path.join(scratch, "flash.bin"),
-            "--nvram", os.path.join(scratch, "nvram.bin"), "--engine", args.engine]
+            "--nvram", os.path.join(scratch, "nvram.bin"), "--engine", args.engine] + (
+                ["--tier0-cache-entries", str(args.cache_entries)] if args.cache_entries else [])
 
 
 def make_fixture(args):
@@ -194,7 +195,8 @@ def run(args):
               f"{best['wall']:>8.2f} {rate:>10.1f} {real:>6.3f} {best['digest']:>16} {note}",
               flush=True)
     if args.save:
-        host = {"binary": args.binary, "engine": args.engine, "cpu": cpu_model(),
+        host = {"binary": args.binary, "engine": args.engine,
+                "cache_entries": args.cache_entries, "cpu": cpu_model(),
                 "kernel": os.uname().release,
                 "repeat": args.repeat, "date": time.strftime("%Y-%m-%d %H:%M")}
         with open(args.save, "w") as f:
@@ -224,6 +226,7 @@ def main():
     common.add_argument("--prom", default=os.path.join(FIRMWARE, "ip27prom.img"))
     common.add_argument("--io6prom", default=os.path.join(FIRMWARE, "io6prom.img"))
     common.add_argument("--engine", default="reference", choices=["reference", "tier0"])
+    common.add_argument("--cache-entries", type=int, help="tier 0's block cache size")
     commands = parser.add_subparsers(dest="command", required=True)
     fixture = commands.add_parser("fixture", parents=[common],
                                   help="build the fixture from an installed system")

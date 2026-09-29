@@ -23,7 +23,7 @@ std::expected<void, MapError> AddressSpace::map_memory(PhysicalRange range, Memo
         return std::unexpected(MapError::outside_block);
     }
     return insert({range, MemoryMapping{block.bytes().subspan(block_offset, range.size), access,
-                                        write_target}});
+                                        write_target, &block, block_offset}});
 }
 
 std::expected<void, MapError> AddressSpace::remap_memory(PhysicalRange range, MemoryBlock& block,
@@ -34,7 +34,7 @@ std::expected<void, MapError> AddressSpace::remap_memory(PhysicalRange range, Me
         return std::unexpected(MapError::outside_block);
     }
     return replace({range, MemoryMapping{block.bytes().subspan(block_offset, range.size), access,
-                                         write_target}});
+                                         write_target, &block, block_offset}});
 }
 
 std::expected<void, MapError> AddressSpace::remap_mmio(PhysicalRange range, MmioTarget& target) {
@@ -95,6 +95,9 @@ std::expected<void, AccessFault> AddressSpace::write(PhysicalAddress address, Ac
             }
             return std::unexpected(AccessFault::read_only);
         }
+        if (memory->block->note_write(memory->block_offset + offset, size)) {
+            ++code_writes_;
+        }
         store_unsigned(memory->bytes.subspan(offset, size), value, byte_order_);
         return {};
     }
@@ -115,7 +118,7 @@ std::span<const std::byte> AddressSpace::memory_bytes(PhysicalAddress address,
 }
 
 std::span<std::byte> AddressSpace::writable_memory_bytes(PhysicalAddress address,
-                                                         std::uint64_t size) const {
+                                                         std::uint64_t size) {
     const Mapping* mapping = find(address);
     if (mapping == nullptr || size == 0 || !mapping->range.contains(address + (size - 1))) {
         return {};
@@ -124,7 +127,23 @@ std::span<std::byte> AddressSpace::writable_memory_bytes(PhysicalAddress address
     if (memory == nullptr || memory->access != MemoryAccess::read_write) {
         return {};
     }
-    return memory->bytes.subspan(address - mapping->range.base, size);
+    const std::uint64_t offset = address - mapping->range.base;
+    if (memory->block->note_write(memory->block_offset + offset, size)) {
+        ++code_writes_;
+    }
+    return memory->bytes.subspan(offset, size);
+}
+
+std::optional<AddressSpace::MemoryFrame> AddressSpace::memory_frame(PhysicalAddress address) const {
+    const Mapping* mapping = find(address);
+    if (mapping == nullptr) {
+        return std::nullopt;
+    }
+    const auto* memory = std::get_if<MemoryMapping>(&mapping->target);
+    if (memory == nullptr) {
+        return std::nullopt;
+    }
+    return MemoryFrame{memory->block, memory->block_offset + (address - mapping->range.base)};
 }
 
 const AddressSpace::Mapping* AddressSpace::find(PhysicalAddress address) const {

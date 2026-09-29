@@ -66,7 +66,9 @@ bool StateImage::get_sparse(const std::string& key, std::span<std::byte> bytes) 
     }
     const std::size_t count = pages->size() / sizeof(std::uint64_t);
     std::vector<std::uint64_t> indices(count);
-    std::memcpy(indices.data(), pages->data(), pages->size());
+    if (count != 0) { // memcpy's pointers must be valid even for no bytes
+        std::memcpy(indices.data(), pages->data(), pages->size());
+    }
     if (std::ranges::any_of(indices,
                             [&](std::uint64_t page) { return page * sparse_page >= size; })) {
         return false;

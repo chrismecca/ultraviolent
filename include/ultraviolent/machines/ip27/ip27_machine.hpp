@@ -152,6 +152,14 @@ class Ip27Machine {
     [[nodiscard]] const mips::BlockStatistics& block_statistics() const {
         return block_interpreter_.statistics();
     }
+    // Tier 0's block cache size, a power of two (IR.adoc "Keeping blocks valid").
+    void set_block_cache_entries(std::size_t entries) {
+        block_interpreter_.set_cache_entries(entries);
+    }
+    // 4 KiB frames of memory and flash now marked as holding decoded code.
+    [[nodiscard]] std::size_t marked_code_frames() const {
+        return memory_.marked_frames() + flash_.marked_frames();
+    }
     // Ends the current run() at the next cycle boundary (for host backends, such as a console
     // script that has run out).
     void request_stop() {
