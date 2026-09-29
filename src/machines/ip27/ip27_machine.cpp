@@ -539,7 +539,9 @@ void Ip27Machine::step() {
     if (tracer_.enabled(TraceCategory::cpu) && pc_probes_.empty()) {
         tracer_.log(TraceCategory::cpu, "pc {:#018x}", state.pc);
     }
+    executing_ = true;
     interpreter_.step();
+    executing_ = false;
     // Events fire at the first cycle boundary at or after their deadline. Between events,
     // time is brought up to date only when a device is accessed.
     if (cpu_.cycles() >= next_event_cycle_) {
@@ -548,6 +550,8 @@ void Ip27Machine::step() {
 }
 
 void Ip27Machine::synchronize_time() {
+    invariant(!executing_ || synchronized_accesses_ != 0,
+              "events run only between instructions or inside a synchronized access");
     scheduler_.advance_to(time_at_cycles(cpu_.cycles(), config_.cpu_clock));
     update_next_event();
 }
@@ -574,18 +578,22 @@ void Ip27Machine::update_next_event() {
 
 std::expected<std::uint64_t, AccessFault>
 Ip27Machine::SynchronizedTarget::mmio_read(std::uint64_t offset, AccessWidth width) {
+    ++machine_.synchronized_accesses_;
     machine_.synchronize_time();
     auto result = target_.mmio_read(offset, width);
     machine_.update_next_event();
+    --machine_.synchronized_accesses_;
     return result;
 }
 
 std::expected<void, AccessFault> Ip27Machine::SynchronizedTarget::mmio_write(std::uint64_t offset,
                                                                              AccessWidth width,
                                                                              std::uint64_t value) {
+    ++machine_.synchronized_accesses_;
     machine_.synchronize_time();
     auto result = target_.mmio_write(offset, width, value);
     machine_.update_next_event();
+    --machine_.synchronized_accesses_;
     return result;
 }
 
@@ -600,7 +608,9 @@ void Ip27Machine::run(std::uint64_t cycles) {
             step();
             continue;
         }
+        executing_ = true;
         interpreter_.run_until(stop_cycle_);
+        executing_ = false;
         if (cpu_.cycles() >= next_event_cycle_) {
             synchronize_time();
         }

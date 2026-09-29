@@ -331,6 +331,10 @@ class Ip27Machine {
     // The last event deadline converted to a cycle count, and the result.
     std::optional<VirtualTime> converted_deadline_;
     std::uint64_t converted_deadline_cycle_{};
+    // Scheduler invariant (IR.adoc): events run between calls into the execution engine or
+    // inside a synchronized device access, never otherwise while an instruction executes.
+    bool executing_{};
+    unsigned synchronized_accesses_{};
 };
 
 } // namespace ultraviolent::ip27

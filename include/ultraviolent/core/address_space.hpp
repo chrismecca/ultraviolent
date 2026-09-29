@@ -117,6 +117,10 @@ class AddressSpace {
                                                           std::uint64_t size) const;
     // The same for writable memory: empty unless one read-write memory mapping covers the
     // range. Writes through it are exactly the bus writes a CPU store would make.
+    // Contract (IR.adoc "Mutable memory spans"): write through the span synchronously, during
+    // the operation that obtained it; do not keep it across a return to the scheduler, to CPU
+    // execution, or to block construction. The CPU's own data page cache is the one retained
+    // writable span, and the CPU invalidates it itself.
     [[nodiscard]] std::span<std::byte> writable_memory_bytes(PhysicalAddress address,
                                                              std::uint64_t size) const;
     // Changes whenever a mapping is added or replaced.

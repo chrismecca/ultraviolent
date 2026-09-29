@@ -138,6 +138,7 @@ if(BUILD_TESTING)
     add_test(NAME core COMMAND core_tests)
 
     add_executable(mips_tests
+        tests/arch/mips/boundary_test.cpp
         tests/arch/mips/cache_test.cpp
         tests/arch/mips/integer_test.cpp
         tests/arch/mips/memory_test.cpp

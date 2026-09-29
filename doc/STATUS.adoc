@@ -41,10 +41,22 @@ at RC-IP27 (the user chose no tag or release).
 * **Tried and reverted:** keeping the bus byte order in `Cpu` instead of reading it through
   the bus made `fs` 13% slower in an A/B of profile-guided builds (layout, not the work
   saved). Run-to-run noise on this host is about 2.5%.
-* **Designed:** the Ultraviolent IR (doc/IR.adoc): decoded blocks as the unit of
-  translation for a fast interpreter (tier 0) and later micro-operations for the JIT
-  (tier 1), with the invalidation, cycle, and interrupt rules that keep them exactly
-  equivalent to the reference interpreter.
+* **Performance objective** (with the user, 2026-09-28; IR.adoc "Performance objective"):
+  first target at least the configured guest clock in guest cycles per host second on the
+  representative workloads, 180 M cycles/s for the 180 MHz R10000, with benchmark digests
+  and same-cycle snapshots unchanged. Tier 0 need not reach it alone; its measured result
+  decides between more tier-0 overhead removal and tier 1 (JIT).
+* **Designed and reviewed:** the Ultraviolent IR (doc/IR.adoc): decoded instructions and
+  blocks for a tier-0 fast interpreter, later micro-operations for the JIT; exact
+  per-cycle accounting, a mutable run limit rechecked at every boundary, slow bus paths as
+  barriers, selective TLB invalidation, frame generations for code writes, and
+  differential testing against the reference interpreter. Implemented in stages A-H (IR.adoc
+  "Stages"); the user reviews after stage C.
+* **Stage A done:** the rules in IR.adoc; boundary tests of the reference interpreter
+  (`mips.run_until_limit_lowered_during_an_access`, `mips.interrupt_raised_during_an_access`,
+  `mips.count_and_random_at_each_cycle`); the scheduler invariant, enforced in
+  `Ip27Machine::synchronize_time` and tested by `ip27.events_run_at_cycle_boundaries`; the
+  writable span contract on `AddressSpace::writable_memory_bytes`.
 
 Previous: M8 - Ethernet (acceptance met, 2026-09-28); RC-IP27 demonstrated clean end to end.
 
@@ -229,10 +241,11 @@ All but performance are done; the repository is public.
   bottlenecks only where the profile shows them (the remaining per-instruction cost is
   mostly decode, dispatch, and result passing, which tier 0 removes). Then record the final
   baseline with `scripts/bench.py run --repeat 3 --save`.
-. **JIT milestone, first step: tier 0** (doc/IR.adoc "Order of work"): decoded blocks run by
-  a fast interpreter, a lockstep mode against the reference interpreter, and the
-  invalidation rules for stores and DMA into code pages. The reference interpreter stays
-  the default until tier 0 passes lockstep over the benchmark workloads.
+. **Tier 0, stages B and C** (doc/IR.adoc "Stages"): B, `DecodedInstruction`, `decode`,
+  `execute`, and `apply_flow`, used by the reference interpreter (digests and snapshots
+  unchanged, speed measured); C, `Cpu::capture()`, the differential harness, and single
+  decoded instructions against the reference interpreter. Then stop for the user's review
+  before stage D (block construction).
 . **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
   inventory ID). What the PROM reads there may also select the deskside slot table.
 . **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.
