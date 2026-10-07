@@ -200,12 +200,17 @@ Only after RC-IP27:
 
 === SMP IP27
 
+Target (ADR-021): the topology of the reference machine `slate`, one deskside module with two
+node boards of two CPUs each, built from R10000s first and as IP31 / R12000 second.
+
 * two CPUs per node;
 * deterministic reference scheduling;
 * correct guest memory ordering and atomic behavior.
 
 === Multi-node Origin 2000
 
+* the two-node link of the ADR-021 target, as read from `slate`, before any larger
+  configuration;
 * routers/NUMAlink generation appropriate to IP27;
 * distributed memory topology;
 * guest-visible directory/coherence semantics;

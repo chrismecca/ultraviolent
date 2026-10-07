@@ -225,3 +225,37 @@ compiler cannot move operations across rounding-mode changes.
 Revisit with a software floating-point implementation if a supported host lacks IEEE 754
 conformance or deterministic flags, or if a differential test finds a discrepancy.
 
+
+== ADR-021: The first multiprocessor target is slate's shape
+
+Status: accepted (with the user, 2026-10-07)
+
+When the roadmap reaches SMP and multi-node work, the target machine is one Origin 2000
+deskside module with two node boards and two CPUs on each (four CPUs), the topology of the
+user's reference machine `slate`, without its graphics. It is built in two steps: first two
+IP27 nodes with R10000s at the existing clocks, then the IP31 / R12000 variant of the same
+topology.
+
+Reasons:
+
+* `slate` is real hardware the user can power up. Every new mechanism (the second CPU on a
+  Hub, IPIs, the link between nodes, the PROM's discovery of it, two-node module and global
+  master behavior, the R12000 differences) can be compared with POD reads and console
+  captures from it, the strongest evidence after public documentation (AGENTIC-BUILD
+  "Evidence hierarchy"). No larger configuration has a reference.
+* Two nodes of two CPUs exercise every new kind of behavior once, at the smallest size.
+  Larger configurations add router chips and scale, not new mechanisms.
+* Four guest CPUs fit the six-core reference host (`uv-dev01`), which can eventually run
+  them host-parallel at the nominal clock.
+* It stays within the IP27 machine personality (ADR-006): a topology, not a new machine. The
+  R12000 is confined to the CPU model, so it comes second.
+* Speed and fidelity separate (ADR-013): R10000 configurations carry the 1:1 speed goal;
+  the R12000 configuration, at its nominal 300 or 400 MHz, is compared with `slate` in virtual
+  time.
+
+Not decided here: how `slate`'s two nodes are connected (a null router on the midplane or a
+router board). Read it from `slate` before modeling it. Graphics remain excluded (ADR-012,
+ROADMAP).
+
+Revisit if the reference hardware becomes unavailable or a different physical machine with
+better access replaces it.
