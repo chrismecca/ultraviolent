@@ -473,7 +473,9 @@ void Ioc3::load_state(const StateImage& image) {
     uart_b_.load_state(image, "ioc3.uart_b");
     if (const auto bytes = image.get_bytes("ioc3.registers")) {
         std::vector<std::uint32_t> flat(bytes->size() / sizeof(std::uint32_t));
-        std::memcpy(flat.data(), bytes->data(), flat.size() * sizeof(std::uint32_t));
+        if (!flat.empty()) { // memcpy's pointers must be valid even for no bytes
+            std::memcpy(flat.data(), bytes->data(), flat.size() * sizeof(std::uint32_t));
+        }
         registers_.clear();
         for (std::size_t i = 0; i + 1 < flat.size(); i += 2) {
             registers_[flat[i]] = flat[i + 1];

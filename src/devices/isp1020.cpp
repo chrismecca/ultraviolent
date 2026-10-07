@@ -827,7 +827,9 @@ void Isp1020::load_state(const StateImage& image) {
     parameters_.clear();
     if (const auto bytes = image.get_bytes(key + ".parameters")) {
         std::vector<std::uint32_t> flat(bytes->size() / sizeof(std::uint32_t));
-        std::memcpy(flat.data(), bytes->data(), flat.size() * sizeof(std::uint32_t));
+        if (!flat.empty()) { // memcpy's pointers must be valid even for no bytes
+            std::memcpy(flat.data(), bytes->data(), flat.size() * sizeof(std::uint32_t));
+        }
         for (std::size_t i = 0; i + 9 <= flat.size(); i += 9) {
             auto& mailboxes = parameters_[flat[i]];
             for (std::size_t j = 0; j < 8; ++j) {
@@ -838,7 +840,9 @@ void Isp1020::load_state(const StateImage& image) {
     (void)image.get_sparse(key + ".ram", std::as_writable_bytes(std::span{ram_}));
     if (const auto bytes = image.get_bytes(key + ".storage")) {
         std::vector<std::uint32_t> flat(bytes->size() / sizeof(std::uint32_t));
-        std::memcpy(flat.data(), bytes->data(), flat.size() * sizeof(std::uint32_t));
+        if (!flat.empty()) { // memcpy's pointers must be valid even for no bytes
+            std::memcpy(flat.data(), bytes->data(), flat.size() * sizeof(std::uint32_t));
+        }
         storage_.clear();
         for (std::size_t i = 0; i + 1 < flat.size(); i += 2) {
             storage_[flat[i]] = static_cast<std::uint16_t>(flat[i + 1]);
