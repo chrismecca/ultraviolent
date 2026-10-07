@@ -331,10 +331,49 @@ All but performance are done; the repository is public.
   bottlenecks only where the profile shows them (the remaining per-instruction cost is
   mostly decode, dispatch, and result passing, which tier 0 removes). Then record the final
   baseline with `scripts/bench.py run --repeat 3 --save`.
-. **Review with the user** (stage F and its measurements). Candidates from the evidence:
-  stage G (tier 0 as the default engine, the gates having passed) and stage H (the
-  per-operation execution cost: boundary checks, dispatch, ExecutionResult traffic),
-  since the cache now hits 95-100% and speed is set by execution, not decode.
+. **Next (agreed with the user 2026-09-29; F committed as dc450ca, the validated cached
+  tier-0 checkpoint).** In this order, each its own commit:
+.. **G, small:** tier 0 becomes the default engine. Keep `--engine reference` permanently;
+   diagnostic modes (tracing, PC probes) keep forcing the reference. Not a performance
+   milestone.
+.. **Cleanup commit, separate from H:** the null-pointer `memcpy` in `load_state` of the
+   ISP1020 (`isp1020.cpp:830, 841`) and IOC3 (`ioc3.cpp:476`), as fixed in
+   `StateImage::get_sparse`; the sanitizer preset must then run clean.
+.. **H, a bounded investigation of cached per-operation execution cost.** Tier 0 need not
+   reach 180 M cycles/s; the aim is to remove obvious interpreter overhead, measure what
+   remains, and decide when tier 1 is justified. No more cache associativity, eviction, or
+   size work (the sweep settled it); transparent-RAM barrier removal is secondary.
+... First measure, before changing execution: hardware counters and profiles of cached tier 0
+    on all four workloads (`cpu` is the primary pure-execution workload): host instructions,
+    cycles, branches, branch misses, and cache misses per guest cycle; the major sampled
+    locations, attributed where practical to block lookup, decoded-op dispatch, instruction
+    semantics, complete_cycle and boundary processing, pending exceptions, end_cycle, and
+    the memory fast paths.
+... Then one mechanism at a time, each with a correctness and benchmark gate:
+    (1) ExecutionResult and completion traffic: a shared semantic interface where the common
+    sequential success does not construct or copy a general result; rare control flow and
+    exceptions may use a compact tagged result or an out-of-line path; chosen from generated
+    assembly and benchmarks; one semantic implementation for both engines.
+    (2) Run-limit hoisting: a fast block path when the whole block fits before the current
+    limit, the exact per-operation path otherwise; a synchronized device access stays a
+    barrier that exits immediately; focused tests of exact stop cycles; not combined with
+    removing pending-exception checks.
+    (3) Decoded-op dispatch: the flat switch under PGO against preselected handler functions
+    and computed-goto threading; a larger DecodedInstruction is acceptable if whole-workload
+    throughput improves.
+    (4) Other boundary costs only as profiled (service_pending_exceptions, flow application,
+    end_cycle, transparent-memory barriers), one invariant at a time, keeping exact Count,
+    Random, exceptions, interrupt timing, and scheduler behavior.
+... After the experiments: every differential and gate test, and the four workloads against
+    the pre-B baseline (`local/bench/step2.json`) as well as the current reference. Report
+    cumulative speed and host instructions, branches, and mispredicts per guest cycle after
+    each mechanism.
+... **Stop rule:** once the obvious per-operation costs are gone and most remaining time is
+    inherent decoded-op dispatch and shared semantic execution, stop optimizing the
+    interpreter; update IR.adoc with the measurements and propose tier 1 (decoded blocks
+    lowered to micro-operations or direct x86-64 emission, reusing the block cache,
+    invalidation rules, exact-boundary model, and the reference oracle). The 180 M target
+    remains the machine-speed milestone; native emission may be what crosses it.
 . **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
   inventory ID). What the PROM reads there may also select the deskside slot table.
 . **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.
