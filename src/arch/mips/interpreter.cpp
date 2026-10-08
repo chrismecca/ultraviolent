@@ -2,6 +2,8 @@
 
 #include <ultraviolent/arch/mips/decoded.hpp>
 
+#include "semantics.hpp"
+
 namespace ultraviolent::mips {
 
 namespace {
@@ -21,7 +23,7 @@ namespace {
         cpu.end_cycle(false);
         return;
     }
-    complete_cycle(cpu, decode(*word));
+    complete_cycle<&execute_inline>(cpu, decode(*word));
 }
 
 } // namespace

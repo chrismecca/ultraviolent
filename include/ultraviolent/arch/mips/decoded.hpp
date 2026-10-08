@@ -467,8 +467,11 @@ inline constexpr auto operation_classes = [] {
 }
 
 // Executes `instruction`, located at `pc`, against the CPU: the MIPS semantics, shared by
-// every execution engine. Leaves PC to the caller (apply_flow).
-ExecutionResult execute(Cpu& cpu, const DecodedInstruction& instruction, std::uint64_t pc);
+// every execution engine. Leaves PC to the caller (apply_flow). Returns the control flow, or
+// Flow::exception when the instruction raised an exception, which execute has then taken
+// (Cpu::take_exception): a 16-byte result returned in registers, where ExecutionResult went
+// through memory (IR.adoc "Stage H").
+Control execute(Cpu& cpu, const DecodedInstruction& instruction, std::uint64_t pc);
 
 // Advances PC and the delay-slot state after an instruction completed with `control`.
 inline void apply_flow(IntegerState& s, const Control& control) {
@@ -502,22 +505,25 @@ inline void apply_flow(IntegerState& s, const Control& control) {
         s.next_pc = s.pc + 4;
         s.delay_slot = false;
         break;
+    case Flow::exception:
+        std::unreachable();
     }
 }
 
 // The rest of a processor cycle once the instruction at pc is known: executes it and
 // accounts the cycle, the one sequence every engine uses after its own way of finding the
 // instruction (IR.adoc "Executor"). Returns whether it retired; false when it took an
-// exception, which is then taken.
+// exception, which is then taken. The engines pass the inlinable execute_inline
+// (semantics.hpp, private to them); anything else uses the out-of-line execute.
+template <auto Execute = &execute>
 [[gnu::always_inline]] inline bool complete_cycle(Cpu& cpu, const DecodedInstruction& instruction) {
     IntegerState& s = cpu.state();
-    auto result = execute(cpu, instruction, s.pc);
-    if (!result) {
-        cpu.take_exception(result.error());
+    const Control control = Execute(cpu, instruction, s.pc);
+    if (control.flow == Flow::exception) [[unlikely]] {
         cpu.end_cycle(false);
         return false;
     }
-    apply_flow(s, *result);
+    apply_flow(s, control);
     cpu.end_cycle(true);
     return true;
 }

@@ -24,8 +24,9 @@ checklist in <<hypotheses>>.
 Cpu            architectural state + shared semantics (modes, translation, memory access,
                CP0, TLB, exceptions, interrupts, FPU registers)
 decode         instruction word -> DecodedInstruction (decoded.hpp; a pure function)
-execute        the instruction semantics for a DecodedInstruction (semantics.cpp), shared by
-               every execution engine; apply_flow advances PC and the delay-slot state
+execute        the instruction semantics for a DecodedInstruction (semantics.hpp, inlined by
+               both engines; semantics.cpp for other callers); apply_flow advances PC and
+               the delay-slot state
 Interpreter    reference execution engine: fetch, decode, execute, per-cycle accounting;
                keeps no state
 execute_fpu    COP1/COP1X semantics, called by execute (the FPU stays opaque to decode)

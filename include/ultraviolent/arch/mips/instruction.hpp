@@ -52,6 +52,9 @@ enum class Flow : std::uint8_t {
     branch_likely,
     // ERET: no delay slot.
     exception_return,
+    // Not a flow: how execute reports that the instruction raised an exception, which it has
+    // taken (decoded.hpp). The semantics never return it.
+    exception,
 };
 
 struct Control {

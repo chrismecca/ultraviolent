@@ -60,8 +60,9 @@ wrong, however fast. Stage A's tests pin the reference behavior they name.
   today. This is a different case from an exception raised by the instruction itself (next
   rule), although both end the block.
 . **Instruction exceptions are precise.** A faulting instruction leaves the state of the
-  instructions before it and none of its own; `Cpu::take_exception` then sets PC, EPC, BD,
-  and the delay-slot state, the engine calls `end_cycle(false)`, and leaves the block.
+  instructions before it and none of its own; `Cpu::take_exception`, called where the
+  semantics raise the exception (stage H), sets PC, EPC, BD, and the delay-slot state, then
+  the engine calls `end_cycle(false)` and leaves the block.
 . **Slow bus paths are barriers.** An instruction whose memory reference leaves the
   transparent host-memory path (any `Cpu::read` or `Cpu::write`: MMIO, uncached space, an
   unmapped or code-holding page) completes exactly; then the engine leaves the block and
@@ -99,10 +100,14 @@ invalidation event.
 == DecodedInstruction
 
 `decode(std::uint32_t word)` is a pure function of the instruction word; `execute(Cpu&,
-const DecodedInstruction&, std::uint64_t pc)` holds the semantics (`semantics.cpp`). The
-reference interpreter is fetch, `decode`, and `complete_cycle` (execute, `apply_flow`, and
-the cycle accounting). There is one copy of the MIPS semantics: every engine calls the same
-`execute` and `complete_cycle`.
+const DecodedInstruction&, std::uint64_t pc)` holds the semantics. The reference interpreter
+is fetch, `decode`, and `complete_cycle` (execute, `apply_flow`, and the cycle accounting).
+There is one copy of the MIPS semantics, in the private header `src/arch/mips/semantics.hpp`:
+both engines inline it into their loops (`execute_inline`, passed to `complete_cycle` as a
+template argument), and `semantics.cpp` compiles the public, out-of-line `execute` from it
+for everything else (the differential harness). `execute` returns a 16-byte `Control` in
+registers; `Flow::exception` means the instruction raised an exception, which the semantics
+have already taken (stage H).
 
 ----
 enum class DecodedOpcode : std::uint8_t {
@@ -190,7 +195,8 @@ At every instruction boundary, conservatively:
 
 . stop if `cycles() >= limit` (the limit read through its reference each time);
 . if `service_pending_exceptions()` took one: `end_cycle(false)`, leave the block;
-. execute the operation; on an exception: `take_exception`, `end_cycle(false)`, leave;
+. execute the operation (which takes an exception it raises); on an exception:
+  `end_cycle(false)`, leave;
 . `apply_flow`, `end_cycle(true)`;
 . leave if the instruction left the host fast path (a flag the CPU's slow paths set);
 . leave if the next PC is not the next operation's (a taken branch out of the block, a
@@ -317,6 +323,66 @@ A review follows stage C, before block construction.
 If a stage would require duplicating instruction semantics, special-casing a guest PC,
 weakening exact-cycle behavior, or making MMIO behavior hard to compare with the reference
 interpreter, it stops and the conflict is documented here instead.
+
+== Stage H
+
+A bounded investigation of tier 0's per-operation cost (STATUS "Next task"): measure first,
+then one mechanism at a time, each with a correctness gate (every preset, the differential
+suite, same-cycle snapshots byte-identical on both engines, all workload digests) and a
+benchmark gate. Host: `uv-dev01` (Ryzen 5 3600, Zen 2, 3.6 GHz fixed); counts from
+`scripts/bench.py --counters`, which include process start and snapshot loading.
+
+=== Measurement (stage G, 2026-10-08)
+
+Host events per guest cycle, profile-guided build:
+
+[cols="1,1,1,1,1,1"]
+|===
+| Workload | Instructions | Cycles | IPC | Mispredicted branches | L1D misses
+
+| prom | 140.0 | 40.8 | 3.43 | 0.022 (0.09%) | 0.013
+| boot | 149.4 | 47.6 | 3.13 | 0.099 (0.39%) | 0.219
+| cpu | 128.7 | 47.5 | 2.71 | 0.233 (1.07%) | 0.429
+| fs | 124.7 | 43.1 | 2.89 | 0.189 (0.92%) | 0.337
+|===
+
+The host already runs about three instructions per cycle and predicts nearly every branch:
+the cost is the number of host instructions per guest instruction, not stalls. Samples (perf):
+`execute` and `BlockInterpreter::run_until` (run_block and complete_cycle inlined) are 70-77%
+of every workload; the device path (`mmio_read`, `load_slow`, the Hub) is about 15% of `prom`
+and `boot`; the FPU about 5% of `cpu` (awk's numbers are doubles). In the disassembly of
+`cpu`, a sequential operation such as ADDIU cost about 95 host instructions: `execute` was
+an out-of-line call with a full frame, an `Executor` built in memory, the MIPS III gate, the
+dispatch, and the 32-byte `std::expected<Control, Exception>` returned through memory (about
+35 instructions besides the operation itself), and the block loop about 45 (the result's
+tests, apply_flow, end_cycle, the host-path flag, the run limit, the pending-exception flag,
+the pc check, and reloads of the CPU pointer and the block's operations).
+
+=== Mechanism 1: ExecutionResult and completion traffic
+
+Variants, `cpu` and `fs` host instructions and cycles per guest cycle (G: 128.7 / 47.5 and
+124.7 / 43.1):
+
+* V1, `execute` out of line returning `Control` (16 bytes, in registers) with
+  `Flow::exception` and the exception in an out parameter: 132.3 / 49.8 and 128.0 / 46.7,
+  worse. `Exception`'s default member initializers zeroed it on every instruction.
+* V1b, the same with `execute` taking the exception itself: 125.0 / 46.5 and 121.1 / 45.3,
+  about 3% fewer instructions.
+* V2, the semantics as a private header inlined into both engines (one source):
+  104.5 / 38.7 and 101.1 / 37.5.
+* V3, V2 with the semantics' internal result also `Control`, an exception taken where it is
+  raised (`Executor::fail`): 99.3 / 36.7 and 92.8 / 34.3. Exact because every error is
+  returned at once (audited: no operation inspects an error and continues, none raises
+  twice); removing `take_exception` from `fail` fails the MIPS suite.
+* V4, V3 with run_block's CPU reference, operations, count, and start pc in locals:
+  104.2 / 36.1 and 97.7 / 33.6, mixed. The disassembly still built the `Executor` in memory
+  for every operation, because helpers outside the switch were called with `this`, and the
+  extra locals spilled.
+* V5, V4 with every `Executor` helper always inlined, so nothing escapes: 91.7 / 34.0 and
+  82.8 / 29.5. Without V4's locals: 95.8 / 36.4 and 87.2 / 33.0, so they stay.
+
+Chosen: V5. From stage G, 29% fewer host instructions and 28% fewer cycles per guest cycle
+on `cpu`, 34% and 32% on `fs`; the reference interpreter inlines the same semantics.
 
 == Open questions
 

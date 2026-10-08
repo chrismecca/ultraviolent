@@ -3,6 +3,8 @@
 #include <ultraviolent/arch/mips/decoded.hpp>
 #include <ultraviolent/core/invariant.hpp>
 
+#include "semantics.hpp"
+
 #include <algorithm>
 #include <bit>
 
@@ -90,36 +92,43 @@ const Block* BlockInterpreter::lookup(std::uint64_t pc) {
 // again: a store into the block's frame reaches the bus (the frame is claimed), which is a
 // barrier, and advances the frame's generation, so the next lookup rebuilds.
 void BlockInterpreter::run_block(const Block& block, const std::uint64_t& limit, bool cached) {
-    const auto& operations = block.operations;
-    const IntegerState& s = cpu_.state();
+    // Locals, not members read through `this` and `block`: stores into the CPU's state would
+    // otherwise make the compiler reload them for every operation (IR.adoc "Stage H"). The run
+    // limit is still read through its reference at every boundary (a device access can lower
+    // it).
+    Cpu& cpu = cpu_;
+    const DecodedInstruction* const operations = block.operations.data();
+    const std::size_t count = block.operations.size();
+    const std::uint64_t start_pc = block.start_pc;
+    const IntegerState& s = cpu.state();
     std::size_t next = 0;
     BlockExit exit = BlockExit::completed;
     for (;;) {
-        cpu_.clear_left_host_path();
-        const bool retired = complete_cycle(cpu_, operations[next]);
+        cpu.clear_left_host_path();
+        const bool retired = complete_cycle<&execute_inline>(cpu, operations[next]);
         ++next;
         if (!retired) {
             exit = BlockExit::exception;
             break;
         }
-        if (cpu_.left_host_path()) {
+        if (cpu.left_host_path()) {
             exit = BlockExit::host_path;
-            ++statistics_.barriers[static_cast<std::size_t>(cpu_.last_bus_access())];
+            ++statistics_.barriers[static_cast<std::size_t>(cpu.last_bus_access())];
             break;
         }
-        if (next == operations.size()) {
+        if (next == count) {
             break;
         }
-        if (cpu_.cycles() >= limit) {
+        if (cpu.cycles() >= limit) {
             exit = BlockExit::run_limit;
             break;
         }
-        if (cpu_.service_pending_exceptions()) {
-            cpu_.end_cycle(false);
+        if (cpu.service_pending_exceptions()) {
+            cpu.end_cycle(false);
             exit = BlockExit::pending_exception;
             break;
         }
-        if (s.pc != block.start_pc + 4 * next) {
+        if (s.pc != start_pc + 4 * next) {
             exit = BlockExit::left_block;
             break;
         }
