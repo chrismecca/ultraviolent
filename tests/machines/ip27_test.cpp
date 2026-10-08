@@ -264,6 +264,7 @@ const test::Registration event_boundaries{
         const auto prom = program({lui(t0, 0xa800), dsll32(t0, t0, 0), lw(t1, 0x100, t0),
                                    daddu(t2, t2, t1), beq(zero, zero, -12), nop()});
         Ip27Machine machine{small_config(), prom};
+        machine.set_execution_engine(mips::ExecutionEngine::reference);
         machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
         std::uint64_t fired_at = 0;
         auto& scheduler = machine.scheduler();
@@ -290,6 +291,7 @@ const test::Registration tier0_engine{
                                    tlbwr(), daddu(t1, t1, t2), beq(zero, zero, -24), nop()});
         Ip27Machine reference{small_config(), prom};
         Ip27Machine tier0{small_config(), prom};
+        reference.set_execution_engine(mips::ExecutionEngine::reference);
         tier0.set_execution_engine(mips::ExecutionEngine::tier0);
         for (Ip27Machine* machine : {&reference, &tier0}) {
             machine->cpu().mtc0(mips::cp0::status, mips::status::kx);

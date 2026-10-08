@@ -11,7 +11,8 @@ behavior.
     scripts/bench.py run                       # all workloads, 3 runs each
     scripts/bench.py run --save base.json      # record results
     scripts/bench.py run --compare base.json   # digests must match; speedups reported
-    scripts/bench.py run --engine tier0 --statistics DIR --compare a.json --compare b.json
+    scripts/bench.py run --statistics DIR --compare a.json --compare b.json
+    scripts/bench.py run --engine reference     # the reference interpreter
 
 The fixture holds copies of the user's private disk and firmware state; keep it out of Git
 (the default is on local disk, off the network file system that holds the repository).
@@ -225,7 +226,7 @@ def main():
     common.add_argument("--binary", default="build/pgo/ultraviolent")
     common.add_argument("--prom", default=os.path.join(FIRMWARE, "ip27prom.img"))
     common.add_argument("--io6prom", default=os.path.join(FIRMWARE, "io6prom.img"))
-    common.add_argument("--engine", default="reference", choices=["reference", "tier0"])
+    common.add_argument("--engine", default="tier0", choices=["reference", "tier0"])
     common.add_argument("--cache-entries", type=int, help="tier 0's block cache size")
     commands = parser.add_subparsers(dest="command", required=True)
     fixture = commands.add_parser("fixture", parents=[common],

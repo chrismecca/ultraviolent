@@ -144,8 +144,9 @@ class Ip27Machine {
     // accessed (IP27.adoc "Machine loop"); run() leaves it current.
     void step();
     void run(std::uint64_t cycles);
-    // The engine run() uses (IR.adoc "Stages"): a host choice, not guest configuration, and
-    // not part of snapshots. Tracing and PC probes always step the reference interpreter.
+    // The engine run() uses (IR.adoc "Stages"; tier 0 by default since stage G): a host
+    // choice, not guest configuration, and not part of snapshots. Tracing and PC probes
+    // always step the reference interpreter.
     void set_execution_engine(mips::ExecutionEngine engine) {
         engine_ = engine;
     }
@@ -306,7 +307,7 @@ class Ip27Machine {
     mips::Cpu cpu_;
     mips::Interpreter interpreter_{cpu_};
     mips::BlockInterpreter block_interpreter_{cpu_};
-    mips::ExecutionEngine engine_{mips::ExecutionEngine::reference};
+    mips::ExecutionEngine engine_{mips::ExecutionEngine::tier0};
     SynchronizedTarget synchronized_hub_{*this, hub_};
     SynchronizedTarget synchronized_flash_{*this, flash_interface_};
     SynchronizedTarget synchronized_flash_commands_{*this, flash_commands_};

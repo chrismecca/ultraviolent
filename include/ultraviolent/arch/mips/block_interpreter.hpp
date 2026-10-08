@@ -11,8 +11,9 @@
 
 namespace ultraviolent::mips {
 
-// Which execution engine runs instructions (IR.adoc "Stages" E, G). The reference
-// interpreter is the default and the oracle; tier 0 is experimental until stage G's gates.
+// Which execution engine runs instructions (IR.adoc "Stages" E, G). Tier 0 is the default
+// since stage G; the reference interpreter is permanent, the oracle every engine is tested
+// against, and what tracing and PC probes use.
 enum class ExecutionEngine : std::uint8_t {
     reference,
     tier0,

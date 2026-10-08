@@ -87,10 +87,11 @@ void usage() {
         "ends a run early; the snapshot, flash, NVRAM, and disk are still written.\n"
         "--date YYYY-MM-DD[THH:MM:SS] sets the time-of-day clock at power-on (UTC; default\n"
         "2026-01-01): virtual time runs it from there.\n"
-        "--engine reference|tier0 selects the execution engine (default reference, the\n"
-        "oracle; tier0 is experimental, doc/IR.adoc). --engine-statistics prints tier 0's\n"
-        "block statistics at the end of the run. --tier0-cache-entries N sizes its block\n"
-        "cache (a power of two; default 4096).\n"
+        "--engine reference|tier0 selects the execution engine (default tier0, decoded\n"
+        "blocks; reference is the interpreter every engine is tested against, doc/IR.adoc).\n"
+        "--trace cpu and --probe always use the reference. --engine-statistics prints tier\n"
+        "0's block statistics at the end of the run. --tier0-cache-entries N sizes its\n"
+        "block cache (a power of two; default 4096).\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
         "scsi ethernet irq scheduler firmware machine all\n",
         stderr);
@@ -224,7 +225,7 @@ struct Options {
     std::optional<std::int64_t> date;
     bool stop_at_prompt{};
     bool interactive{};
-    mips::ExecutionEngine engine{mips::ExecutionEngine::reference};
+    mips::ExecutionEngine engine{mips::ExecutionEngine::tier0};
     bool engine_statistics{};
     std::uint64_t block_cache_entries{mips::BlockInterpreter::default_cache_entries};
 };
