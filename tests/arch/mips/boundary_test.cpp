@@ -8,6 +8,7 @@
 #include <ultraviolent/arch/mips/block_interpreter.hpp>
 #include <ultraviolent/arch/mips/cp0.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -143,6 +144,28 @@ const test::Registration tier0_limit_lowered{
         // page cache miss), then the device read.
         t.check_equal(tier0.statistics().exits[static_cast<std::size_t>(BlockExit::host_path)],
                       std::uint64_t{2});
+    }};
+
+const test::Registration tier0_limit_inside_block{
+    "mips.tier0.run_limit_inside_a_block", [](test::Context& t) {
+        // Every run limit inside and just past one straight-line block of 15 operations stops
+        // at exactly that cycle: a block that does not fit before the limit at entry checks it
+        // at every boundary (IR.adoc "Stage H", mechanism 2). Each operation adds 1 to t4.
+        for (std::uint64_t limit = 1; limit <= 17; ++limit) {
+            System s;
+            s.load(System::code, {addiu(t4, t4, 1), addiu(t4, t4, 1), addiu(t4, t4, 1),
+                                  addiu(t4, t4, 1), addiu(t4, t4, 1), addiu(t4, t4, 1),
+                                  addiu(t4, t4, 1), addiu(t4, t4, 1), addiu(t4, t4, 1),
+                                  addiu(t4, t4, 1), addiu(t4, t4, 1), addiu(t4, t4, 1),
+                                  addiu(t4, t4, 1), addiu(t4, t4, 1), addiu(t4, t4, 1)});
+            s.start_kernel();
+            BlockInterpreter tier0{s.cpu};
+            tier0.run_until(limit);
+            t.check_equal(s.cpu.cycles(), limit);
+            // Past the block, memory holds zeros: NOPs.
+            t.check_equal(s.gpr(t4), std::min<std::uint64_t>(limit, 15));
+            t.check_equal(s.pc(), kseg0(System::code) + 4 * limit);
+        }
     }};
 
 const test::Registration tier0_interrupt_from_access{

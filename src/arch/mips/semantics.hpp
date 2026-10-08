@@ -802,7 +802,9 @@ inline constexpr auto needs_64bit_operations = [] {
     case DecodedOpcode::reserved:
         return reserved();
     }
-    return reserved();
+    // decode produces only DecodedOpcode values, and every one has a case (-Wswitch): telling
+    // the compiler so drops the jump table's range check (IR.adoc "Stage H", mechanism 3).
+    std::unreachable();
 }
 
 } // namespace semantics
