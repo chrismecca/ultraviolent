@@ -9,6 +9,16 @@ The reference development distribution is Debian 13 ("trixie").
 Debian versions will evolve; avoid depending on an exact compiler minor version unless a
 real compiler bug requires it.
 
+The reference machine since 2026-10-07 is `uv-dev01`: AMD Ryzen 5 3600 (six cores, SMT off,
+boost off), 16 GB, Debian 13. The repository is on NFS (`/n/store01/home/mec`); private
+runtime state is on a local XFS volume on its own disk, `/srv/ultraviolent` (`local/` is a
+symlink to `/srv/ultraviolent/local`, excluded in `.git/info/exclude`; the NFS copy it was
+made from is kept as `local.nfs-backup/`), and the benchmark fixture is in
+`/srv/ultraviolent/bench`, which `/var/tmp/ultraviolent-bench` links to. Host settings for measurement: `/etc/sysctl.d/90-ultraviolent-perf.conf`
+(`kernel.perf_event_paranoid = 1`, `kernel.nmi_watchdog = 0`) and the `performance` CPU
+governor while benchmarking (not persistent). Benchmarks before that date ran on an Intel
+i5-3470T and are not comparable with later ones.
+
 == Debian packages
 
 On a clean Debian 13 workstation:
@@ -193,6 +203,18 @@ Workloads run on the default engine, tier 0 (IR.adoc); `--engine reference` runs
 interpreter, and the digests of both must be equal. `--compare` repeats: speedups are reported against each saved result, and a
 digest that differs from any of them fails the run. Keep the pre-stage-B reference results
 (`local/bench/step2.json`) as the performance baseline.
+
+Time runs with the work directory in memory, so `fs` and `boot` measure the emulator and not
+the host disk: copy the fixture to tmpfs and pass `--work`. On a reflink-capable file system
+(XFS) the fixture copies share blocks with the fixture but not its page cache, so every run
+reads the guest disk cold; measured on the XFS hard disk of the reference machine, `fs` was
+63.4 M cycles/s there and 81.2 in tmpfs, with the same digest.
+
+[source,shell]
+----
+mkdir -p /dev/shm/uvbench && cp -r --sparse=always /var/tmp/ultraviolent-bench/fixture /dev/shm/uvbench/
+scripts/bench.py run --work /dev/shm/uvbench --compare local/bench/r3600/h-final-tier0.json
+----
 
 The reported time is the best of `--repeat` runs, including process start and, for the
 shell workloads, loading the 560 MB snapshot (under a second). Frequency scaling and other
