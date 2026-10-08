@@ -3,7 +3,8 @@
 Status: design, reviewed with the user (2026-09-28, 2026-09-29). Stages A (this document
 and the boundary tests), B (decode and shared semantics), C (the differential harness), D
 (block construction), E (the tier-0 executor), F (the block cache and its invalidation),
-and G (tier 0 as the default engine) are implemented; H is in progress.
+and G (tier 0 as the default engine) are implemented, and H ended at its stop rule
+(2026-10-08) with a proposal for tier 1 ("Stage H"), to be reviewed with the user.
 
 This document designs the representation between the MIPS decoder and the fast execution
 engines (ARCHITECTURE "The CPU is not the interpreter", "Future JIT architecture"): what a
@@ -384,9 +385,95 @@ Variants, `cpu` and `fs` host instructions and cycles per guest cycle (G: 128.7 
 Chosen: V5. From stage G, 29% fewer host instructions and 28% fewer cycles per guest cycle
 on `cpu`, 34% and 32% on `fs`; the reference interpreter inlines the same semantics.
 
+=== Mechanism 2: run-limit hoisting (not kept)
+
+The limit changes only between engine runs or inside a bus access: `synchronize_time` after
+a synchronized access, and `request_stop` from console callbacks, the host stop-check event,
+and terminal commands, all synchronous (no host threads). A bus access ends the block. So a
+block that fits before the limit at entry cannot reach it inside, and the per-operation
+check can be skipped. Implemented with a test of every stop cycle inside and past one block
+(`mips.tier0.run_limit_inside_a_block`; forcing the fast path fails it and four block-cache
+tests). Result: 1.5% fewer instructions, cycles within noise (two runs each, noise about
+±0.5 host cycles per guest cycle: `cpu` about 2% worse, `fs` about 3% better). The check it
+removed was a well-predicted load and compare that overlapped other work. Reverted; the test
+stays as a boundary test of the current engine.
+
+=== Mechanism 3: dispatch
+
+* 3a, kept: the switch's unreachable default replaced by `std::unreachable()` (decode
+  produces only DecodedOpcode values, every one has a case), which drops the jump table's
+  range check. `cpu` 89.7 instructions and 33.6 cycles per guest cycle (from 91.7 and about
+  34.7), `fs` 80.8 and 29.6 (from 82.8 and about 29.9).
+* 3b, not kept: testing Status before the MIPS III table. `allows_64bit_operations`
+  derives the operating mode on every call, which cost more than the table load (`cpu` 93.7
+  and 36.6).
+* Not attempted: handler-function tables (they bring back the per-operation call that
+  mechanism 1 removed) and computed-goto threading (it would split the one semantic switch
+  into engine-specific code). Their ceiling is the indirect-branch misprediction cost:
+  0.12-0.17 mispredictions per guest cycle in all, at most about 7% of `cpu`'s cycles.
+
+=== Result
+
+Best of 3, `uv-dev01`, all digests unchanged (`local/bench/r3600/h-final-*.json`):
+
+[cols="1,1,1,1,1,1,1"]
+|===
+| Workload | Tier 0 M cycles/s | vs stage G | vs pre-B | x real (180 MHz) | Reference M cycles/s | Host instructions / cycles per guest cycle
+
+| prom | 129.4 | 1.47x | 1.33x | 0.72 | 104.5 | 97.3 / 27.9
+| boot | 103.2 | 1.36x | 1.19x | 0.57 | 92.7 | 108.2 / 35.1
+| cpu | 105.5 | 1.41x | 1.12x | 0.59 | 89.6 | 89.7 / 33.4
+| fs | 117.5 | 1.45x | 1.33x | 0.65 | 105.6 | 80.8 / 29.2
+|===
+
+Stage G on this host: 88.2, 76.2, 75.1, 81.2; the pre-stage-B interpreter (`b4718fc`): 97.4,
+86.9, 94.2, 88.2. The reference interpreter, inlining the same semantics, is again about as
+fast as before stage B.
+
+=== Where the time goes now, and the stop rule
+
+After mechanisms 1 and 3a, a sequential operation costs about 32 host instructions besides
+its own work: dispatch (gate table and jump table) about 7, sequential `apply_flow` 5,
+`end_cycle` 4, the host-path flag 3, the count, run-limit, and pending-exception checks 8,
+and the pc check 5. Each is a rule of "Execution rules every engine keeps" done once per
+instruction; the operation's work reads and writes guest registers in memory. The remaining
+candidates are small (the pc check is needed only after a control operation and after the
+first operation of a block entered in a delay slot, about 3%; batching cycle accounting needs
+its own proof). This meets the stop rule: the obvious per-operation costs are gone, and what
+remains is inherent decoded-op dispatch and exact per-instruction accounting.
+
+The 180 M cycles/s objective needs at most 20 host cycles per guest cycle at 3.6 GHz; tier 0
+is at about 30-34 on the pure-execution workloads. Closing that needs what an interpreter
+cannot do: no dispatch, operands as constants, pc known at translation time, guest registers
+in host registers across instructions, and boundary checks only where an instruction can
+change what they test.
+
+=== Proposal: tier 1
+
+Native x86-64 code for decoded blocks, reusing what tier 0 built: the block cache and its
+invalidation (frame and TLB generations, code epoch), block formation, the barrier and
+boundary rules, and the reference interpreter and differential harness as the oracle. In
+steps, each measured and each gated like stage H:
+
+. **Call-threaded code.** Each block becomes a straight sequence of direct calls to
+  per-operation functions instantiated from the same semantics with the instruction fields
+  as constants. Removes dispatch and decode; keeps every boundary check.
+. **Inline emission** of the common integer, branch, and load/store operations (the host
+  page cache fast path inline, the slow path a call that is a barrier), with pc and
+  delay-slot state written only where an exception, a barrier, or the block end can observe
+  them, and a side table from host code to guest pc for precise exceptions.
+. **Register allocation** of guest registers within a block, and cycle accounting batched
+  over stretches that block metadata proves cannot observe or change the cycle position
+  (the rule in "Execution rules every engine keeps").
+
+The interpreter stays the oracle (ADR-003) and the fallback for anything tier 1 does not
+emit. Tier 1 is the roadmap's next milestone (ROADMAP "JIT"); it needs its own design
+document and review with the user before any code.
+
 == Open questions
 
 * Whether decoded blocks are worth keeping across snapshots (probably not: rebuild on load).
-* Block table size and maximum block length for IRIX's working set (stage H).
-* Whether the FPU leaves the opaque operation (stage H; the `cpu` workload spends about 4%
-  in `execute_fpu`).
+* Block table size and maximum block length for IRIX's working set (settled for tier 0 by
+  stage F's sweep; revisit for tier 1, where a longer block saves more).
+* Whether the FPU leaves the opaque operation: `cpu` spends about 4-6% in it, mostly
+  `feclearexcept` and the floating-point environment around each operation (ADR-020).
