@@ -12,6 +12,7 @@ behavior.
     scripts/bench.py run --save base.json      # record results
     scripts/bench.py run --compare base.json   # digests must match; speedups reported
     scripts/bench.py run --statistics DIR --compare a.json --compare b.json
+    scripts/bench.py run --counters --repeat 1 cpu  # host counters per guest cycle (perf)
     scripts/bench.py run --engine reference     # the reference interpreter
 
 The fixture holds copies of the user's private disk and firmware state; keep it out of Git
@@ -26,6 +27,12 @@ Workloads:
 
 Rates count only each workload's own cycles: a snapshot workload starts where the fixture's
 login stopped (fixture/shell.json).
+
+--counters runs each workload under `perf stat` (user mode) and reports host instructions,
+branches, branch misses, and L1 misses per guest cycle. The counts include process start and,
+for the shell workloads, loading the snapshot. Counting needs kernel.perf_event_paranoid <= 2;
+with the NMI watchdog off (kernel.nmi_watchdog = 0) the six events are counted without
+multiplexing.
 """
 
 import argparse
@@ -42,6 +49,9 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRMWARE = os.path.dirname(os.environ.get("ULTRAVIOLENT_IP27_PROM", "assets/firmware/ip27prom.img"))
+# Host events per run for --counters: six, so a Zen 2 or later core counts them all at once.
+COUNTERS = ["instructions:u", "cycles:u", "branches:u", "branch-misses:u",
+            "L1-icache-load-misses:u", "L1-dcache-load-misses:u"]
 STOPPED = re.compile(rb"stopped after (\d+) cycles at virtual (\d+) ns, pc (0x[0-9a-f]+)")
 
 # A generous cap: every workload ends on its own well before it.
@@ -131,6 +141,10 @@ def run_once(args, name, workload):
         command += ["--console", line]
     if args.statistics:
         command.append("--engine-statistics")
+    counters_file = os.path.join(scratch, "counters.csv")
+    if args.counters:
+        command = ["perf", "stat", "-x,", "-o", counters_file, "-e", ",".join(COUNTERS),
+                   "--"] + command
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     start = time.perf_counter()
     result = subprocess.run(command, capture_output=True)
@@ -150,10 +164,41 @@ def run_once(args, name, workload):
     if workload.get("snapshot"):
         with open(paths["shell.json"]) as f:
             origin = json.load(f)
-    return {"cycles": int(stopped.group(1)) - origin["cycles"],
-            "virtual_ns": int(stopped.group(2)) - origin["virtual_ns"],
-            "wall": wall, "cpu": after.ru_utime - before.ru_utime + after.ru_stime - before.ru_stime,
-            "digest": digest}
+    result = {"cycles": int(stopped.group(1)) - origin["cycles"],
+              "virtual_ns": int(stopped.group(2)) - origin["virtual_ns"],
+              "wall": wall,
+              "cpu": after.ru_utime - before.ru_utime + after.ru_stime - before.ru_stime,
+              "digest": digest}
+    if args.counters:
+        result["counters"] = read_counters(counters_file)
+    return result
+
+
+def read_counters(path):
+    # perf stat -x, lines: value,unit,event,running time,percent running,...
+    counters = {}
+    with open(path) as f:
+        for line in f:
+            fields = line.strip().split(",")
+            if len(fields) < 5 or not fields[0].isdigit():
+                continue
+            if float(fields[4]) < 100.0:
+                sys.exit(f"perf multiplexed {fields[2]} ({fields[4]}%); see --counters")
+            counters[fields[2].removesuffix(":u")] = int(fields[0])
+    return counters
+
+
+def counter_summary(entry):
+    # Host events per guest cycle, and misprediction rate.
+    counters = entry["counters"]
+    cycles = entry["cycles"]
+    per = {name: counters[name] / cycles for name in counters}
+    return (f"  host per guest cycle: {per['instructions']:.1f} instructions, "
+            f"{per['cycles']:.1f} cycles (IPC {counters['instructions'] / counters['cycles']:.2f}), "
+            f"{per['branches']:.2f} branches, {per['branch-misses']:.3f} mispredicts "
+            f"({100 * counters['branch-misses'] / counters['branches']:.2f}%), "
+            f"{per['L1-icache-load-misses']:.3f} L1I and {per['L1-dcache-load-misses']:.3f} "
+            f"L1D misses")
 
 
 def run(args):
@@ -177,6 +222,8 @@ def run(args):
                  "best_wall": round(best["wall"], 3),
                  "median_wall": round(statistics.median(r["wall"] for r in runs), 3),
                  "mcycles_per_s": round(rate, 2), "digest": best["digest"]}
+        if args.counters:
+            entry["counters"] = best["counters"]
         results[name] = entry
         note = ""
         if len(digests) > 1:
@@ -195,6 +242,8 @@ def run(args):
         print(f"{name:8} {best['cycles']:>14} {best['virtual_ns'] / 1e9:>9.1f} "
               f"{best['wall']:>8.2f} {rate:>10.1f} {real:>6.3f} {best['digest']:>16} {note}",
               flush=True)
+        if args.counters:
+            print(counter_summary(entry), flush=True)
     if args.save:
         host = {"binary": args.binary, "engine": args.engine,
                 "cache_entries": args.cache_entries, "cpu": cpu_model(),
@@ -239,6 +288,8 @@ def main():
     bench.add_argument("--save")
     bench.add_argument("--compare", action="append",
                        help="a saved result to compare with (repeatable)")
+    bench.add_argument("--counters", action="store_true",
+                       help="count host events per guest cycle with perf stat")
     bench.add_argument("--statistics", metavar="DIR",
                        help="write each workload's tier-0 statistics to DIR/WORKLOAD.txt")
     args = parser.parse_args()
