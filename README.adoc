@@ -36,6 +36,7 @@ The future underneath it may change completely.
 
 Machines own topology.
 Devices own behavior.
+Processor personalities own guest-visible CPU behavior.
 The core owns execution mechanics.
 Backends own host integration.
 ----
@@ -81,6 +82,7 @@ Start here, in order:
 . `doc/CORE.adoc`
 . `doc/MIPS.adoc`
 . `doc/IR.adoc`
+. `doc/JIT.adoc`
 . `doc/IP27.adoc`
 . `doc/IP27-TARGET.adoc`
 . `doc/ROADMAP.adoc`

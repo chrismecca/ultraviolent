@@ -24,6 +24,8 @@ astronautics on day one.
 │   ├── ARCHITECTURE.adoc
 │   ├── CORE.adoc
 │   ├── MIPS.adoc
+│   ├── IR.adoc
+│   ├── JIT.adoc
 │   ├── IP27.adoc
 │   ├── ENGINEERING.adoc
 │   ├── AGENTIC-BUILD.adoc

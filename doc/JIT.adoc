@@ -1,0 +1,298 @@
+= Tier 1: Native Execution Engine Design
+
+Status: proposed for review with the user (2026-10-09). No tier-1 code exists. This document
+replaces the outline in IR.adoc "Proposal: tier 1"; IR.adoc remains the reference for the
+execution rules, decoded blocks, the block cache, and tier 0.
+
+== Scope
+
+Tier 1 is a MIPS execution engine that runs decoded blocks as native host code. Its first
+host is x86-64, its first processor personality the R10000, its first machine IP27. None of
+the three may become part of the engine's contract (ADR-022).
+
+Not in scope: LLVM, an SSA or graph IR, global optimization, cross-block register
+allocation, another processor personality, another host. The engine must leave room for
+them without building them.
+
+== Three axes
+
+----
+machine personality     guest-visible platform and topology          IP27
+processor personality   guest-visible CPU implementation             R10000
+execution engine        the mechanism that executes it               reference, tier0, tier1-x86_64
+----
+
+* The machine personality instantiates a processor personality and an execution engine. It
+  owns topology, the bus, interrupts wiring, and the clock frequency.
+* The processor personality owns every guest-visible CPU implementation behavior: the ISA
+  level and which encodings exist, CP0 registers and their behavior, PRId and Config, TLB
+  and cache-array geometry, exception details, FPU implementation details, and the timing
+  model (what one processor cycle is, how Count and Random advance).
+* The execution engine owns how instructions are executed. It never tests which processor or
+  machine it runs: it consumes decoded operations, the shared semantics, and the processor's
+  interfaces, which answer in semantic terms (`supports(feature)`, `next_internal_event`),
+  never in identity terms (`is_r16000`).
+
+An engine that needs a processor fact asks a semantic question at translation time, where the
+answer becomes a constant in the generated code, or emits a call that asks at run time.
+Engines carry no per-model branches.
+
+== The processor personality today, and what moves when
+
+Today `mips::Cpu` is the R10000: `CpuConfig` carries identity only (PRId, Config, FPU
+implementation), and the behavior is in `Cpu`, `Tlb`, `CacheArrays`, `semantics.hpp`, and
+`fpu.cpp`. Engines already reach it only through `Cpu` methods and the shared semantics, and
+none tests the model, but only because there is one.
+
+AGENTS.md forbids speculative abstraction. The second personality is decided (ADR-021: R12000,
+`slate`), so the boundary has a real second implementation coming; still, J0 introduces only
+what tier 1 consumes:
+
+* `ProcessorModel`: an immutable description built by the machine and owned by `Cpu`,
+  holding identity (today's `CpuConfig`), the feature set the decoder and semantics query
+  (MIPS III, MIPS IV, which reserved encodings exist), and the timing model (below). One
+  implementation, the R10000's, with the same values as today.
+* `decode` takes the model: which operation a word decodes to is a processor fact. The
+  `DecodedOpcode` set is the union over personalities; a personality without an operation
+  decodes its word to `reserved`. Decoded operations therefore already carry personality
+  differences, and engines translate operations, not words.
+
+The rest stays where it is until R12000 work starts, recorded here as the list to move then:
+TLB entry count and page masks, cache-array geometry and CACHE operations, CP0 register set
+and width rules (including register 25, performance counters, which R12000 has), Config
+fields, FPU implementation details (UM 15.5 upper-half clearing, reciprocal accuracy), the
+bus-error rule for writes, and the Count rate.
+
+== Semantics: one source, more than one consumer
+
+The rule today (IR.adoc "DecodedInstruction"): one copy of the MIPS semantics, used by every
+engine. Native emission would break it if each emitted operation were hand-written x86 code:
+two implementations of every operation, multiplied by every processor personality, with
+differences that only the JIT shows.
+
+**Proposal: semantics written once against a small builder interface, instantiated by each
+backend.** An operation's semantics is a function template over a builder:
+
+----
+template <class B> Result addu(B& b, Instruction i) {
+    b.set_gpr(i.rd(), b.sign_extend_32(b.add(b.gpr(i.rs()), b.gpr(i.rt()))));
+    return b.sequential();
+}
+template <class B> Result addi(B& b, Instruction i) {
+    auto sum = b.add_32_overflow(b.gpr(i.rs()), b.constant(i.signed_immediate()));
+    b.raise_if(sum.overflow, ExceptionCode::overflow);
+    b.set_gpr(i.rt(), sum.value);
+    return b.sequential();
+}
+----
+
+* The **direct builder** executes: values are `std::uint64_t`, operations are inline
+  arithmetic, `gpr` reads `Cpu::state()`, `raise_if` calls `Executor::fail`. After inlining it
+  is today's code. The reference interpreter and tier 0 use it; their benchmark counters must
+  not change when an operation moves to builder form (a gate per migration step).
+* The **emitting builder** (tier 1) translates: values are handles to translation-time values
+  (a constant, or a guest value in a host register or in `Cpu`), operations append host code,
+  `raise_if` emits a conditional branch to a side exit (below).
+* The primitive set is small and architectural: guest register read and write (GPR, HI, LO),
+  constants, integer arithmetic, logic, shifts, compares and selects at 32 and 64 bits,
+  sign and zero extension, overflow-checked adds and subtracts, multiply and divide, loads
+  and stores by width, branch outcomes, `raise_if`, and `call_semantics` (below). It is not
+  a general compiler IR: no graph, no SSA, no optimization passes. It grows only when an
+  operation being moved needs a primitive.
+* **Operations that stay calls.** Anything not worth or not yet moved into builder form runs
+  through `call_semantics(op)`: a call to today's `execute_inline` semantics for that one
+  operation, with guest state materialized first. CP0 moves, TLB operations, CACHE, ERET,
+  LWL/LWR/SWL/SWR, LL/SC, traps, the FPU, and all reserved encodings start there. This is
+  the same source, so no second implementation exists for them either.
+* Builder primitives may ask the processor model (`supports`) and the translation context
+  (below); they never ask which model it is.
+
+Alternative, not proposed: hand-written native code for common operations, as an explicit
+relaxation of the one-semantics rule, enforced only by differential testing for every
+processor personality. Recorded here so the choice is visible; it is the path to two
+implementations that drift apart.
+
+=== Translation-time facts
+
+The block key (pc, translation context, code epoch, frame and TLB generations) fixes
+everything it contains for every execution of a translated block. The translation context
+is Status EXL, ERL, KSU, UX, SX, KX, RE and the ASID, so the operating mode and the 64-bit
+addressing and operation enables are translation-time constants (`allows_64bit_operations`).
+Status XX (MIPS IV in User mode) and the CU bits are not in the key: their checks stay run
+time, as in tier 0. The processor model is fixed for a machine's life, so `supports(...)`
+is always a translation-time constant. Guest register zero reads as a constant and writes to
+it vanish; instruction fields and immediates are constants. These are the only sources of
+specialization; nothing assumes a value that the key does not fix.
+
+== Guest values and the register abstraction
+
+Emitted operations never address `Cpu` memory themselves. They ask the builder for guest
+values:
+
+----
+a = gpr(rs); b = gpr(rt); r = add(a, b); set_gpr(rd, r)
+----
+
+The builder answers through a `GuestRegisterFile` owned by the block translation:
+
+* J2: every read loads from `Cpu::state()`, every write stores to it immediately. Simple and
+  obviously exact.
+* J3: a block-local cache. A read reuses a host register already holding the value; a write
+  dirties a host register; dirty values are written back at materialization points (below)
+  and at block exit. Liveness within the block decides what is kept. HI and LO join the GPRs.
+  The FPU stays in `Cpu` (it is `call_semantics`).
+
+Emitters are unchanged between J2 and J3; only the register file changes. Register zero, and
+values the translation already knows, never reach a host register.
+
+== Precise exceptions and side exits
+
+Once guest values live in host registers, `Cpu` no longer holds the architectural state at
+every instant, so an exception cannot simply call `take_exception`. Every point in a
+translated block where execution can leave the straight path is a **side exit**, described
+at translation time:
+
+* the guest pc of the instruction, and whether it is in a delay slot (EPC and BD come from
+  these and from the branch, as `take_exception` computes them today);
+* the operations completed before it in this block, from which the cycles and retirements to
+  account follow;
+* the register file's state there: which guest values are dirty and where they are;
+* why it exits: an architected exception (with its `Exception`, or the call that produced
+  it), a barrier (a bus access, IR.adoc "Slow bus paths are barriers"), a pending interrupt
+  at a boundary, the run limit, or leaving the block.
+
+Each side exit has an out-of-line stub that **materializes** in a fixed order: dirty guest
+values to `Cpu`; pc, next pc, and the delay-slot state; cycle and retirement accounting for
+the completed operations (through the timing interface); then, for an exception, the same
+`take_exception` and `end_cycle(false)` the interpreter uses; then it returns to the engine
+with the exit reason. A `call_semantics` or slow-path helper call is itself a materialization
+point: state is materialized before the call (the helper may raise and take the exception,
+exactly as today), and the cache is reloaded after it if the block continues.
+
+A host-pc to guest-pc table is kept for diagnostics, profiling, and host faults. It is not
+how architected MIPS exceptions are delivered.
+
+== Timing
+
+Tier 0 accounts every processor cycle at the instruction boundary (ADR-018; IR.adoc "Exact
+processor steps"). Tier 1 keeps that exactly through J4. The engine-facing timing interface
+is written so that later engines can amortize it without the R10000's rules becoming part of
+the engine:
+
+* An engine reports progress, operations retired and cycles taken, to the CPU at commit
+  points. Through J4 every instruction is one.
+* The processor's timing model turns progress into Count, Random, and timer state (today:
+  one cycle per step, Count every other cycle, Random per retirement). Engines never compute
+  those.
+* The CPU publishes the earliest cycle at which something internal becomes observable (today
+  the Count/Compare match cycle, `timer_cycle_`). An engine compares against it and the run
+  limit; it does not know why the number is what it is.
+
+**Commit regions** (J5, investigated only after J2-J4): a stretch of a block whose
+intermediate boundaries can be skipped because none of them can create or observe an event.
+The proof covers, at every intermediate boundary: a Count/Compare transition (the published
+cycle), Random changing what a TLBWR would choose, an interrupt becoming serviceable,
+delayed watch exceptions, a fault inside the region (side exits make it exact), the run
+limit, synchronized bus accesses (barriers), and writes to Status, Compare, Count, Wired, or
+Config (state changes end blocks today). A region is a property derived from block metadata,
+never "the whole block", and has its own tests of exact stop cycles, as stage H mechanism 2 did.
+
+Why this matters beyond the R10000: at 180 MHz on the 3.6 GHz reference host the budget is
+20 host cycles per modeled cycle; a later personality at several hundred MHz on a faster host
+has single digits. The interface must allow amortized accounting later; J1-J4 do not use it.
+
+== Native code: memory, lifetime, calls
+
+* **Executable memory (W^X).** One reserved region, mapped twice from a `memfd`: a writable
+  view for the emitter and an executable view for execution, so no page is ever writable
+  and executable at once and nothing is `mprotect`-flipped per block. Allocation is a bump
+  pointer in that region. x86 keeps instruction fetch coherent with stores through another
+  mapping of the same memory, and execution is single-threaded.
+* **Reachability.** A `rel32` call or jump reaches ±2 GiB. The region is far smaller than
+  that, and helper addresses live in a table at the start of the region; generated code calls
+  helpers with `call [rip + table entry]`, which always reaches. No assumption about where
+  `mmap` places the region relative to the executable.
+* **Association.** A native block belongs to a tier-0 block cache entry: the entry gains a
+  pointer to its native code and the code-cache epoch it was emitted in. A lookup already
+  validates the entry (pc, context, code epoch, frame and TLB generations); native code is
+  entered only through a validated lookup.
+* **Lifetime.** Invalidation makes native code stale, exactly as for decoded blocks; it is
+  never freed or overwritten while it may be executing. Reclamation happens only between
+  engine invocations: when the region is full, the whole native cache is discarded (epoch
+  advanced) and refilled. A snapshot load discards it.
+* **Entry and exit.** A generated entry trampoline saves the host callee-saved registers,
+  loads the `Cpu` base and engine context into fixed registers, and jumps into the block;
+  every exit returns through it with an exit reason, as `BlockExit` does today.
+* **Chaining** (J6, only if profiling shows dispatcher transitions matter): exits through
+  link cells that are validated or reset on invalidation. No raw patched jumps between
+  independently invalidatable blocks until that lifetime story is designed.
+
+== x86-64 encoding
+
+A minimal in-house encoder for the instructions the emitting builder uses, checked against
+GNU `as` the way `tools/check_mips_encodings.sh` checks the MIPS test assembler. It lives
+apart from MIPS code (a host backend: `src/jit/x86_64/`, with the executable memory), so
+the MIPS translator (`src/arch/mips/tier1/`) depends on a host emitter interface, not the
+reverse. Review question: an in-house encoder (no dependency, a few hundred lines, tested)
+against a header-only library such as Xbyak (BSD-3); this design assumes in-house.
+
+== Correctness
+
+* The differential harness (IR.adoc "Correctness method") runs on tier 1: the directed and
+  random programs, chunked runs, and runs with a limit one cycle ahead, which force every
+  boundary to be exact.
+* Builder migrations: each operation moved into builder form keeps the reference and tier 0
+  digests, snapshots, and counters unchanged.
+* Mutation checks for each mechanism (side-exit materialization order, dirty write-back,
+  epoch discard, translation-time facts).
+* Whole machine: the four workload digests and byte-identical same-cycle snapshots against
+  the reference, as for stages E-H.
+* Once a second processor personality exists, every differential test runs per
+  personality.
+
+== Measurement
+
+`scripts/bench.py --engine tier1` with, in the statistics: blocks compiled, native bytes,
+compile time, executions per compiled block, code-cache occupancy and discards, and exits by
+kind (helper, barrier, exception, pending interrupt, run limit, left block). Reported both
+end to end (M cycles/s, as now) and as generated-code throughput with compile time excluded,
+so PROM and boot compilation do not hide the quality of the code. Host counters per guest
+cycle (`--counters`) as in stage H.
+
+== Milestones
+
+Each is one or more commits with the gates above; speed is a gate only where stated.
+
+J0. Framework boundary, no JIT code: the three axes and ADR-022 in the docs; `ProcessorModel`
+    with the R10000 as its one implementation; `decode` takes the model; the builder interface
+    and the direct builder, with a pilot set of operations (for example ADDU, ADDIU, SLL, BEQ,
+    LW) moved into builder form. Gate: reference and tier 0 digests, snapshots, and counters
+    unchanged.
+J1. Skeleton, a correctness milestone; speed irrelevant. Executable memory and W^X, the helper
+    table, entry and exit, the native-block association, invalidation and epoch discard,
+    side-exit stubs, and blocks emitted entirely as `call_semantics` for every operation with
+    tier 0's boundary checks. (A call per operation is likely slower than tier 0's switch;
+    instruction fields passed to an already compiled helper are not constants inside it.)
+J2. Native integer and control emission through the emitting builder: arithmetic, logic,
+    shifts, compares, branches and delay slots; the register file in its J2 form; everything
+    else stays `call_semantics`. Cycle accounting as tier 0. First speed measurement.
+J3. The block-local register cache: liveness, dirty tracking, materialization at helper calls,
+    side exits, barriers, and block exit. No cycle batching.
+J4. Native memory fast path: the transparent host-page path inline; the slow path a side exit
+    that calls the bus and leaves the block (a barrier); watchpoints, LL/SC, and partial-word
+    operations stay `call_semantics`.
+J5. Boundary work: pc materialization only where observable, statically known control flow,
+    hoisting checks where proven, and only then commit regions.
+J6. Block linking, only if profiling shows dispatcher transitions matter.
+
+The 180 M cycles/s objective for the R10000 is expected somewhere in J2-J4; if it is reached,
+J5 and J6 are optional for this personality.
+
+== Review questions
+
+* The builder approach (single-source semantics) over hand-written emission: agreed?
+* The J0 scope of `ProcessorModel` (identity, features, timing; the rest moved with R12000):
+  enough of a boundary, or should more move now?
+* In-house x86-64 encoder or a library?
+* Compile policy: emit on first execution (simplest for testing, J1) and decide a hotness
+  threshold from J2's measurements?

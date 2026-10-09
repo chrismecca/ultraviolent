@@ -6,8 +6,9 @@ Update this file at the end of every significant development session.
 
 Performance baseline (ROADMAP "After RC-IP27"; started 2026-09-28). The repository is public
 at RC-IP27 (the user chose no tag or release). Tier 0 stages A-H are done (2026-10-08): tier
-0 is the default engine, and stage H ended at its stop rule with a tier-1 proposal (IR.adoc
-"Stage H"). **Next: review stage H and the tier-1 proposal with the user** (see Next task).
+0 is the default engine, and stage H ended at its stop rule. The user agreed to proceed to
+tier 1 and reframed it as a framework engine (2026-10-09): ADR-022 and doc/JIT.adoc.
+**Next: review JIT.adoc, then J0** (see Next task).
 
 * **New reference host (2026-10-07):** `uv-dev01`, Ryzen 5 3600, Debian 13; private state on
   its own XFS disk, `/srv/ultraviolent` (`local/` links there); DEVELOPMENT.adoc "Reference
@@ -377,13 +378,14 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **Review stage H and the tier-1 proposal with the user** (IR.adoc "Stage H", "Proposal:
-  tier 1"). If agreed, the ROADMAP "JIT" milestone starts with a design document (as IR.adoc
-  was for tier 0) reviewed before any code: call-threaded code first, then inline emission,
-  then register allocation and proven cycle batching, each gated by the differential suite,
-  same-cycle snapshots, and digests, and measured with `scripts/bench.py --counters`. The
-  remaining small tier-0 candidates (pc check only after control operations, about 3%; the
-  FPU environment cost, 4-6% of `cpu`) are listed there.
+. **Review doc/JIT.adoc with the user** (written 2026-10-09 from the user's framework
+  review of the stage H proposal: ADR-022, the three axes, single-source semantics through a
+  builder, the guest-register abstraction, side exits, a general timing interface, J0-J6).
+  Its "Review questions" need answers before J0. Then J0: the three axes in code
+  (`ProcessorModel` with the R10000 as its one implementation, `decode` taking it) and the
+  builder with a pilot set of operations, with reference and tier-0 digests, snapshots, and
+  counters unchanged. The remaining small tier-0 candidates (pc check only after control
+  operations, about 3%; the FPU environment cost, 4-6% of `cpu`) are in IR.adoc "Stage H".
 . **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
   inventory ID). What the PROM reads there may also select the deskside slot table.
 . **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.

@@ -4,7 +4,7 @@ Status: design, reviewed with the user (2026-09-28, 2026-09-29). Stages A (this 
 and the boundary tests), B (decode and shared semantics), C (the differential harness), D
 (block construction), E (the tier-0 executor), F (the block cache and its invalidation),
 and G (tier 0 as the default engine) are implemented, and H ended at its stop rule
-(2026-10-08) with a proposal for tier 1 ("Stage H"), to be reviewed with the user.
+(2026-10-08). Tier 1 is designed in JIT.adoc.
 
 This document designs the representation between the MIPS decoder and the fast execution
 engines (ARCHITECTURE "The CPU is not the interpreter", "Future JIT architecture"): what a
@@ -450,25 +450,12 @@ change what they test.
 
 === Proposal: tier 1
 
-Native x86-64 code for decoded blocks, reusing what tier 0 built: the block cache and its
-invalidation (frame and TLB generations, code epoch), block formation, the barrier and
-boundary rules, and the reference interpreter and differential harness as the oracle. In
-steps, each measured and each gated like stage H:
-
-. **Call-threaded code.** Each block becomes a straight sequence of direct calls to
-  per-operation functions instantiated from the same semantics with the instruction fields
-  as constants. Removes dispatch and decode; keeps every boundary check.
-. **Inline emission** of the common integer, branch, and load/store operations (the host
-  page cache fast path inline, the slow path a call that is a barrier), with pc and
-  delay-slot state written only where an exception, a barrier, or the block end can observe
-  them, and a side table from host code to guest pc for precise exceptions.
-. **Register allocation** of guest registers within a block, and cycle accounting batched
-  over stretches that block metadata proves cannot observe or change the cycle position
-  (the rule in "Execution rules every engine keeps").
-
-The interpreter stays the oracle (ADR-003) and the fallback for anything tier 1 does not
-emit. Tier 1 is the roadmap's next milestone (ROADMAP "JIT"); it needs its own design
-document and review with the user before any code.
+Superseded by doc/JIT.adoc (2026-10-09), which designs tier 1 as a MIPS engine parameterized
+by the processor personality (ADR-022): semantics written once against a builder that both
+executes (reference, tier 0) and emits (tier 1); a guest-register abstraction from the first
+emitter; side exits that materialize state for precise exceptions; a timing interface that
+later personalities can amortize; and milestones J0-J6, of which J1 (call-threaded code) is a
+correctness milestone, not a performance one.
 
 == Open questions
 

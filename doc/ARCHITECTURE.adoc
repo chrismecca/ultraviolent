@@ -63,13 +63,29 @@ The architectural CPU model owns guest-visible state and semantics.
 R1x000 architectural state
     |
     +-- reference interpreter
-    +-- fast interpreter       [future]
-    +-- tier-1 JIT             [future]
+    +-- tier-0 decoded blocks
+    +-- tier-1 native code     [designed: JIT.adoc]
     +-- optimizing JIT         [future]
 ----
 
 No execution engine may own canonical CPU state in a representation unavailable to the
 others.
+
+== Three axes: machine, processor, engine
+
+----
+machine personality     guest-visible platform and topology    IP27
+processor personality   guest-visible CPU implementation       R10000
+execution engine        the mechanism that executes it         reference, tier0, tier1-x86_64
+----
+
+These vary independently (ADR-022). The machine personality instantiates a processor
+personality and an engine. The processor personality owns every guest-visible CPU
+implementation behavior: the ISA level and encodings, CP0, PRId and Config, TLB and cache
+geometry, exception and FPU details, and the timing model. Execution engines own only how
+instructions run: they consume decoded operations, the one source of semantics, and the
+processor's interfaces, which answer in semantic terms. An engine never tests which processor
+or machine it is executing.
 
 The interpreter remains permanently supported and is used as the correctness oracle.
 

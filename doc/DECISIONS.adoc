@@ -259,3 +259,31 @@ ROADMAP).
 
 Revisit if the reference hardware becomes unavailable or a different physical machine with
 better access replaces it.
+
+== ADR-022: Processor personalities own CPU behavior; execution engines do not
+
+Status: accepted (with the user, 2026-10-09)
+
+Ultraviolent separates three axes: the machine personality (IP27), the processor personality
+(R10000), and the execution engine (reference, tier 0, tier 1 on x86-64). Each varies
+independently (ARCHITECTURE "Three axes").
+
+The processor personality owns guest-visible CPU implementation behavior: ISA level and
+encodings, CP0 registers and behavior, PRId and Config, TLB and cache geometry, exception and
+FPU details, and the timing model. Execution engines consume decoded operations, the single
+source of semantics, and processor interfaces that answer in semantic terms
+(`supports(feature)`, the next internal event cycle); they never test model identity
+(`is_r16000`) or the machine.
+
+Reason: the project is a framework for SGI-class systems, with later processor personalities
+expected (R12000 first, ADR-021; later R14000/R16000-class). Behavior keyed on identity inside
+an engine multiplies with every personality and every engine, and produces differences that
+only one engine shows. A tier-1 JIT is a MIPS engine parameterized by the processor
+personality, not an R10000 JIT (JIT.adoc).
+
+Abstractions are still added when needed (AGENTS "Scope discipline"): the boundary is
+introduced where an engine consumes it, and the rest moves when the second personality is
+implemented (JIT.adoc "The processor personality today").
+
+Revisit only with a concrete case where an engine cannot avoid a processor fact other than
+through identity.

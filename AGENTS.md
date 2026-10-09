@@ -23,6 +23,7 @@ The current milestone and next task in `doc/STATUS.adoc` are authoritative.
 * Guest-visible time comes from Ultraviolent virtual time, never host wall-clock execution duration.
 * Machines own topology.
 * Devices own behavior.
+* Processor personalities own guest-visible CPU implementation behavior; execution engines do not (ADR-022). Engines ask semantic questions (`supports(feature)`), never which processor or machine they run.
 * The core owns execution mechanics.
 * Backends own host integration.
 * General CPU/core/device code must not depend on a concrete machine such as IP27.

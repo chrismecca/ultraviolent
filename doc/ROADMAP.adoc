@@ -193,8 +193,12 @@ Only after RC-IP27:
 
 === JIT
 
+Designed in `JIT.adoc`: a MIPS execution engine parameterized by the processor personality
+(ADR-022), milestones J0 (processor-personality boundary and single-source semantics builder)
+through J6 (block linking, only if profiling asks for it).
+
 * differential execution against interpreter;
-* tier-1 fast compiler or direct emitter;
+* tier-1 native code from the one source of semantics;
 * optional optimizing tier later;
 * keep interpreter permanently.
 
