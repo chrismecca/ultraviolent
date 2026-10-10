@@ -1,7 +1,9 @@
 = Tier 1: Native Execution Engine Design
 
 Status: accepted (2026-10-10: the builder approach, the J0 scope, an in-house encoder, and
-compile policy left to measurement). J0, J1, and J2 are implemented ("Progress"). This document
+compile policy left to measurement). J0-J4 are implemented, with dispatch inside native code
+and per-block boundary checks (parts of J5 and J6) moved ahead of J3 on measurement
+("Progress"). This document
 replaces the outline in IR.adoc "Proposal: tier 1"; IR.adoc remains the reference for the
 execution rules, decoded blocks, the block cache, and tier 0.
 
@@ -138,10 +140,16 @@ The builder answers through a `GuestRegisterFile` owned by the block translation
 
 * J2: every read loads from `Cpu::state()`, every write stores to it immediately. Simple and
   obviously exact.
-* J3: a block-local cache. A read reuses a host register already holding the value; a write
-  dirties a host register; dirty values are written back at materialization points (below)
-  and at block exit. Liveness within the block decides what is kept. HI and LO join the GPRs.
-  The FPU stays in `Cpu` (it is `call_semantics`).
+* J3 (built): a block-local cache, `GuestRegisters`. Each guest GPR, HI, and LO is in the
+  CPU, in a host register (clean or dirty), or a constant the translation knows (dirty: the
+  CPU not yet written, which also folds `lui`/`ori` address formation). A read reuses the
+  host register; a write takes the operation's result register; eviction is least recently
+  used among registers the current operation does not use, written back when dirty. Dirty
+  values are written back before a helper (which may read or write any guest value; the
+  cache is then empty), at side exits (from the state recorded where the exit branches), and
+  at the block's end. A load or store slow path writes back, calls, and reloads the state the
+  fast path has at its merge point. Twelve host registers form the pool; rcx stays outside
+  it. The FPU stays in `Cpu` (it is `call_semantics`).
 
 Emitters are unchanged between J2 and J3; only the register file changes. Register zero, and
 values the translation already knows, never reach a host register.
@@ -227,7 +235,84 @@ has single digits. The interface must allow amortized accounting later; J1-J4 do
   every exit returns through it with an exit reason, as `BlockExit` does today.
 * **Chaining** (J6, only if profiling shows dispatcher transitions matter): exits through
   link cells that are validated or reset on invalidation. No raw patched jumps between
-  independently invalidatable blocks until that lifetime story is designed.
+  independently invalidatable blocks until that lifetime story is designed. Dispatch
+  (below) is the indirect form, built first; direct links remain J6.
+
+== Dispatch
+
+Measured after J2 (`fs`, perf): the engine's C++ loop and block entry took more host time
+than the native code (32% against 26%), and the direct-mapped tier-0 cache discarded native
+code with every eviction (12 million in `fs`). So blocks continue into each other inside
+native code:
+
+* **Dispatch table.** `BlockInterpreter` owns a direct-mapped table by pc
+  (`DispatchEntry`: pc, translation context, stamp, code; 32,768 entries) beside tier 0's
+  cache, plus each entry's validity inputs (code epoch, frame generation, TLB entry
+  generation). It outlives tier-0 evictions: a block keeps its native code until its dispatch
+  entry is replaced or invalid. A tier-0 entry that reaches the threshold is translated (or
+  reuses its native code) and installed.
+* **Stamps.** `Cpu::code_changes()` advances whenever any decoded block may have become
+  invalid: the code epoch, the generation of a TLB entry that translated code (a TLB write to
+  an entry no block came through changes nothing), or a write to a code frame (the CPU's own
+  stores at once; any other bus master's, which happen only between runs or during a bus
+  access, at `Cpu::synchronize_code`). An entry validated in full is stamped with the current
+  value. Native code continues into an entry only when its pc, translation context, and
+  stamp match; anything else returns to the engine, which validates in full, restamps or
+  drops, and enters again.
+* **The run.** `NativeCode::run` enters the block at the CPU's pc and returns only when a
+  block leaves: a dispatch miss, a side exit, a pending exception or the deadline at a block
+  entry, or a code change. Blocks jump to the shared dispatch code with the next pc; nothing
+  is pushed, so a run of any length uses one entry frame.
+* **Lifetime is unchanged.** Translation and discard still happen only in the engine, between
+  runs, and a discard clears the dispatch table.
+
+== Boundaries
+
+Tier 0 checks the run limit, a pending exception, and the pc at every instruction boundary.
+Within one block, native code checks once, at entry:
+
+* **Deadline.** The run's context holds the deadline, the earlier of the run limit and the
+  CPU's next internal event (`next_internal_event_cycle`). A block is entered only when all of
+  its operations fit: `cycles + operations <= deadline`. Then no boundary inside it can reach
+  the run limit, and the internal event can arrive at most after its last operation, where
+  the block's end checks it (calling `reach_internal_event` exactly as `end_cycle` would)
+  and returns to the engine. A block that does not fit is refused: the engine runs it
+  decoded, exactly, stopping wherever tier 0 would.
+* **Why nothing else can intervene.** Inside a block only a helper (`call_semantics`, or a
+  load or store slow path) can lower the run limit, move the next internal event (Count,
+  Compare), make an exception pending (an interrupt from a device access, a delayed watch),
+  change the code (a store to a code frame, DMA), or move the pc (a coprocessor branch, a
+  nullified slot). After every helper the native code re-reads the deadline and checks, at
+  the boundary that follows, the remaining operations against it, a pending exception, code
+  changes, the pc, and the delay-slot flag, leaving through the matching exit. Operations
+  emitted natively change none of them (stage H's mechanism 2 argument, extended).
+* **Bus accesses are barriers without leaving.** A device access no longer ends native
+  execution: the checks above are what the engine would make before the next block. `boot`
+  makes 842 million device accesses; each used to return to the engine.
+* **pc, next pc, and the delay-slot flag** are known at translation time inside a block
+  (blocks are straight-line up to a branch and its slot). They are written into the CPU only
+  where they can be observed: before a helper, at a side exit, and at the block's end.
+* **Cycles** are counted at the block's end and materialized before a helper or a side exit
+  (the CPU's count is the block's start plus the operations completed); a helper's own
+  `end_cycle` counts its operation.
+
+== Native memory
+
+Loads and stores (LB, LBU, LH, LHU, LW, LWU, LD, SB, SH, SW, SD) are in builder form; the
+interpreters run them through `DirectBuilder::load` and `store` (`Cpu::load_as`,
+`store_as`), and tier 1 emits `Cpu::load_as`'s host page fast path inline: the data host page
+entry selected by the address's page, its page tag compared with the address masked to keep
+its misaligned bits (one comparison tests the page and natural alignment), its translation
+context, and for a store a store tag (the page, or none when the page is not writable, as
+for code frames). The access is a host load or store in the bus byte order (byte-swapped for
+a big-endian bus). Anything else branches to the operation's slow path: the cached guest
+values written back, the whole operation through `call_semantics` (the same semantics, the
+full translation and bus path, any exception), the checks after a helper, the fast path's
+cycle count and next pc restored, the cached guest values reloaded, and back. LWL/LWR,
+SWL/SWR, LDL/LDR, SDL/SDR, LL/SC, CACHE, and the FPU's loads and stores stay helpers.
+
+`Cpu::NativeLayout` publishes the host page cache's layout (entry size and count, field
+offsets, byte order); its entries are 64 bytes for a shift-and-mask index.
 
 == x86-64 encoding
 
@@ -351,6 +436,57 @@ J5 and J6 are optional for this personality.
   still go through a helper call. J3 (the register cache) and J4 (the memory fast path) are
   where native code should pass tier 0; translation itself is 2-3 us per block and is worth
   reducing before lowering the threshold.
+
+* **Dispatch, boundaries, J3, and J4 (2026-10-10).** Profile after J2 (`fs`): the engine's
+  loop and block entry 32% of host time, native code 26%, helpers 12%; the tier-0 cache
+  evicted native code 12 million times. Built in order, each measured: dispatch inside native
+  code with the dispatch table and stamps ("Dispatch"), per-block deadline checks and
+  static pc and cycles ("Boundaries"): `cpu` 120 blocks per run, 1.19-1.41x J2; bus accesses
+  as barriers without leaving and stamps only for TLB entries that translated code: `boot`
+  4 to 141 blocks per run; then J3 and J4 together (they share the write-back at exits):
+  `GuestRegisters` and the inline host page path ("Native memory"), 11 loads and stores in
+  builder form, interpreted through `DirectBuilder`.
+  Gates: `mips.tier1.memory_operations.*` (random loads and stores of every width over two
+  data pages, the code frame, uncached kseg1, and unmapped space, misaligned offsets,
+  interleaved with the other builder operations, memory compared), and
+  `mips.tier1.data_pages_by_context.*` (one virtual page under two ASIDs); the whole
+  differential suite; mutation checks (32-bit load without byte swap: 4 failures; slow path
+  without reload: 6; without the cycle restore: 7; raise exit without write-back: 8; slow
+  path without write-back: 6; stores tested against the load tag: the process crashes
+  writing a read-only page; no next-pc restore in a delay slot: 4; eviction without
+  write-back: 6; no translation-context test: 1, after the context test was added for it);
+  all presets; all four digests at thresholds 0 and 64; same-cycle snapshots and disk
+  byte-identical to stage G on all three engines.
+  Result (M cycles/s, prom, boot, cpu, fs): 228.8, 172.3, 264.1, 226.3, 1.8-2.7x J2 and
+  1.67-2.50x tier 0; at 180 MHz, 1.27, 0.96, 1.47, and 1.26 times real time. Native code
+  runs 93-100% of operations; translations total 1 MB (`prom`) to 207 MB (`boot`, three
+  discards of the 64 MB region).
+
+== Toward host-parallel vCPUs (not built)
+
+The next machine goal after one CPU at its nominal clock is ADR-021's four CPUs, each at the
+nominal clock in virtual time, host-parallel in fast mode (VISION "Fast mode"). What the
+single-CPU engine is built to keep possible:
+
+* **Per-CPU state.** Everything native code touches is the CPU's (rbx) or the run's context
+  (r12): no globals, no addresses baked into code except the helper table. One `NativeCode`
+  and dispatch table per CPU is the simple first form (code is per-CPU anyway: blocks are
+  keyed by each CPU's translation context).
+* **Attention at block entry.** Native code tests the CPU's pending-exception flag at every
+  block entry and after every helper. Another host thread can stop a CPU at its next
+  boundary by setting it (an inter-processor interrupt, a quantum end), with no
+  per-instruction cost.
+* **Deadlines are per CPU.** Each CPU runs to its own deadline; virtual time across CPUs is
+  kept in step by quanta at that granularity, as the scheduler does for devices today.
+* **Code changes across CPUs.** Stores to code frames are counted by the bus for every
+  master; a CPU sees another's at its next engine entry, barrier, or interrupt. The R10000's
+  instruction cache is not coherent with stores, so guest software already synchronizes
+  explicitly (cache operations, then an interrupt to the other CPUs) before running modified
+  code; that interrupt reaches the other CPU's attention flag.
+* **Memory.** The inline fast path is plain host loads and stores. x86-64's ordering is
+  stronger than MIPS IV requires of unsynchronized accesses, so SYNC needs at most a host
+  fence. LL/SC need a reservation visible to the other CPUs; they stay helpers until then.
+* **Reference mode stays single-threaded**, deterministic, and the oracle.
 
 == Review questions
 

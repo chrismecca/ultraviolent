@@ -141,6 +141,58 @@ void Assembler::movsxd(Reg dst, Reg src) {
     op_rr(0x63, dst, src);
 }
 
+void Assembler::mov32(Reg dst, Mem src) {
+    op_rm(0x8b, dst, src, false);
+}
+void Assembler::mov32(Mem dst, Reg src) {
+    op_rm(0x89, src, dst, false);
+}
+void Assembler::mov16(Mem dst, Reg src) {
+    byte(0x66);
+    op_rm(0x89, src, dst, false);
+}
+
+void Assembler::movzx_word(Reg dst, Mem src) {
+    rex(false, code(dst), 0, code(src.base));
+    byte(0x0f);
+    byte(0xb7);
+    modrm_memory(code(dst), src);
+}
+
+void Assembler::movsx_byte(Reg dst, Mem src) {
+    rex(true, code(dst), 0, code(src.base));
+    byte(0x0f);
+    byte(0xbe);
+    modrm_memory(code(dst), src);
+}
+
+void Assembler::movsx_word(Reg dst, Reg src) {
+    rex(true, code(dst), 0, code(src));
+    byte(0x0f);
+    byte(0xbf);
+    modrm_register(code(dst), code(src));
+}
+
+void Assembler::bswap32(Reg r) {
+    rex(false, 0, 0, code(r));
+    byte(0x0f);
+    byte(static_cast<std::uint8_t>(0xc8 + (code(r) & 7)));
+}
+
+void Assembler::bswap64(Reg r) {
+    rex(true, 0, 0, code(r));
+    byte(0x0f);
+    byte(static_cast<std::uint8_t>(0xc8 + (code(r) & 7)));
+}
+
+void Assembler::rol16(Reg r, std::uint8_t count) {
+    byte(0x66);
+    rex(false, 0, 0, code(r));
+    byte(0xc1);
+    modrm_register(0, code(r));
+    byte(count);
+}
+
 void Assembler::lea(Reg dst, Mem src) {
     op_rm(0x8d, dst, src);
 }
@@ -219,6 +271,10 @@ void Assembler::sub32(Reg dst, std::int32_t immediate) {
 
 void Assembler::cmp(Reg a, Mem b) {
     op_rm(0x3b, a, b);
+}
+
+void Assembler::add(Reg dst, Mem src) {
+    op_rm(0x03, dst, src);
 }
 
 void Assembler::add(Mem dst, std::int32_t immediate) {
@@ -349,6 +405,27 @@ void Assembler::call_indirect(std::uint64_t slot) {
               "helper table within reach of rel32");
     byte(0xff);
     byte(0x15);
+    bytes32(static_cast<std::uint32_t>(displacement));
+}
+
+void Assembler::jmp(Mem target) {
+    rex(false, 0, 0, code(target.base));
+    byte(0xff);
+    modrm_memory(4, target);
+}
+
+void Assembler::jmp_to(std::uint64_t target) {
+    const std::int64_t displacement = static_cast<std::int64_t>(target - (here() + 5));
+    invariant(displacement == static_cast<std::int32_t>(displacement), "jump within rel32");
+    byte(0xe9);
+    bytes32(static_cast<std::uint32_t>(displacement));
+}
+
+void Assembler::jcc_to(Cond c, std::uint64_t target) {
+    const std::int64_t displacement = static_cast<std::int64_t>(target - (here() + 6));
+    invariant(displacement == static_cast<std::int32_t>(displacement), "jump within rel32");
+    byte(0x0f);
+    byte(static_cast<std::uint8_t>(0x80 | static_cast<unsigned>(c)));
     bytes32(static_cast<std::uint32_t>(displacement));
 }
 

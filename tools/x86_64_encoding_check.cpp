@@ -21,6 +21,8 @@ const char* const names64[] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", 
                                "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
 const char* const names32[] = {"eax", "ecx", "edx",  "ebx",  "esp",  "ebp",  "esi",  "edi",
                                "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d"};
+const char* const names16[] = {"ax",  "cx",  "dx",   "bx",   "sp",   "bp",   "si",   "di",
+                               "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w"};
 const char* const names8[] = {"al",  "cl",  "dl",   "bl",   "spl",  "bpl",  "sil",  "dil",
                               "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b"};
 const char* const conditions[] = {"o", "no", "b", "ae", "e",  "ne", "be", "a",
@@ -70,6 +72,11 @@ int main() {
             [=](Assembler& a) { a.movsxd(reg, other); });
         add(std::format("movzx {}, {}", names32[r], names8[(r * 7 + 3) % 16]),
             [=](Assembler& a) { a.movzx_byte(reg, other); });
+        add(std::format("movsx {}, {}", n, names16[(r * 7 + 3) % 16]),
+            [=](Assembler& a) { a.movsx_word(reg, other); });
+        add(std::format("bswap {}", names32[r]), [=](Assembler& a) { a.bswap32(reg); });
+        add(std::format("bswap {}", n), [=](Assembler& a) { a.bswap64(reg); });
+        add(std::format("rol {}, 8", names16[r]), [=](Assembler& a) { a.rol16(reg, 8); });
         for (const std::int32_t imm : {1, -1, 127, 128, -129, 0x12345678}) {
             add(std::format("add {}, {}", n, imm), [=](Assembler& a) { a.add(reg, imm); });
             add(std::format("and {}, {}", n, imm), [=](Assembler& a) { a.and_(reg, imm); });
@@ -121,11 +128,23 @@ int main() {
                 add(std::format("lea {}, {}", n, mem(m, "QWORD").substr(10)),
                     [=](Assembler& a) { a.lea(reg, m); });
                 add(std::format("cmp {}, {}", n, mem(m)), [=](Assembler& a) { a.cmp(reg, m); });
+                add(std::format("add {}, {}", n, mem(m)), [=](Assembler& a) { a.add(reg, m); });
+                add(std::format("mov {}, {}", names32[r], mem(m, "DWORD")),
+                    [=](Assembler& a) { a.mov32(reg, m); });
+                add(std::format("mov {}, {}", mem(m, "DWORD"), names32[r]),
+                    [=](Assembler& a) { a.mov32(m, reg); });
+                add(std::format("mov {}, {}", mem(m, "WORD"), names16[r]),
+                    [=](Assembler& a) { a.mov16(m, reg); });
+                add(std::format("movzx {}, {}", names32[r], mem(m, "WORD")),
+                    [=](Assembler& a) { a.movzx_word(reg, m); });
+                add(std::format("movsx {}, {}", n, mem(m, "BYTE")),
+                    [=](Assembler& a) { a.movsx_byte(reg, m); });
                 add(std::format("movzx {}, {}", names32[r], mem(m, "BYTE")),
                     [=](Assembler& a) { a.movzx_byte(reg, m); });
                 add(std::format("mov {}, {}", mem(m, "BYTE"), names8[r]),
                     [=](Assembler& a) { a.mov_byte(m, reg); });
                 if (r == 0) {
+                    add(std::format("jmp {}", mem(m)), [=](Assembler& a) { a.jmp(m); });
                     add(std::format("mov {}, 0x5a", mem(m, "BYTE")),
                         [=](Assembler& a) { a.mov_byte(m, 0x5a); });
                     add(std::format("cmp {}, 0x1", mem(m, "BYTE")),
@@ -142,6 +161,12 @@ int main() {
         }
     }
     add("ret", [](Assembler& a) { a.ret(); });
+    add("jmp .+0x1000", [](Assembler& a) { a.jmp_to(a.here() + 0x1000); });
+    add("jmp .-0x1000", [](Assembler& a) { a.jmp_to(a.here() - 0x1000); });
+    for (unsigned c = 0; c < 16; ++c) {
+        add(std::format("j{} .+0x1000", conditions[c]),
+            [=](Assembler& a) { a.jcc_to(static_cast<Cond>(c), a.here() + 0x1000); });
+    }
     add("call QWORD PTR [rip+0x100]", [](Assembler& a) { a.call_indirect(a.here() + 6 + 0x100); });
     add("call QWORD PTR [rip-0x100]", [](Assembler& a) { a.call_indirect(a.here() + 6 - 0x100); });
 

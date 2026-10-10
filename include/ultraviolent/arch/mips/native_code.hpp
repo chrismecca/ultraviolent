@@ -2,7 +2,7 @@
 
 // What BlockInterpreter needs from a tier-1 backend (JIT.adoc): native code for decoded
 // blocks, and running it. The backend is host-specific (x86-64 today); the block cache, its
-// invalidation, and the boundary rules stay BlockInterpreter's.
+// invalidation, and which blocks native code may continue into stay BlockInterpreter's.
 
 #include <ultraviolent/arch/mips/block.hpp>
 
@@ -15,11 +15,32 @@ namespace ultraviolent::mips {
 enum class BlockExit : std::uint8_t;
 class Cpu;
 
-// Why native code left its block, and how many of its operations ran (BlockInterpreter
-// counts them as tier 0 does).
+// Where native code finds the next block when one ends (JIT.adoc "Dispatch"): a direct-mapped
+// table by pc that BlockInterpreter fills with blocks it has validated. Native code continues
+// into an entry only when its pc, translation context, and stamp match the CPU's pc,
+// Cpu::code_changes() (nothing that can invalidate a block happened since it was validated),
+// and translation context; anything else returns to BlockInterpreter.
+struct DispatchEntry {
+    std::uint64_t pc{~std::uint64_t{0}};
+    std::uint64_t context{};
+    std::uint64_t stamp{};
+    const void* code{};
+};
+inline constexpr std::size_t dispatch_entries = std::size_t{1} << 15;
+[[nodiscard]] constexpr std::size_t dispatch_index(std::uint64_t pc) {
+    return (pc >> 2) & (dispatch_entries - 1);
+}
+
+// Why native code returned (BlockExit), and how many blocks it entered.
+//
+// BlockExit::completed: a block ended and the next was not in the dispatch table.
+// BlockExit::run_limit: the next block might pass the run limit or the CPU's next internal
+// event (blocks == 0: the first block; BlockInterpreter runs it decoded, exactly), or the
+// limit or event arrived. BlockExit::pending_exception: an interrupt or delayed watch exception
+// is pending at a boundary; it is not taken. The others as for tier 0.
 struct NativeExit {
     BlockExit reason;
-    std::uint32_t operations;
+    std::uint64_t blocks;
 };
 
 struct NativeStatistics {
@@ -41,9 +62,11 @@ class NativeCode {
     // May discard every earlier translation (advancing epoch()): called only between blocks,
     // when no native code is running.
     virtual const void* translate(const Block& block) = 0;
-    // Runs `code` until it leaves its block. `limit` is read at every boundary (a device
-    // access may lower it).
-    virtual NativeExit run(const void* code, const std::uint64_t& limit) = 0;
+    // Runs `code`, the block at the CPU's pc, and the blocks it continues into through
+    // `dispatch` (dispatch_entries long), until one of them leaves. The CPU is at a boundary
+    // with no pending exception and not in a delay slot. `limit` is the run limit.
+    virtual NativeExit run(const void* code, const std::uint64_t& limit,
+                           const DispatchEntry* dispatch) = 0;
     [[nodiscard]] virtual std::uint64_t epoch() const = 0;
     [[nodiscard]] virtual const NativeStatistics& statistics() const = 0;
 };

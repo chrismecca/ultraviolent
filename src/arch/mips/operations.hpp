@@ -24,7 +24,9 @@
 //   add_overflows_32, sub_overflows_32  signed overflow of the bits 31:0 operation -> Condition
 //   add_overflows_64, sub_overflows_64  signed 64-bit overflow -> Condition
 //   raise_if(c, code)                   takes the exception when c holds; true if it did
-//   raised()                            the Result after raise_if returned true
+//   load<W, SignExtend>(address)        std::optional<Value>: empty when it took an exception
+//   store<W>(address, value)            true when it took an exception
+//   raised()                            the Result after an exception was taken
 //   sequential(), branch(c, target, likely), jump(target_value)
 //
 // Semantics follow the MIPS IV Instruction Set, Revision 3.2 (ISA). An operation never tests
@@ -32,6 +34,7 @@
 // reached (Executor::execute, and tier 1 at translation time).
 
 #include <ultraviolent/arch/mips/cp0.hpp>
+#include <ultraviolent/core/address_space.hpp>
 #include <ultraviolent/arch/mips/decoded.hpp>
 #include <ultraviolent/arch/mips/instruction.hpp>
 
@@ -262,6 +265,58 @@ template <class B> typename B::Result lui(B& b, Instruction i) {
     return b.sequential();
 }
 
+// Loads and stores (ISA A-61 and following): the address is the base register plus the
+// sign-extended offset; misaligned addresses raise address errors (Cpu::load_as, store_as).
+template <AccessWidth W, bool SignExtend, class B> typename B::Result load(B& b, Instruction i) {
+    const auto address = b.add(b.gpr(i.rs()), b.constant(i.signed_immediate()));
+    const auto value = b.template load<W, SignExtend>(address);
+    if (!value) {
+        return b.raised();
+    }
+    b.set_gpr(i.rt(), *value);
+    return b.sequential();
+}
+template <AccessWidth W, class B> typename B::Result store(B& b, Instruction i) {
+    const auto address = b.add(b.gpr(i.rs()), b.constant(i.signed_immediate()));
+    if (b.template store<W>(address, b.gpr(i.rt()))) {
+        return b.raised();
+    }
+    return b.sequential();
+}
+template <class B> typename B::Result lb(B& b, Instruction i) {
+    return load<AccessWidth::bits8, true>(b, i);
+}
+template <class B> typename B::Result lbu(B& b, Instruction i) {
+    return load<AccessWidth::bits8, false>(b, i);
+}
+template <class B> typename B::Result lh(B& b, Instruction i) {
+    return load<AccessWidth::bits16, true>(b, i);
+}
+template <class B> typename B::Result lhu(B& b, Instruction i) {
+    return load<AccessWidth::bits16, false>(b, i);
+}
+template <class B> typename B::Result lw(B& b, Instruction i) {
+    return load<AccessWidth::bits32, true>(b, i);
+}
+template <class B> typename B::Result lwu(B& b, Instruction i) {
+    return load<AccessWidth::bits32, false>(b, i);
+}
+template <class B> typename B::Result ld(B& b, Instruction i) {
+    return load<AccessWidth::bits64, false>(b, i);
+}
+template <class B> typename B::Result sb(B& b, Instruction i) {
+    return store<AccessWidth::bits8>(b, i);
+}
+template <class B> typename B::Result sh(B& b, Instruction i) {
+    return store<AccessWidth::bits16>(b, i);
+}
+template <class B> typename B::Result sw(B& b, Instruction i) {
+    return store<AccessWidth::bits32>(b, i);
+}
+template <class B> typename B::Result sd(B& b, Instruction i) {
+    return store<AccessWidth::bits64>(b, i);
+}
+
 // Branches and jumps. The target of a PC-relative branch is the delay slot's address plus the
 // offset (ISA A-25).
 template <class B> std::uint64_t branch_target(const B& b, Instruction i) {
@@ -402,6 +457,17 @@ std::optional<typename B::Result> translate(B& b, DecodedOpcode op, Instruction 
     case jal: return operations::jal(b, i);
     case jr: return operations::jr(b, i);
     case jalr: return operations::jalr(b, i);
+    case lb: return operations::lb(b, i);
+    case lbu: return operations::lbu(b, i);
+    case lh: return operations::lh(b, i);
+    case lhu: return operations::lhu(b, i);
+    case lw: return operations::lw(b, i);
+    case lwu: return operations::lwu(b, i);
+    case ld: return operations::ld(b, i);
+    case sb: return operations::sb(b, i);
+    case sh: return operations::sh(b, i);
+    case sw: return operations::sw(b, i);
+    case sd: return operations::sd(b, i);
     default: return std::nullopt;
     }
 }

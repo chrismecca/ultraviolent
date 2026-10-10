@@ -313,6 +313,22 @@ class Cpu final : public InterruptSink {
     [[nodiscard]] std::uint64_t code_epoch() const {
         return code_epoch_;
     }
+    // Advances whenever a decoded block may have become invalid: the code epoch or the
+    // generation of a TLB entry that translated code advanced, or a frame holding decoded code was written (by this CPU's
+    // stores, or by anything else once synchronize_code has seen it). Lets an engine reuse a
+    // validation until something changes (tier 1's dispatch, JIT.adoc "Dispatch").
+    [[nodiscard]] std::uint64_t code_changes() const {
+        return code_changes_;
+    }
+    // Notes writes to code frames made outside this CPU's own stores (DMA, other bus
+    // masters). Those happen only between runs or during a bus access, so an engine calls this
+    // before relying on code_changes() after either.
+    void synchronize_code() {
+        if (bus_.code_writes() != seen_code_writes_) {
+            seen_code_writes_ = bus_.code_writes();
+            ++code_changes_;
+        }
+    }
 
     // What the last access that reached the bus was (IR.adoc "Slow bus paths are barriers").
     enum class BusAccess : std::uint8_t {
@@ -430,6 +446,20 @@ class Cpu final : public InterruptSink {
         std::int32_t timer_cycle;
         std::int32_t interrupt_check; // bool
         std::int32_t left_host_path;  // bool
+        std::int32_t translation_context;
+        std::int32_t code_changes;
+        // The data host page cache (load and store fast paths): host_page_count entries of
+        // host_page_size bytes, selected by bits 6+ of the virtual page number; the fields of
+        // an entry; the byte order of the memory behind it.
+        std::int32_t data_pages;
+        std::int32_t host_page_page;
+        std::int32_t host_page_store_page;
+        std::int32_t host_page_bytes;
+        std::int32_t host_page_writable_bytes;
+        std::int32_t host_page_context;
+        std::uint32_t host_page_count;
+        std::uint32_t host_page_size;
+        ByteOrder byte_order;
     };
     [[nodiscard]] NativeLayout native_layout() const;
 
@@ -575,6 +605,7 @@ class Cpu final : public InterruptSink {
     void check_host_pages() {
         if (!host_pages_current()) {
             ++code_epoch_;
+            ++code_changes_;
             code_pages_.fill({});
             data_pages_.fill({});
             host_pages_translation_generation_ = translation_generation_;
@@ -626,6 +657,11 @@ class Cpu final : public InterruptSink {
     std::uint64_t code_frame_stores_{};
     std::array<std::uint64_t, Tlb::entry_count> tlb_generations_{};
     std::uint64_t code_epoch_{};
+    std::uint64_t code_changes_{};
+    std::uint64_t seen_code_writes_{};
+    // TLB entries (bit n: entry n) that translated a claimed code page since they were last
+    // written: a write to any other entry leaves every decoded block valid.
+    std::uint64_t tlb_code_entries_{};
 
     // Per-instruction work kept out of the instruction loop; transparent (the same values
     // the direct computation gives, which debug builds check). Measured: the interrupt
@@ -660,6 +696,9 @@ class Cpu final : public InterruptSink {
         // The memory block and offset of the frame (code-frame tracking).
         MemoryBlock* block{};
         std::uint64_t frame{};
+        // `page` when stores may use writable_bytes, otherwise no page: tier 1 tests a store
+        // with one comparison.
+        std::uint64_t store_page{~std::uint64_t{0}};
     };
     static constexpr std::size_t host_page_count = 64;
     [[nodiscard]] bool host_pages_current() const {

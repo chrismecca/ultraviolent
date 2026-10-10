@@ -95,6 +95,17 @@ class Assembler {
     void movzx_byte(Reg dst, Mem src);
     void movzx_byte(Reg dst, Reg src);
     void movsxd(Reg dst, Reg src); // sign-extend bits 31:0
+    // Memory loads and stores by width (the register's low bytes); 32-bit and narrower loads
+    // zero-extend into the 64-bit register, except the movsx forms (64-bit destination).
+    void mov32(Reg dst, Mem src);
+    void mov32(Mem dst, Reg src);
+    void mov16(Mem dst, Reg src);
+    void movzx_word(Reg dst, Mem src);
+    void movsx_byte(Reg dst, Mem src);
+    void movsx_word(Reg dst, Reg src);
+    void bswap32(Reg r);
+    void bswap64(Reg r);
+    void rol16(Reg r, std::uint8_t count);
     void lea(Reg dst, Mem src);
 
     void add(Reg dst, Reg src);
@@ -111,6 +122,7 @@ class Assembler {
     void xor_(Reg dst, std::int32_t immediate);
     void cmp(Reg a, std::int32_t immediate);
     void cmp(Reg a, Mem b);
+    void add(Reg dst, Mem src);
     void add(Mem dst, std::int32_t immediate);
     void cmp_byte(Mem a, std::uint8_t immediate);
     void not_(Reg dst);
@@ -142,6 +154,10 @@ class Assembler {
     void jmp(Reg target);
     // call [rip + d], d chosen so the memory operand is at `slot`.
     void call_indirect(std::uint64_t slot);
+    void jmp(Mem target); // jmp qword [mem]
+    // jmp rel32 and jcc rel32 to code outside this assembly, at `target`.
+    void jmp_to(std::uint64_t target);
+    void jcc_to(Cond c, std::uint64_t target);
 
     [[nodiscard]] Label label();
     void bind(Label label);

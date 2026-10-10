@@ -29,23 +29,70 @@ void BlockInterpreter::run_until(const std::uint64_t& limit) {
             ++statistics_.pending_at_entry;
             continue;
         }
+        const NativeRun native = native_ != nullptr ? run_native(limit) : NativeRun::absent;
+        if (native == NativeRun::ran) {
+            continue;
+        }
         const std::uint64_t hits = statistics_.hits;
         Entry* entry = lookup(cpu_.state().pc);
         if (entry == nullptr) {
             reference_.step();
             continue;
         }
-        const bool cached = statistics_.hits != hits;
-        if (native_ != nullptr && run_native(*entry, limit, cached)) {
+        // A refused block runs decoded, exactly (it may stop anywhere inside, or start in a
+        // delay slot).
+        if (native == NativeRun::absent && native_ != nullptr && install_native(*entry)) {
             continue;
         }
-        run_block(entry->block, limit, cached);
+        run_block(entry->block, limit, statistics_.hits != hits);
     }
 }
 
-// Native code is made only here, between blocks, so a translation that discards the code
-// region never removes code that is running (JIT.adoc "Native code: memory, lifetime, calls").
-bool BlockInterpreter::run_native(Entry& entry, const std::uint64_t& limit, bool cached) {
+// Native code runs only from here, between blocks; translations happen only here too, so a
+// translation that discards the code region never removes code that is running (JIT.adoc
+// "Native code: memory, lifetime, calls").
+BlockInterpreter::NativeRun BlockInterpreter::run_native(const std::uint64_t& limit) {
+    const IntegerState& s = cpu_.state();
+    if (s.delay_slot) {
+        // Native blocks start outside delay slots (a reference step can leave one).
+        return NativeRun::refused;
+    }
+    DispatchEntry& entry = dispatch_[dispatch_index(s.pc)];
+    if (entry.pc != s.pc || entry.context != cpu_.code_context()) {
+        return NativeRun::absent;
+    }
+    cpu_.synchronize_code();
+    if (entry.stamp != cpu_.code_changes()) {
+        ++statistics_.dispatch_revalidations;
+        if (!valid(dispatch_validity_[dispatch_index(s.pc)])) {
+            ++statistics_.dispatch_invalid;
+            entry = {};
+            return NativeRun::absent;
+        }
+        entry.stamp = cpu_.code_changes();
+    }
+    const std::uint64_t cycles = cpu_.cycles();
+    const NativeExit exit = native_->run(entry.code, limit, dispatch_.data());
+    if (exit.blocks == 0 && exit.reason == BlockExit::run_limit) {
+        ++statistics_.native_refusals;
+        return NativeRun::refused;
+    }
+    if (exit.reason == BlockExit::host_path) {
+        ++statistics_.barriers[static_cast<std::size_t>(cpu_.last_bus_access())];
+    }
+    // Every operation native code ran took one cycle (an exception's too).
+    const std::uint64_t operations = cpu_.cycles() - cycles;
+    ++statistics_.native_runs;
+    statistics_.native_blocks += exit.blocks;
+    statistics_.native_operations += operations;
+    statistics_.entries += exit.blocks;
+    statistics_.operations += operations;
+    statistics_.cached_operations += operations;
+    ++statistics_.exits[static_cast<std::size_t>(exit.reason)];
+    return NativeRun::ran;
+}
+
+bool BlockInterpreter::install_native(Entry& entry) {
     if (entry.native == nullptr || entry.native_epoch != native_->epoch()) {
         if (entry.uses < native_threshold_) {
             return false;
@@ -56,12 +103,36 @@ bool BlockInterpreter::run_native(Entry& entry, const std::uint64_t& limit, bool
             return false;
         }
     }
-    const NativeExit exit = native_->run(entry.native, limit);
-    if (exit.reason == BlockExit::host_path) {
-        ++statistics_.barriers[static_cast<std::size_t>(cpu_.last_bus_access())];
+    if (dispatch_epoch_ != native_->epoch()) {
+        // The code region was discarded: no other entry's code exists any more.
+        clear_dispatch();
     }
-    count_exit(exit.reason, exit.operations, cached);
+    // lookup has just validated the entry.
+    cpu_.synchronize_code();
+    const std::size_t index = dispatch_index(entry.pc);
+    dispatch_[index] = {.pc = entry.pc,
+                        .context = entry.context,
+                        .stamp = cpu_.code_changes(),
+                        .code = entry.native};
+    dispatch_validity_[index] = {.epoch = entry.epoch,
+                                 .frame_generation = entry.frame_generation,
+                                 .frame_generation_value = entry.frame_generation_value,
+                                 .tlb_generation = entry.tlb_generation,
+                                 .tlb_index = entry.tlb_index};
+    ++statistics_.dispatch_installs;
     return true;
+}
+
+bool BlockInterpreter::valid(const DispatchValidity& v) const {
+    return v.epoch == cpu_.code_epoch() && *v.frame_generation == v.frame_generation_value &&
+           (v.tlb_index < 0 ||
+            cpu_.tlb_generation(static_cast<std::size_t>(v.tlb_index)) == v.tlb_generation);
+}
+
+void BlockInterpreter::clear_dispatch() {
+    dispatch_.assign(native_ != nullptr ? dispatch_entries : 0, DispatchEntry{});
+    dispatch_validity_.assign(dispatch_.size(), DispatchValidity{});
+    dispatch_epoch_ = native_ != nullptr ? native_->epoch() : 0;
 }
 
 void BlockInterpreter::count_exit(BlockExit exit, std::size_t operations, bool cached) {

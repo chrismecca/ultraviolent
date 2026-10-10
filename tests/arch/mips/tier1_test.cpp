@@ -198,6 +198,131 @@ template <class Engine> void builder_operations(test::Context& t) {
     }
 }
 
+// Loads and stores of every width in builder form, which tier 1 emits with an inline host
+// page fast path and a slow path through call_semantics: bases in two data pages (hits once
+// filled), in the code frame (stores reach the bus and invalidate blocks), uncached (kseg1:
+// always the bus), and unmapped user space (TLB refill, skipped); offsets that misalign
+// (address errors, skipped); interleaved with the other builder operations, so guest values
+// are cached in host registers across the paths. Memory is compared with the reference too.
+std::uint32_t memory_operation(std::mt19937_64& rng) {
+    if (rng() % 2 == 0) {
+        return builder_operation(rng);
+    }
+    const unsigned base = 16 + static_cast<unsigned>(rng() % 5); // s0-s4
+    const auto offset = static_cast<std::int32_t>(rng() % 64) - 16;
+    const unsigned r = static_cast<unsigned>(rng() % 12);
+    const unsigned rt = r == 0 ? 0u : r == 1 ? 31u : r + 1;
+    switch (rng() % 11) {
+    case 0: return lb(rt, offset, base);
+    case 1: return lbu(rt, offset, base);
+    case 2: return lh(rt, offset & ~1, base);
+    case 3: return lhu(rt, offset, base);
+    case 4: return lw(rt, offset & ~3, base);
+    case 5: return lwu(rt, offset, base);
+    case 6: return ld(rt, offset & ~7, base);
+    case 7: return sb(rt, offset, base);
+    case 8: return sh(rt, offset & ~1, base);
+    case 9: return sw(rt, offset & ~3, base);
+    default: return sd(rt, rng() % 4 == 0 ? offset : offset & ~7, base);
+    }
+}
+
+template <class Engine> void memory_operations(test::Context& t) {
+    std::mt19937_64 rng{20261011};
+    constexpr std::uint64_t edges[] = {0x7fff'ffff,          0x8000'0000,        0xffff'ffff'ffff'ffff,
+                                       0x8080'8080'8080'8080, 0x0123'4567'89ab'cdef, 0x80,
+                                       0x8000,                0xffff'ffff'8000'0000, 5,
+                                       0xffff'ffff'7fff'ffff};
+    for (int program = 0; program < 60; ++program) {
+        DifferentialWith<Engine> d;
+        d.load_skip_handlers();
+        std::vector<std::uint32_t> words;
+        for (int i = 0; i < 120; ++i) {
+            words.push_back(memory_operation(rng));
+        }
+        words.push_back(beq(zero, zero, -4 * static_cast<std::int32_t>(words.size() + 1)));
+        for (const std::uint32_t word : {nop(), nop(), nop(), nop(), beq(zero, zero, -4), nop()}) {
+            words.push_back(word);
+        }
+        for (std::size_t i = 0; i < words.size(); ++i) {
+            d.load(System::code + 4 * i, kseg0(System::code) + 4 * i, {words[i]});
+        }
+        d.both([&](System& s) {
+            s.start_kernel();
+            for (unsigned r = 2; r < 16; ++r) {
+                s.set(r, edges[(r + static_cast<unsigned>(program)) % 10]);
+            }
+            s.set(31, edges[static_cast<unsigned>(program) % 10]);
+            s.set(16, kseg0(System::data) + 0x20);
+            s.set(17, kseg0(System::data) + 0x1000);
+            s.set(18, kseg0(System::code) + 0x800);
+            s.set(19, kseg1(System::data) + 0x2000);
+            s.set(20, 0x1000'0000);
+        });
+        if (!d.run(t, 1500)) {
+            t.check(false, std::format("program {}", program));
+            return;
+        }
+    }
+}
+
+// The inline host page path tests the entry's translation context: one user virtual page,
+// mapped by two non-global TLB entries (ASIDs 1 and 2) to two frames, loaded and stored in
+// turn under each ASID. Without the test, a host page filled under one ASID would serve the
+// other.
+template <class Engine> void data_pages_by_context(test::Context& t) {
+    DifferentialWith<Engine> d;
+    d.load_skip_handlers();
+    constexpr std::uint64_t page = 0x0001'0000;
+    d.load(System::code, kseg0(System::code),
+           {lw(v0, 0, s0),            // ASID 1: frame A
+            sw(v0, 8, s0),
+            mtc0(t1, cp0::entry_hi),  // ASID 2
+            nop(),
+            lw(v1, 0, s0),            // frame B
+            daddiu(v1, v1, 1),
+            sw(v1, 0, s0),
+            mtc0(t0, cp0::entry_hi),  // ASID 1
+            nop(),
+            lw(a0, 0, s0),
+            daddu(v0, v0, a0),
+            sd(v0, 16, s0),
+            beq(zero, zero, -4 * 13),
+            nop()});
+    d.both([&](System& s) {
+        const std::uint64_t flags = (3u << entry_lo::c_shift) | entry_lo::d | entry_lo::v;
+        for (const std::uint64_t asid : {1u, 2u}) {
+            const std::uint64_t frame = System::data + 0x1000 * asid;
+            s.cpu.dmtc0(cp0::entry_hi, page | asid);
+            s.cpu.dmtc0(cp0::entry_lo0, (frame >> 12) << entry_lo::pfn_shift | flags);
+            s.cpu.dmtc0(cp0::entry_lo1, 0);
+            s.cpu.mtc0(cp0::page_mask, 0);
+            s.cpu.mtc0(cp0::index, static_cast<std::uint32_t>(asid));
+            s.cpu.tlb_write_indexed();
+            s.poke(frame, AccessWidth::bits32, 0x1111'0000 * asid);
+        }
+        s.start_kernel();
+        s.cpu.dmtc0(cp0::entry_hi, 1);
+        s.set(s0, page);
+        s.set(t0, 1);
+        s.set(t1, 2);
+    });
+    t.check(d.run(t, 600), "matches the reference");
+    t.check(d.engine.statistics().operations > 0, "blocks ran");
+}
+
+const test::Registration data_pages_tier0{"mips.tier1.data_pages_by_context.tier0",
+                                          data_pages_by_context<Tier0Engine>};
+const test::Registration data_pages_tier1{"mips.tier1.data_pages_by_context.tier1",
+                                          data_pages_by_context<Tier1Engine>};
+
+const test::Registration memory_tier0{"mips.tier1.memory_operations.tier0",
+                                      memory_operations<Tier0Engine>};
+const test::Registration memory_tier1{"mips.tier1.memory_operations.tier1",
+                                      memory_operations<Tier1Engine>};
+const test::Registration memory_tier1_tiny{"mips.tier1.memory_operations.tier1_tiny_cache",
+                                           memory_operations<Tier1TinyCacheEngine>};
+
 const test::Registration builder_tier0{"mips.tier1.builder_operations.tier0",
                                        builder_operations<Tier0Engine>};
 const test::Registration builder_tier1{"mips.tier1.builder_operations.tier1",

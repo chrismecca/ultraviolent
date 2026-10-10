@@ -80,6 +80,18 @@ struct BlockStatistics {
     std::array<std::uint64_t, max_block_length + 1> run_lengths{};
     std::array<std::uint64_t, block_exit_count> exits{};
     std::array<std::uint64_t, Cpu::bus_access_count> barriers{};
+    // Tier 1: native runs (each continues through blocks until one leaves), blocks entered in
+    // them, runs refused because the first block might pass the run limit or the next
+    // internal event, and blocks put into the dispatch table.
+    std::uint64_t native_runs{};
+    std::uint64_t native_blocks{};
+    std::uint64_t native_operations{};
+    std::uint64_t native_refusals{};
+    std::uint64_t dispatch_installs{};
+    // Dispatch entries validated again because something that can invalidate a block
+    // happened since their stamp (Cpu::code_changes), and how many of those had become invalid.
+    std::uint64_t dispatch_revalidations{};
+    std::uint64_t dispatch_invalid{};
 };
 
 // Tier 0 (IR.adoc "Executor", "Keeping blocks valid"): decoded blocks in a direct-mapped
@@ -106,6 +118,7 @@ class BlockInterpreter {
     // Between runs; not owned.
     void set_native_code(NativeCode* native) {
         native_ = native;
+        clear_dispatch();
     }
     // Tier 1 translates a block once its cache entry has been hit `hits` times since it was
     // built, and runs it decoded until then: translation costs microseconds, and a block the
@@ -144,10 +157,33 @@ class BlockInterpreter {
     // block could be built (the reason is counted).
     Entry* lookup(std::uint64_t pc);
     void run_block(const Block& block, const std::uint64_t& limit, bool cached);
-    // Tier 1: runs the entry's native code, translating it first when it has none.
-    // Returns false when no native code could be made (the caller runs the block decoded).
-    bool run_native(Entry& entry, const std::uint64_t& limit, bool cached);
     void count_exit(BlockExit exit, std::size_t operations, bool cached);
+
+    // Tier 1 (JIT.adoc "Dispatch"). Native code for a block is found through the dispatch
+    // table, which outlives tier 0's cache entries: a block evicted from the cache keeps its
+    // native code until its dispatch entry is replaced or invalid.
+    enum class NativeRun : std::uint8_t {
+        ran,
+        // Native code cannot run the block at pc now: the CPU is in a delay slot, or the block
+        // might pass the run limit or the next internal event. It runs decoded.
+        refused,
+        // No valid native code for the pc.
+        absent,
+    };
+    NativeRun run_native(const std::uint64_t& limit);
+    // Puts the entry's block into the dispatch table, translating it first when it has no
+    // native code and has been hit often enough. Returns whether it did.
+    bool install_native(Entry& entry);
+    // What validates a dispatch entry, besides its pc and context (as for Entry).
+    struct DispatchValidity {
+        std::uint64_t epoch{};
+        const std::uint64_t* frame_generation{};
+        std::uint64_t frame_generation_value{};
+        std::uint64_t tlb_generation{};
+        std::int8_t tlb_index{-1};
+    };
+    [[nodiscard]] bool valid(const DispatchValidity& v) const;
+    void clear_dispatch();
 
     Cpu& cpu_;
     Interpreter reference_;
@@ -156,6 +192,10 @@ class BlockInterpreter {
     BlockStatistics statistics_;
     NativeCode* native_{};
     std::uint64_t native_threshold_{default_native_threshold};
+    std::vector<DispatchEntry> dispatch_;
+    std::vector<DispatchValidity> dispatch_validity_;
+    // The backend epoch the dispatch table's code belongs to.
+    std::uint64_t dispatch_epoch_{};
 };
 
 } // namespace ultraviolent::mips

@@ -3,6 +3,7 @@
 #include <ultraviolent/core/invariant.hpp>
 
 #include <bit>
+#include <cstddef>
 #include <utility>
 
 // Section references are to the MIPS R10000 Microprocessor User's Manual, Version 2.0 (UM).
@@ -72,6 +73,8 @@ Cpu::Cpu(AddressSpace& bus, Tracer& tracer, const ProcessorModel& model)
 }
 
 Cpu::NativeLayout Cpu::native_layout() const {
+    static_assert(sizeof(HostPage) == 64, "tier 1 scales a host page slot by a shift");
+    static_assert(std::has_single_bit(host_page_count), "tier 1 masks the host page slot");
     const auto at = [this](const void* field) {
         return static_cast<std::int32_t>(static_cast<const std::byte*>(field) -
                                          reinterpret_cast<const std::byte*>(this));
@@ -86,7 +89,18 @@ Cpu::NativeLayout Cpu::native_layout() const {
             .unretired_cycles = at(&unretired_cycles_),
             .timer_cycle = at(&timer_cycle_),
             .interrupt_check = at(&interrupt_check_),
-            .left_host_path = at(&left_host_path_)};
+            .left_host_path = at(&left_host_path_),
+            .translation_context = at(&context_),
+            .code_changes = at(&code_changes_),
+            .data_pages = at(data_pages_.data()),
+            .host_page_page = offsetof(HostPage, page),
+            .host_page_store_page = offsetof(HostPage, store_page),
+            .host_page_bytes = offsetof(HostPage, bytes),
+            .host_page_writable_bytes = offsetof(HostPage, writable_bytes),
+            .host_page_context = offsetof(HostPage, context),
+            .host_page_count = host_page_count,
+            .host_page_size = sizeof(HostPage),
+            .byte_order = bus_.byte_order()};
 }
 
 void Cpu::reset(ResetKind kind) {
@@ -399,6 +413,7 @@ std::expected<void, Exception> Cpu::write(const Translation& translation, Access
     if (bus_.code_writes() != code_writes) {
         last_bus_access_ = BusAccess::code_store;
         ++code_frame_stores_;
+        synchronize_code();
     }
     check_host_pages();
     if (!result) {
@@ -474,6 +489,9 @@ std::optional<Cpu::CodePage> Cpu::code_page(std::uint64_t address) {
 
 void Cpu::claim_code_frame(const CodePage& page) {
     page.block->mark_code(page.frame);
+    if (page.tlb_index >= 0) {
+        tlb_code_entries_ |= std::uint64_t{1} << page.tlb_index;
+    }
     for (HostPage& entry : data_pages_) {
         if (entry.writable_bytes == page.bytes) {
             entry = {};
@@ -493,6 +511,11 @@ Cpu::BusAccess Cpu::classify_bus_access(PhysicalAddress address, AccessWidth wid
 }
 
 void Cpu::forget_tlb_pages(std::uint64_t entries) {
+    // Only entries that translated decoded code can invalidate a block.
+    if ((entries & tlb_code_entries_) != 0) {
+        tlb_code_entries_ &= ~entries;
+        ++code_changes_;
+    }
     for (std::size_t index = 0; index < Tlb::entry_count; ++index) {
         if ((entries >> index & 1) != 0) {
             ++tlb_generations_[index];
@@ -534,7 +557,8 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
                                                     translation_context(),
                                                     translation.tlb_index,
                                                     memory->block,
-                                                    memory->offset};
+                                                    memory->offset,
+                                                    page};
         }
         return;
     }

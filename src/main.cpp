@@ -652,6 +652,24 @@ int main(int argc, char** argv) {
                                machine.cpu().code_frame_stores());
         if (const mips::NativeCode* native = machine.native_code()) {
             const mips::NativeStatistics& n = native->statistics();
+            const mips::BlockStatistics& b = machine.block_statistics();
+            std::fprintf(stderr,
+                         "tier1: %llu native runs, %llu blocks entered (%.2f per run), %llu "
+                         "operations (%.1f%%), %llu refused, %llu dispatch installs, %llu "
+                         "revalidations (%llu invalid)\n",
+                         static_cast<unsigned long long>(b.native_runs),
+                         static_cast<unsigned long long>(b.native_blocks),
+                         b.native_runs == 0 ? 0.0
+                                            : static_cast<double>(b.native_blocks) /
+                                                  static_cast<double>(b.native_runs),
+                         static_cast<unsigned long long>(b.native_operations),
+                         b.operations == 0 ? 0.0
+                                           : 100.0 * static_cast<double>(b.native_operations) /
+                                                 static_cast<double>(b.operations),
+                         static_cast<unsigned long long>(b.native_refusals),
+                         static_cast<unsigned long long>(b.dispatch_installs),
+                         static_cast<unsigned long long>(b.dispatch_revalidations),
+                         static_cast<unsigned long long>(b.dispatch_invalid));
             std::fprintf(stderr,
                          "tier1: %llu blocks translated, %llu native bytes, %.3f s translating, "
                          "%llu discards, %llu operations native, %llu through call_semantics\n",

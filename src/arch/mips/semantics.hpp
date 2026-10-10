@@ -215,6 +215,30 @@ class DirectBuilder {
         }
         return c;
     }
+    template <AccessWidth W, bool SignExtend> std::optional<Value> load(Value address) {
+        auto value = cpu_.load_as<W>(address);
+        if (!value) [[unlikely]] {
+            cpu_.take_exception(value.error());
+            return std::nullopt;
+        }
+        if constexpr (SignExtend && W == AccessWidth::bits8) {
+            return sign_extend_8(*value);
+        } else if constexpr (SignExtend && W == AccessWidth::bits16) {
+            return sign_extend_16(*value);
+        } else if constexpr (SignExtend && W == AccessWidth::bits32) {
+            return semantics::sign_extend_32(*value);
+        } else {
+            return *value;
+        }
+    }
+    template <AccessWidth W> bool store(Value address, Value value) {
+        if (auto result = cpu_.store_as<W>(address, static_cast<UnsignedOf<W>>(value)); !result)
+            [[unlikely]] {
+            cpu_.take_exception(result.error());
+            return true;
+        }
+        return false;
+    }
     [[nodiscard]] static Result raised() {
         return {.flow = Flow::exception};
     }
@@ -284,8 +308,6 @@ class Executor {
     DirectBuilder direct() {
         return DirectBuilder{cpu_, s_, pc_};
     }
-    template <AccessWidth W, bool SignExtend> Result load();
-    template <AccessWidth W> Result store();
     Result load_left_right(bool left, AccessWidth width);
     Result store_left_right(bool left, AccessWidth width);
     Result load_linked(AccessWidth width);
@@ -302,32 +324,6 @@ class Executor {
 [[gnu::always_inline]] inline Result Executor::trap(bool condition) {
     if (condition) {
         return raise(ExceptionCode::trap);
-    }
-    return sequential();
-}
-
-template <AccessWidth W, bool SignExtend> [[gnu::always_inline]] inline Result Executor::load() {
-    auto value = cpu_.load_as<W>(address());
-    if (!value) {
-        return fail(value.error());
-    }
-    std::uint64_t result = *value;
-    if constexpr (SignExtend) {
-        if constexpr (W == AccessWidth::bits8) {
-            result = sign_extend_8(result);
-        } else if constexpr (W == AccessWidth::bits16) {
-            result = sign_extend_16(result);
-        } else if constexpr (W == AccessWidth::bits32) {
-            result = sign_extend_32(result);
-        }
-    }
-    cpu_.set_gpr(i_.rt(), result);
-    return sequential();
-}
-
-template <AccessWidth W> [[gnu::always_inline]] inline Result Executor::store() {
-    if (auto result = cpu_.store_as<W>(address(), static_cast<UnsignedOf<W>>(rt())); !result) {
-        return fail(result.error());
     }
     return sequential();
 }
@@ -417,8 +413,8 @@ template <AccessWidth W> [[gnu::always_inline]] inline Result Executor::store() 
 }
 
 [[gnu::always_inline]] inline Result Executor::load_linked(AccessWidth width) {
-    auto result = width == AccessWidth::bits32 ? load<AccessWidth::bits32, true>()
-                                               : load<AccessWidth::bits64, false>();
+    auto b = direct();
+    auto result = width == AccessWidth::bits32 ? operations::lw(b, i_) : operations::ld(b, i_);
     if (result.flow == Flow::exception) {
         return result;
     }
@@ -916,30 +912,48 @@ inline constexpr auto needs_64bit_operations = [] {
         return load_left_right(true, AccessWidth::bits64); // LDL
     case DecodedOpcode::ldr:
         return load_left_right(false, AccessWidth::bits64); // LDR
-    case DecodedOpcode::lb:
-        return load<AccessWidth::bits8, true>(); // LB
-    case DecodedOpcode::lh:
-        return load<AccessWidth::bits16, true>(); // LH
+    case DecodedOpcode::lb: {
+        auto b = direct();
+        return operations::lb(b, i_);
+    }
+    case DecodedOpcode::lh: {
+        auto b = direct();
+        return operations::lh(b, i_);
+    }
     case DecodedOpcode::lwl:
         return load_left_right(true, AccessWidth::bits32); // LWL
-    case DecodedOpcode::lw:
-        return load<AccessWidth::bits32, true>(); // LW
-    case DecodedOpcode::lbu:
-        return load<AccessWidth::bits8, false>(); // LBU
-    case DecodedOpcode::lhu:
-        return load<AccessWidth::bits16, false>(); // LHU
+    case DecodedOpcode::lw: {
+        auto b = direct();
+        return operations::lw(b, i_);
+    }
+    case DecodedOpcode::lbu: {
+        auto b = direct();
+        return operations::lbu(b, i_);
+    }
+    case DecodedOpcode::lhu: {
+        auto b = direct();
+        return operations::lhu(b, i_);
+    }
     case DecodedOpcode::lwr:
         return load_left_right(false, AccessWidth::bits32); // LWR
-    case DecodedOpcode::lwu:
-        return load<AccessWidth::bits32, false>(); // LWU
-    case DecodedOpcode::sb:
-        return store<AccessWidth::bits8>(); // SB
-    case DecodedOpcode::sh:
-        return store<AccessWidth::bits16>(); // SH
+    case DecodedOpcode::lwu: {
+        auto b = direct();
+        return operations::lwu(b, i_);
+    }
+    case DecodedOpcode::sb: {
+        auto b = direct();
+        return operations::sb(b, i_);
+    }
+    case DecodedOpcode::sh: {
+        auto b = direct();
+        return operations::sh(b, i_);
+    }
     case DecodedOpcode::swl:
         return store_left_right(true, AccessWidth::bits32); // SWL
-    case DecodedOpcode::sw:
-        return store<AccessWidth::bits32>(); // SW
+    case DecodedOpcode::sw: {
+        auto b = direct();
+        return operations::sw(b, i_);
+    }
     case DecodedOpcode::sdl:
         return store_left_right(true, AccessWidth::bits64); // SDL
     case DecodedOpcode::sdr:
@@ -964,14 +978,18 @@ inline constexpr auto needs_64bit_operations = [] {
         return sequential();
     case DecodedOpcode::lld:
         return load_linked(AccessWidth::bits64); // LLD
-    case DecodedOpcode::ld:
-        return load<AccessWidth::bits64, false>(); // LD
+    case DecodedOpcode::ld: {
+        auto b = direct();
+        return operations::ld(b, i_);
+    }
     case DecodedOpcode::sc:
         return store_conditional(AccessWidth::bits32); // SC
     case DecodedOpcode::scd:
         return store_conditional(AccessWidth::bits64); // SCD
-    case DecodedOpcode::sd:
-        return store<AccessWidth::bits64>(); // SD
+    case DecodedOpcode::sd: {
+        auto b = direct();
+        return operations::sd(b, i_);
+    }
     case DecodedOpcode::reserved:
         return reserved();
     }
