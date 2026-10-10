@@ -686,7 +686,9 @@ class Cpu final : public InterruptSink {
     // soon as it changes, so a hit needs no generation check.
     // Measured: translation and bus decode of fetches, loads, and stores were about 45% of
     // IP27 PROM run time (perf, 2026-09-26 and 2026-09-27); under IRIX, flushing on every
-    // exception entry and return left most accesses on the full path (2026-09-27).
+    // exception entry and return left most accesses on the full path (2026-09-27). 256
+    // entries since 2026-10-10: with tier 1, `boot` still filled 135 million pages through
+    // the full path at 64 (3-5% on every workload).
     static constexpr std::uint64_t page_offset_mask = 0xfff;
     struct HostPage {
         std::uint64_t page{~std::uint64_t{0}};
@@ -701,7 +703,7 @@ class Cpu final : public InterruptSink {
         // with one comparison.
         std::uint64_t store_page{~std::uint64_t{0}};
     };
-    static constexpr std::size_t host_page_count = 64;
+    static constexpr std::size_t host_page_count = 256;
     [[nodiscard]] bool host_pages_current() const {
         return host_pages_translation_generation_ == translation_generation_ &&
                host_pages_bus_generation_ == bus_.generation();
