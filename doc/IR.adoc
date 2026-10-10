@@ -211,10 +211,11 @@ Implemented as `BlockInterpreter` (`block_interpreter.hpp`, stage E). It builds 
 pc on every entry (no cache until stage F), and records why it left each block
 (`BlockExit`): completed, run limit, pending exception, exception, host path, left block
 (pc is not the next operation's), code changed. A barrier includes the first access to a page
-the host page cache has not seen, which goes through the bus. Since stage G it is the
-machine's default engine (`Ip27Machine::set_execution_engine`; `--engine reference` selects
-the reference interpreter, which stays permanently); tracing and PC probes always use the
-reference interpreter.
+the host page cache has not seen, which goes through the bus. From stage G until tier 1
+passed it (JIT.adoc, 2026-10-10) it was the machine's default engine
+(`Ip27Machine::set_execution_engine`); it remains the default where the host has no tier-1
+backend, and tier 1's warm-up tier. `--engine reference` selects the reference interpreter,
+which stays permanently; tracing and PC probes always use the reference interpreter.
 
 Statistics (`BlockStatistics`, printed by `--engine-statistics`, collected per workload by
 `scripts/bench.py --engine tier0 --statistics DIR`) are counted per block entry, not per

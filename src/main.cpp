@@ -87,9 +87,10 @@ void usage() {
         "ends a run early; the snapshot, flash, NVRAM, and disk are still written.\n"
         "--date YYYY-MM-DD[THH:MM:SS] sets the time-of-day clock at power-on (UTC; default\n"
         "2026-01-01): virtual time runs it from there.\n"
-        "--engine reference|tier0|tier1 selects the execution engine (default tier0, decoded\n"
-        "blocks; tier1, native code for them, doc/JIT.adoc; reference is the interpreter every\n"
-        "engine is tested against, doc/IR.adoc).\n"
+        "--engine reference|tier0|tier1 selects the execution engine (default tier1, native\n"
+        "code for decoded blocks, doc/JIT.adoc, or tier0 where the host has no tier-1\n"
+        "backend; tier0, decoded blocks; reference, the interpreter every engine is tested\n"
+        "against, doc/IR.adoc).\n"
         "--trace cpu and --probe always use the reference. --engine-statistics prints tier\n"
         "0's block statistics at the end of the run. --tier0-cache-entries N sizes its\n"
         "block cache (a power of two; default 4096). --tier1-threshold N translates a block\n"
@@ -227,7 +228,8 @@ struct Options {
     std::optional<std::int64_t> date;
     bool stop_at_prompt{};
     bool interactive{};
-    mips::ExecutionEngine engine{mips::ExecutionEngine::tier0};
+    // Unset: the machine's default (tier 1 where the host has a backend, else tier 0).
+    std::optional<mips::ExecutionEngine> engine;
     bool engine_statistics{};
     std::uint64_t block_cache_entries{mips::BlockInterpreter::default_cache_entries};
     std::uint64_t native_threshold{mips::BlockInterpreter::default_native_threshold};
@@ -432,7 +434,7 @@ int main(int argc, char** argv) {
     }
 
     ip27::Ip27Machine machine{config, *prom};
-    if (!machine.set_execution_engine(options->engine)) {
+    if (options->engine && !machine.set_execution_engine(*options->engine)) {
         std::fprintf(stderr, "configuration error: tier 1 is not available on this host\n");
         return exit_usage;
     }

@@ -161,6 +161,9 @@ class Ip27Machine {
         engine_ = engine;
         return true;
     }
+    [[nodiscard]] mips::ExecutionEngine execution_engine() const {
+        return engine_;
+    }
     [[nodiscard]] const mips::BlockStatistics& block_statistics() const {
         return block_interpreter_.statistics();
     }

@@ -199,9 +199,9 @@ scripts/bench.py run --statistics local/bench/tier0-stats \
     --compare local/bench/step2.json --compare local/bench/stageB.json
 ----
 
-Workloads run on the default engine, tier 0 (IR.adoc); `--engine reference` runs the reference
-interpreter and `--engine tier1` native code (JIT.adoc, with `--tier1-threshold N`), and the
-digests of all must be equal. `--statistics DIR` keeps each engine's statistics lines. `--compare` repeats: speedups are reported against each saved result, and a
+Workloads run on the default engine, tier 1 (JIT.adoc, with `--tier1-threshold N`);
+`--engine tier0` runs decoded blocks (IR.adoc) and `--engine reference` the reference
+interpreter, and the digests of all must be equal. `--statistics DIR` keeps each engine's statistics lines. `--compare` repeats: speedups are reported against each saved result, and a
 digest that differs from any of them fails the run. Keep the pre-stage-B reference results
 (`local/bench/step2.json`) as the performance baseline.
 

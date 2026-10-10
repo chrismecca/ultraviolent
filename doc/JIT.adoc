@@ -462,6 +462,9 @@ J5 and J6 are optional for this personality.
   runs 93-100% of operations; translations total 1 MB (`prom`) to 207 MB (`boot`, three
   discards of the 64 MB region).
 
+* **Default engine (2026-10-10).** Tier 1 is the machine's default where the host has a
+  backend (`Ip27Machine` falls back to tier 0 elsewhere); `scripts/bench.py` defaults to it.
+
 == Toward host-parallel vCPUs (not built)
 
 The next machine goal after one CPU at its nominal clock is ADR-021's four CPUs, each at the

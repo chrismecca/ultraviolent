@@ -209,6 +209,10 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     : config_{config}, memory_{config.memory_bytes}, flash_{flash_size},
       directory_{tracer_, checked_bank_sizes(config), config.directory},
       cpu_{bus_, tracer_, mips::r10000(cpu_config(config, prom))} {
+    // The default engine: tier 1 where this host has a backend, tier 0 elsewhere (JIT.adoc).
+    if (!set_execution_engine(mips::ExecutionEngine::tier1)) {
+        set_execution_engine(mips::ExecutionEngine::tier0);
+    }
     hub_.connect_cpu(0, cpu_);
     invariant(validate(config, prom).has_value(),
               "Ip27Machine built from an invalid configuration");

@@ -278,7 +278,7 @@ def main():
     common.add_argument("--binary", default="build/pgo/ultraviolent")
     common.add_argument("--prom", default=os.path.join(FIRMWARE, "ip27prom.img"))
     common.add_argument("--io6prom", default=os.path.join(FIRMWARE, "io6prom.img"))
-    common.add_argument("--engine", default="tier0", choices=["reference", "tier0", "tier1"])
+    common.add_argument("--engine", default="tier1", choices=["reference", "tier0", "tier1"])
     common.add_argument("--cache-entries", type=int, help="tier 0's block cache size")
     common.add_argument("--tier1-threshold", type=int,
                         help="cache hits before tier 1 translates a block")
