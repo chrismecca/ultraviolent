@@ -17,8 +17,8 @@ std::optional<NoBlock> build_block(Cpu& cpu, std::uint64_t pc, Block& block,
 
     constexpr std::uint64_t page_size = 0x1000;
     const auto at = [&](std::uint64_t offset) {
-        return decode(
-            ultraviolent::detail::load_word<std::uint32_t>(page->bytes + offset, page->order));
+        return decode(cpu.model(), ultraviolent::detail::load_word<std::uint32_t>(
+                                       page->bytes + offset, page->order));
     };
     auto& operations = block.operations;
     for (std::uint64_t offset = pc & (page_size - 1);; offset += 4) {

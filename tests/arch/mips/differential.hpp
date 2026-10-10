@@ -36,7 +36,7 @@ class PredecodedEngine {
     explicit PredecodedEngine(Cpu& cpu) : cpu_{cpu}, fallback_{cpu} {}
 
     void add(std::uint64_t virtual_address, std::uint32_t word) {
-        decoded_.insert_or_assign(virtual_address, decode(word));
+        decoded_.insert_or_assign(virtual_address, decode(cpu_.model(), word));
     }
 
     void step() {

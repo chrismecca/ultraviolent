@@ -2,6 +2,7 @@
 
 #include <ultraviolent/arch/mips/cache_arrays.hpp>
 #include <ultraviolent/arch/mips/cp0.hpp>
+#include <ultraviolent/arch/mips/processor_model.hpp>
 #include <ultraviolent/arch/mips/tlb.hpp>
 #include <ultraviolent/core/address.hpp>
 #include <ultraviolent/core/address_space.hpp>
@@ -19,17 +20,6 @@
 #include <span>
 
 namespace ultraviolent::mips {
-
-// Reset-time identity of the processor, supplied by the machine.
-struct CpuConfig {
-    // PRId: implementation number 0x09 in bits 15:8, revision in bits 7:0 (UM 14.13).
-    std::uint32_t processor_id{0x0900};
-    // Config register as latched from the reset mode bits (UM 14.14). Bit 15 (BE) must match
-    // the byte order of the system bus.
-    std::uint32_t config{config_big_endian};
-    // FPU Implementation and Revision register, CP1 control register 0 (UM 15.4).
-    std::uint32_t fpu_id{0x0900};
-};
 
 enum class OperatingMode : std::uint8_t {
     kernel,
@@ -136,7 +126,7 @@ class Cpu final : public InterruptSink {
     // External interrupt inputs 0-4 set Cause.IP[2]-IP[6].
     static constexpr std::uint32_t external_interrupt_count = 5;
 
-    Cpu(AddressSpace& bus, Tracer& tracer, const CpuConfig& config);
+    Cpu(AddressSpace& bus, Tracer& tracer, const ProcessorModel& model);
     Cpu(const Cpu&) = delete;
     Cpu& operator=(const Cpu&) = delete;
 
@@ -159,7 +149,11 @@ class Cpu final : public InterruptSink {
         return fpu_;
     }
     [[nodiscard]] std::uint32_t fpu_id() const {
-        return config_.fpu_id;
+        return model_.identity().fpu_id;
+    }
+    // The processor personality (ADR-022).
+    [[nodiscard]] const ProcessorModel& model() const {
+        return model_;
     }
     // Status.FR: 32 64-bit floating-point registers.
     [[nodiscard]] bool fpu_64bit_registers() const {
@@ -407,7 +401,7 @@ class Cpu final : public InterruptSink {
         // which next happens at timer_cycle_.
         if (cycles_ == timer_cycle_) [[unlikely]] {
             timer_interrupt_ = true;
-            timer_cycle_ += timer_period;
+            timer_cycle_ += timer_period();
             update_derived_state();
         }
     }
@@ -471,7 +465,7 @@ class Cpu final : public InterruptSink {
 
   private:
     [[nodiscard]] std::uint32_t count() const {
-        return static_cast<std::uint32_t>(cycles_ >> 1) + cp0_.count_offset;
+        return static_cast<std::uint32_t>(cycles_ >> model_.count_shift()) + cp0_.count_offset;
     }
     // Cycles in which an instruction graduated.
     [[nodiscard]] std::uint64_t retired() const {
@@ -485,7 +479,10 @@ class Cpu final : public InterruptSink {
         random_base_ = retired();
     }
     // Count equals Compare every 2^32 Count increments, 2^33 cycles.
-    static constexpr std::uint64_t timer_period = std::uint64_t{1} << 33;
+    // Cycles between two equal values of Count: 2^32 counts.
+    [[nodiscard]] std::uint64_t timer_period() const {
+        return std::uint64_t{1} << (32 + model_.count_shift());
+    }
     // Finds timer_cycle_ after Count, Compare, or the cycle count changed.
     void schedule_timer();
     // Whether an interrupt or delayed watch exception would be taken at the next boundary.
@@ -584,12 +581,12 @@ class Cpu final : public InterruptSink {
 
     AddressSpace& bus_;
     Tracer& tracer_;
-    CpuConfig config_;
+    ProcessorModel model_;
     IntegerState state_;
     FpuState fpu_;
     Cp0Registers cp0_;
     Tlb tlb_;
-    CacheArrays caches_{config_.config};
+    CacheArrays caches_{model_.identity().config};
     std::uint64_t cycles_{};
     // Latched external interrupt requests, Cause.IP[6:2].
     std::uint32_t external_interrupts_{};

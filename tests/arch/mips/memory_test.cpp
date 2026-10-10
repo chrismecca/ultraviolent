@@ -283,7 +283,7 @@ const test::Registration request_kinds{
                 bus.map_mmio({PhysicalAddress{0}, std::uint64_t{1} << 60}, recorder).has_value())) {
             return;
         }
-        Cpu cpu{bus, tracer, CpuConfig{}};
+        Cpu cpu{bus, tracer, r10000()};
         cpu.mtc0(cp0::status, status::kx);
         cpu.mtc0(cp0::config, config_big_endian | 3); // kseg0 cacheable noncoherent
         for (const std::uint64_t address :

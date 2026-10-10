@@ -39,7 +39,7 @@ struct System {
     static constexpr std::uint64_t code = 0x1000;
     static constexpr std::uint64_t data = 0x8000;
 
-    explicit System(const CpuConfig& config = {}) : cpu{bus, tracer, config} {
+    explicit System(const CpuConfig& config = {}) : cpu{bus, tracer, r10000(config)} {
         const std::uint64_t windows[] = {
             0,
             system_address::uncached_window(0),

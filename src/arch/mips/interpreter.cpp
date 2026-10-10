@@ -23,7 +23,7 @@ namespace {
         cpu.end_cycle(false);
         return;
     }
-    complete_cycle<&execute_inline>(cpu, decode(*word));
+    complete_cycle<&execute_inline>(cpu, decode(cpu.model(), *word));
 }
 
 } // namespace

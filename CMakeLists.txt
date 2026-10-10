@@ -41,6 +41,7 @@ add_library(ultraviolent_mips
     src/arch/mips/cpu.cpp
     src/arch/mips/fpu.cpp
     src/arch/mips/interpreter.cpp
+    src/arch/mips/processor_model.cpp
     src/arch/mips/semantics.cpp
     src/arch/mips/tlb.cpp
 )
@@ -148,6 +149,7 @@ if(BUILD_TESTING)
         tests/arch/mips/differential_test.cpp
         tests/arch/mips/integer_test.cpp
         tests/arch/mips/memory_test.cpp
+        tests/arch/mips/processor_model_test.cpp
         tests/arch/mips/host_page_test.cpp
         tests/arch/mips/exception_test.cpp
         tests/arch/mips/fpu_test.cpp

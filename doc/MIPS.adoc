@@ -31,6 +31,9 @@ Interpreter    reference execution engine: fetch, decode, execute, per-cycle acc
                keeps no state
 execute_fpu    COP1/COP1X semantics, called by execute (the FPU stays opaque to decode)
 Tlb            64-entry joint TLB
+ProcessorModel the processor personality (ADR-022): identity (PRId, Config, FPU ID), features,
+               the decode table derived from the MIPS IV encodings, the Count rate;
+               r10000() is the one implementation (processor_model.hpp)
 ----
 
 Engines read and write `Cpu::state()` (GPRs, HI, LO, PC, delay-slot state, LL bit) and

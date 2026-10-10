@@ -304,12 +304,8 @@ template <AccessWidth W> [[gnu::always_inline]] inline Result Executor::store() 
 // Instruction Exception"). Checked before anything else the operation does. A table, not a
 // switch: measured, the switch compiled to a second indirect jump per instruction.
 inline constexpr auto needs_64bit_operations = [] {
-    using enum DecodedOpcode;
-    std::array<bool, std::to_underlying(reserved) + 1> table{};
-    for (const DecodedOpcode op :
-         {dsllv, dsrlv, dsrav, dmult, dmultu, ddiv,   ddivu,  dadd,  daddu,  dsub,
-          dsubu, dsll,  dsrl,  dsra,  dsll32, dsrl32, dsra32, daddi, daddiu, ldl,
-          ldr,   lwu,   sdl,   sdr,   lld,    ld,     scd,    sd}) {
+    std::array<bool, std::to_underlying(DecodedOpcode::reserved) + 1> table{};
+    for (const DecodedOpcode op : mips3_operations) {
         table[std::to_underlying(op)] = true;
     }
     return table;

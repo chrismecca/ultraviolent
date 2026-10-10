@@ -208,7 +208,7 @@ unsigned node_slot_id(unsigned slot) {
 Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> prom)
     : config_{config}, memory_{config.memory_bytes}, flash_{flash_size},
       directory_{tracer_, checked_bank_sizes(config), config.directory},
-      cpu_{bus_, tracer_, cpu_config(config, prom)} {
+      cpu_{bus_, tracer_, mips::r10000(cpu_config(config, prom))} {
     hub_.connect_cpu(0, cpu_);
     invariant(validate(config, prom).has_value(),
               "Ip27Machine built from an invalid configuration");

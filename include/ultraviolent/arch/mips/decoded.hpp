@@ -166,10 +166,11 @@ static_assert(std::is_trivially_copyable_v<DecodedInstruction>);
 
 namespace detail {
 
-// Operations by index (decode): primary opcode 0-63 (0, 1, and 16 are decoded further),
-// SPECIAL function 64-127, REGIMM rt 128-159, COP0 rs below 16 160-175, COP0 function (rs 16
-// and up) 176-239. Encodings not listed are reserved.
-inline constexpr std::array<DecodedOpcode, 240> operations = {
+// The MIPS IV encodings, by decode's index: primary opcode 0-63 (0, 1, and 16 are decoded
+// further), SPECIAL function 64-127, REGIMM rt 128-159, COP0 rs below 16 160-175, COP0
+// function (rs 16 and up) 176-239. Encodings not listed are reserved. A processor model
+// derives its own table from this one (ProcessorModel::operations).
+inline constexpr std::array<DecodedOpcode, decode_table_size> mips_iv_operations = {
     DecodedOpcode::reserved,      // opcode 0
     DecodedOpcode::reserved,      // opcode 1
     DecodedOpcode::j,             // opcode 2
@@ -414,7 +415,9 @@ inline constexpr std::array<DecodedOpcode, 240> operations = {
 
 } // namespace detail
 
-inline DecodedInstruction decode(std::uint32_t word) {
+// Which operation `word` is on `model`: a processor fact (ADR-022), so engines translate
+// decoded operations and never test the model.
+inline DecodedInstruction decode(const ProcessorModel& model, std::uint32_t word) {
     // One table index, selected without branches: measured, branching on the opcode class
     // here added a second data-dependent branch per instruction to execute's dispatch.
     const Instruction i{word};
@@ -424,8 +427,26 @@ inline DecodedInstruction decode(std::uint32_t word) {
     index = op == 1 ? 128 + i.rt() : index;
     const unsigned cop0 = i.rs() < 16 ? 160 + i.rs() : 176 + i.funct();
     index = op == 16 ? cop0 : index;
-    return {.opcode = detail::operations[index], .instruction = i};
+    return {.opcode = model.operations()[index], .instruction = i};
 }
+
+// Operations by the ISA level that introduced them, beyond MIPS II: the 64-bit operations of
+// MIPS III, and the MIPS IV additions decode distinguishes (the FPU's are inside cop1 and
+// cop1x). A processor model without a level decodes these as reserved; the semantics gate
+// MIPS III operations on Status at run time (semantics.hpp).
+inline constexpr DecodedOpcode mips3_operations[] = {
+    DecodedOpcode::dsllv,  DecodedOpcode::dsrlv,  DecodedOpcode::dsrav,  DecodedOpcode::dmult,
+    DecodedOpcode::dmultu, DecodedOpcode::ddiv,   DecodedOpcode::ddivu,  DecodedOpcode::dadd,
+    DecodedOpcode::daddu,  DecodedOpcode::dsub,   DecodedOpcode::dsubu,  DecodedOpcode::dsll,
+    DecodedOpcode::dsrl,   DecodedOpcode::dsra,   DecodedOpcode::dsll32, DecodedOpcode::dsrl32,
+    DecodedOpcode::dsra32, DecodedOpcode::daddi,  DecodedOpcode::daddiu, DecodedOpcode::ldl,
+    DecodedOpcode::ldr,    DecodedOpcode::lwu,    DecodedOpcode::sdl,    DecodedOpcode::sdr,
+    DecodedOpcode::lld,    DecodedOpcode::ld,     DecodedOpcode::scd,    DecodedOpcode::sd,
+};
+inline constexpr DecodedOpcode mips4_operations[] = {
+    DecodedOpcode::movci, DecodedOpcode::movz, DecodedOpcode::movn, DecodedOpcode::pref,
+    DecodedOpcode::cop1x,
+};
 
 // What block construction needs to know about an operation (IR.adoc "Blocks"): metadata by
 // opcode, so DecodedInstruction stays dense.

@@ -63,9 +63,10 @@ constexpr bool is_tlb_exception(ExceptionCode code) {
 
 } // namespace
 
-Cpu::Cpu(AddressSpace& bus, Tracer& tracer, const CpuConfig& config)
-    : bus_{bus}, tracer_{tracer}, config_{config} {
-    invariant(((config.config & config_big_endian) != 0) == (bus.byte_order() == ByteOrder::big),
+Cpu::Cpu(AddressSpace& bus, Tracer& tracer, const ProcessorModel& model)
+    : bus_{bus}, tracer_{tracer}, model_{model} {
+    invariant(((model.identity().config & config_big_endian) != 0) ==
+                  (bus.byte_order() == ByteOrder::big),
               "Config.BE must match the system bus byte order");
     reset(ResetKind::power_on);
 }
@@ -92,9 +93,9 @@ void Cpu::reset(ResetKind kind) {
     tlb_.clear();
     cp0_.error_epc = pc;
     cp0_.status = status::erl | status::bev;
-    cp0_.config = config_.config;
+    cp0_.config = model_.identity().config;
     set_random(static_cast<std::uint32_t>(Tlb::entry_count - 1));
-    cp0_.count_offset = static_cast<std::uint32_t>(0 - (cycles_ >> 1));
+    cp0_.count_offset = static_cast<std::uint32_t>(0 - (cycles_ >> model_.count_shift()));
     external_interrupts_ = 0;
     timer_interrupt_ = false;
     watch_pending_ = false;
@@ -143,12 +144,13 @@ std::uint32_t Cpu::random() const {
 }
 
 void Cpu::schedule_timer() {
-    // The next even cycle after this one at which (cycle / 2 + count_offset) mod 2^32, Count,
-    // equals Compare.
-    const std::uint64_t match = 2 * std::uint64_t{cp0_.compare - cp0_.count_offset};
-    timer_cycle_ = (cycles_ & ~(timer_period - 1)) + match;
+    // The next cycle after this one, at a Count step, at which
+    // (cycle >> count_shift) + count_offset mod 2^32, Count, equals Compare.
+    const std::uint64_t match = std::uint64_t{cp0_.compare - cp0_.count_offset}
+                                << model_.count_shift();
+    timer_cycle_ = (cycles_ & ~(timer_period() - 1)) + match;
     if (timer_cycle_ <= cycles_) {
-        timer_cycle_ += timer_period;
+        timer_cycle_ += timer_period();
     }
 }
 
@@ -574,7 +576,7 @@ std::uint64_t Cpu::read_cp0(unsigned reg) const {
     case cp0::epc:
         return cp0_.epc;
     case cp0::prid:
-        return config_.processor_id;
+        return model_.identity().processor_id;
     case cp0::config:
         return cp0_.config;
     case cp0::ll_addr:
@@ -630,7 +632,7 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
         set_random(static_cast<std::uint32_t>(Tlb::entry_count - 1));
         return;
     case cp0::count:
-        cp0_.count_offset = low - static_cast<std::uint32_t>(cycles_ >> 1);
+        cp0_.count_offset = low - static_cast<std::uint32_t>(cycles_ >> model_.count_shift());
         schedule_timer();
         tracer_.log(TraceCategory::irq, "count = {:#x}", low);
         return;
