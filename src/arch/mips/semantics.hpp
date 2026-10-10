@@ -150,8 +150,20 @@ class DirectBuilder {
     static Value shift_right_arithmetic(Value v, unsigned n) {
         return static_cast<std::uint64_t>(as_signed(v) >> n);
     }
+    static Value shift_left_by(Value v, Value n) {
+        return v << n;
+    }
+    static Value shift_right_logical_by(Value v, Value n) {
+        return v >> n;
+    }
+    static Value shift_right_arithmetic_by(Value v, Value n) {
+        return static_cast<std::uint64_t>(as_signed(v) >> n);
+    }
     static Value sign_extend_32(Value v) {
         return semantics::sign_extend_32(v);
+    }
+    static Value zero_extend_32(Value v) {
+        return v & 0xffff'ffff;
     }
 
     static Condition equal(Value a, Value b) {
@@ -163,13 +175,38 @@ class DirectBuilder {
     static Condition less_signed(Value a, Value b) {
         return as_signed(a) < as_signed(b);
     }
+    static Condition less_equal_signed(Value a, Value b) {
+        return as_signed(a) <= as_signed(b);
+    }
+    static Condition greater_signed(Value a, Value b) {
+        return as_signed(a) > as_signed(b);
+    }
+    static Condition greater_equal_signed(Value a, Value b) {
+        return as_signed(a) >= as_signed(b);
+    }
     static Condition less_unsigned(Value a, Value b) {
         return a < b;
+    }
+    static Value from_condition(Condition c) {
+        return c ? 1 : 0;
     }
     static Condition add_overflows_32(Value a, Value b) {
         const std::int64_t sum = std::int64_t{static_cast<std::int32_t>(a)} +
                                  std::int64_t{static_cast<std::int32_t>(b)};
         return sum != static_cast<std::int32_t>(sum);
+    }
+    static Condition sub_overflows_32(Value a, Value b) {
+        const std::int64_t difference = std::int64_t{static_cast<std::int32_t>(a)} -
+                                        std::int64_t{static_cast<std::int32_t>(b)};
+        return difference != static_cast<std::int32_t>(difference);
+    }
+    static Condition add_overflows_64(Value a, Value b) {
+        const std::uint64_t sum = a + b;
+        return (((a ^ sum) & (b ^ sum)) >> 63) != 0;
+    }
+    static Condition sub_overflows_64(Value a, Value b) {
+        const std::uint64_t difference = a - b;
+        return (((a ^ b) & (a ^ difference)) >> 63) != 0;
     }
 
     bool raise_if(Condition c, ExceptionCode code) {
@@ -247,7 +284,6 @@ class Executor {
     DirectBuilder direct() {
         return DirectBuilder{cpu_, s_, pc_};
     }
-    Result branch(bool condition, bool likely = false);
     template <AccessWidth W, bool SignExtend> Result load();
     template <AccessWidth W> Result store();
     Result load_left_right(bool left, AccessWidth width);
@@ -262,11 +298,6 @@ class Executor {
     Instruction i_;
     std::uint64_t pc_;
 };
-
-[[gnu::always_inline]] inline Result Executor::branch(bool condition, bool likely) {
-    return Control{likely ? Flow::branch_likely : Flow::branch, condition,
-                   pc_ + 4 + (i_.signed_immediate() << 2)};
-}
 
 [[gnu::always_inline]] inline Result Executor::trap(bool condition) {
     if (condition) {
@@ -447,29 +478,33 @@ inline constexpr auto needs_64bit_operations = [] {
             cpu_.set_gpr(i_.rd(), rs());
         }
         return sequential();
-    case DecodedOpcode::srl: // SRL
-        cpu_.set_gpr(i_.rd(), sign_extend_32(rt32() >> i_.sa()));
-        return sequential();
-    case DecodedOpcode::sra: // SRA
-        cpu_.set_gpr(i_.rd(), sign_extend_32(static_cast<std::uint32_t>(
-                                  static_cast<std::int32_t>(rt32()) >> i_.sa())));
-        return sequential();
-    case DecodedOpcode::sllv: // SLLV
-        cpu_.set_gpr(i_.rd(), sign_extend_32(rt32() << (rs32() & 31)));
-        return sequential();
-    case DecodedOpcode::srlv: // SRLV
-        cpu_.set_gpr(i_.rd(), sign_extend_32(rt32() >> (rs32() & 31)));
-        return sequential();
-    case DecodedOpcode::srav: // SRAV
-        cpu_.set_gpr(i_.rd(), sign_extend_32(static_cast<std::uint32_t>(
-                                  static_cast<std::int32_t>(rt32()) >> (rs32() & 31))));
-        return sequential();
-    case DecodedOpcode::jr: // JR
-        return Control{Flow::branch, true, rs()};
-    case DecodedOpcode::jalr: { // JALR
-        const std::uint64_t target = rs();
-        cpu_.set_gpr(i_.rd(), pc_ + 8);
-        return Control{Flow::branch, true, target};
+    case DecodedOpcode::srl: {
+        auto b = direct();
+        return operations::srl(b, i_);
+    }
+    case DecodedOpcode::sra: {
+        auto b = direct();
+        return operations::sra(b, i_);
+    }
+    case DecodedOpcode::sllv: {
+        auto b = direct();
+        return operations::sllv(b, i_);
+    }
+    case DecodedOpcode::srlv: {
+        auto b = direct();
+        return operations::srlv(b, i_);
+    }
+    case DecodedOpcode::srav: {
+        auto b = direct();
+        return operations::srav(b, i_);
+    }
+    case DecodedOpcode::jr: {
+        auto b = direct();
+        return operations::jr(b, i_);
+    }
+    case DecodedOpcode::jalr: {
+        auto b = direct();
+        return operations::jalr(b, i_);
     }
     case DecodedOpcode::movz: // MOVZ (MIPS IV)
     case DecodedOpcode::movn: // MOVN (MIPS IV)
@@ -486,27 +521,34 @@ inline constexpr auto needs_64bit_operations = [] {
         return raise(ExceptionCode::breakpoint);
     case DecodedOpcode::sync: // SYNC: references are already performed in program order.
         return sequential();
-    case DecodedOpcode::mfhi: // MFHI
-        cpu_.set_gpr(i_.rd(), s_.hi);
-        return sequential();
-    case DecodedOpcode::mthi: // MTHI
-        s_.hi = rs();
-        return sequential();
-    case DecodedOpcode::mflo: // MFLO
-        cpu_.set_gpr(i_.rd(), s_.lo);
-        return sequential();
-    case DecodedOpcode::mtlo: // MTLO
-        s_.lo = rs();
-        return sequential();
-    case DecodedOpcode::dsllv: // DSLLV
-        cpu_.set_gpr(i_.rd(), rt() << (rs() & 63));
-        return sequential();
-    case DecodedOpcode::dsrlv: // DSRLV
-        cpu_.set_gpr(i_.rd(), rt() >> (rs() & 63));
-        return sequential();
-    case DecodedOpcode::dsrav: // DSRAV
-        cpu_.set_gpr(i_.rd(), static_cast<std::uint64_t>(as_signed(rt()) >> (rs() & 63)));
-        return sequential();
+    case DecodedOpcode::mfhi: {
+        auto b = direct();
+        return operations::mfhi(b, i_);
+    }
+    case DecodedOpcode::mthi: {
+        auto b = direct();
+        return operations::mthi(b, i_);
+    }
+    case DecodedOpcode::mflo: {
+        auto b = direct();
+        return operations::mflo(b, i_);
+    }
+    case DecodedOpcode::mtlo: {
+        auto b = direct();
+        return operations::mtlo(b, i_);
+    }
+    case DecodedOpcode::dsllv: {
+        auto b = direct();
+        return operations::dsllv(b, i_);
+    }
+    case DecodedOpcode::dsrlv: {
+        auto b = direct();
+        return operations::dsrlv(b, i_);
+    }
+    case DecodedOpcode::dsrav: {
+        auto b = direct();
+        return operations::dsrav(b, i_);
+    }
     case DecodedOpcode::mult: { // MULT
         const std::int64_t product =
             std::int64_t{static_cast<std::int32_t>(rs32())} * static_cast<std::int32_t>(rt32());
@@ -578,71 +620,62 @@ inline constexpr auto needs_64bit_operations = [] {
         s_.lo = rs() / rt();
         s_.hi = rs() % rt();
         return sequential();
-    case DecodedOpcode::add: { // ADD
-        const std::int64_t sum =
-            std::int64_t{static_cast<std::int32_t>(rs32())} + static_cast<std::int32_t>(rt32());
-        if (sum != static_cast<std::int32_t>(sum)) {
-            return raise(ExceptionCode::overflow);
-        }
-        cpu_.set_gpr(i_.rd(), static_cast<std::uint64_t>(sum));
-        return sequential();
+    case DecodedOpcode::add: {
+        auto b = direct();
+        return operations::add(b, i_);
     }
     case DecodedOpcode::addu: {
         auto b = direct();
         return operations::addu(b, i_);
     }
-    case DecodedOpcode::sub: { // SUB
-        const std::int64_t difference =
-            std::int64_t{static_cast<std::int32_t>(rs32())} - static_cast<std::int32_t>(rt32());
-        if (difference != static_cast<std::int32_t>(difference)) {
-            return raise(ExceptionCode::overflow);
-        }
-        cpu_.set_gpr(i_.rd(), static_cast<std::uint64_t>(difference));
-        return sequential();
+    case DecodedOpcode::sub: {
+        auto b = direct();
+        return operations::sub(b, i_);
     }
-    case DecodedOpcode::subu: // SUBU
-        cpu_.set_gpr(i_.rd(), sign_extend_32(rs32() - rt32()));
-        return sequential();
-    case DecodedOpcode::and_:
-        cpu_.set_gpr(i_.rd(), rs() & rt());
-        return sequential();
-    case DecodedOpcode::or_:
-        cpu_.set_gpr(i_.rd(), rs() | rt());
-        return sequential();
-    case DecodedOpcode::xor_:
-        cpu_.set_gpr(i_.rd(), rs() ^ rt());
-        return sequential();
-    case DecodedOpcode::nor:
-        cpu_.set_gpr(i_.rd(), ~(rs() | rt()));
-        return sequential();
-    case DecodedOpcode::slt: // SLT
-        cpu_.set_gpr(i_.rd(), as_signed(rs()) < as_signed(rt()) ? 1 : 0);
-        return sequential();
-    case DecodedOpcode::sltu: // SLTU
-        cpu_.set_gpr(i_.rd(), rs() < rt() ? 1 : 0);
-        return sequential();
-    case DecodedOpcode::dadd: { // DADD
-        const std::uint64_t sum = rs() + rt();
-        if ((((rs() ^ sum) & (rt() ^ sum)) >> 63) != 0) {
-            return raise(ExceptionCode::overflow);
-        }
-        cpu_.set_gpr(i_.rd(), sum);
-        return sequential();
+    case DecodedOpcode::subu: {
+        auto b = direct();
+        return operations::subu(b, i_);
     }
-    case DecodedOpcode::daddu: // DADDU
-        cpu_.set_gpr(i_.rd(), rs() + rt());
-        return sequential();
-    case DecodedOpcode::dsub: { // DSUB
-        const std::uint64_t difference = rs() - rt();
-        if ((((rs() ^ rt()) & (rs() ^ difference)) >> 63) != 0) {
-            return raise(ExceptionCode::overflow);
-        }
-        cpu_.set_gpr(i_.rd(), difference);
-        return sequential();
+    case DecodedOpcode::and_: {
+        auto b = direct();
+        return operations::and_(b, i_);
     }
-    case DecodedOpcode::dsubu: // DSUBU
-        cpu_.set_gpr(i_.rd(), rs() - rt());
-        return sequential();
+    case DecodedOpcode::or_: {
+        auto b = direct();
+        return operations::or_(b, i_);
+    }
+    case DecodedOpcode::xor_: {
+        auto b = direct();
+        return operations::xor_(b, i_);
+    }
+    case DecodedOpcode::nor: {
+        auto b = direct();
+        return operations::nor(b, i_);
+    }
+    case DecodedOpcode::slt: {
+        auto b = direct();
+        return operations::slt(b, i_);
+    }
+    case DecodedOpcode::sltu: {
+        auto b = direct();
+        return operations::sltu(b, i_);
+    }
+    case DecodedOpcode::dadd: {
+        auto b = direct();
+        return operations::dadd(b, i_);
+    }
+    case DecodedOpcode::daddu: {
+        auto b = direct();
+        return operations::daddu(b, i_);
+    }
+    case DecodedOpcode::dsub: {
+        auto b = direct();
+        return operations::dsub(b, i_);
+    }
+    case DecodedOpcode::dsubu: {
+        auto b = direct();
+        return operations::dsubu(b, i_);
+    }
     case DecodedOpcode::tge:
         return trap(as_signed(rs()) >= as_signed(rt())); // TGE
     case DecodedOpcode::tgeu:
@@ -655,32 +688,46 @@ inline constexpr auto needs_64bit_operations = [] {
         return trap(rs() == rt()); // TEQ
     case DecodedOpcode::tne:
         return trap(rs() != rt()); // TNE
-    case DecodedOpcode::dsll:      // DSLL
-        cpu_.set_gpr(i_.rd(), rt() << i_.sa());
-        return sequential();
-    case DecodedOpcode::dsrl: // DSRL
-        cpu_.set_gpr(i_.rd(), rt() >> i_.sa());
-        return sequential();
-    case DecodedOpcode::dsra: // DSRA
-        cpu_.set_gpr(i_.rd(), static_cast<std::uint64_t>(as_signed(rt()) >> i_.sa()));
-        return sequential();
-    case DecodedOpcode::dsll32: // DSLL32
-        cpu_.set_gpr(i_.rd(), rt() << (i_.sa() + 32));
-        return sequential();
-    case DecodedOpcode::dsrl32: // DSRL32
-        cpu_.set_gpr(i_.rd(), rt() >> (i_.sa() + 32));
-        return sequential();
-    case DecodedOpcode::dsra32: // DSRA32
-        cpu_.set_gpr(i_.rd(), static_cast<std::uint64_t>(as_signed(rt()) >> (i_.sa() + 32)));
-        return sequential();
-    case DecodedOpcode::bltz:
-        return branch(rs_signed() < 0); // BLTZ
-    case DecodedOpcode::bgez:
-        return branch(rs_signed() >= 0); // BGEZ
-    case DecodedOpcode::bltzl:
-        return branch(rs_signed() < 0, true); // BLTZL
-    case DecodedOpcode::bgezl:
-        return branch(rs_signed() >= 0, true); // BGEZL
+    case DecodedOpcode::dsll: {
+        auto b = direct();
+        return operations::dsll(b, i_);
+    }
+    case DecodedOpcode::dsrl: {
+        auto b = direct();
+        return operations::dsrl(b, i_);
+    }
+    case DecodedOpcode::dsra: {
+        auto b = direct();
+        return operations::dsra(b, i_);
+    }
+    case DecodedOpcode::dsll32: {
+        auto b = direct();
+        return operations::dsll32(b, i_);
+    }
+    case DecodedOpcode::dsrl32: {
+        auto b = direct();
+        return operations::dsrl32(b, i_);
+    }
+    case DecodedOpcode::dsra32: {
+        auto b = direct();
+        return operations::dsra32(b, i_);
+    }
+    case DecodedOpcode::bltz: {
+        auto b = direct();
+        return operations::bltz(b, i_);
+    }
+    case DecodedOpcode::bgez: {
+        auto b = direct();
+        return operations::bgez(b, i_);
+    }
+    case DecodedOpcode::bltzl: {
+        auto b = direct();
+        return operations::bltzl(b, i_);
+    }
+    case DecodedOpcode::bgezl: {
+        auto b = direct();
+        return operations::bgezl(b, i_);
+    }
     case DecodedOpcode::tgei:
         return trap(rs_signed() >= as_signed(i_.signed_immediate())); // TGEI
     case DecodedOpcode::tgeiu:
@@ -696,11 +743,9 @@ inline constexpr auto needs_64bit_operations = [] {
     case DecodedOpcode::bltzal:
     case DecodedOpcode::bgezal:
     case DecodedOpcode::bltzall:
-    case DecodedOpcode::bgezall: { // BLTZAL, BGEZAL, BLTZALL, BGEZALL: the link is written whether
-                                   // or not taken.
-        const bool condition = (i_.rt() & 1) != 0 ? rs_signed() >= 0 : rs_signed() < 0;
-        cpu_.set_gpr(31, pc_ + 8);
-        return branch(condition, i_.rt() >= 18);
+    case DecodedOpcode::bgezall: {
+        auto b = direct();
+        return operations::branch_and_link(b, i_);
     }
     case DecodedOpcode::mfc0:
         if (!cpu_.coprocessor_usable(0)) {
@@ -768,13 +813,13 @@ inline constexpr auto needs_64bit_operations = [] {
             return unusable(0);
         }
         return reserved();
-    case DecodedOpcode::j:     // J
-    case DecodedOpcode::jal: { // JAL
-        const std::uint64_t target = ((pc_ + 4) & ~std::uint64_t{0x0fff'ffff}) | (i_.target() << 2);
-        if (op_ == DecodedOpcode::jal) {
-            cpu_.set_gpr(31, pc_ + 8);
-        }
-        return Control{Flow::branch, true, target};
+    case DecodedOpcode::j: {
+        auto b = direct();
+        return operations::j(b, i_);
+    }
+    case DecodedOpcode::jal: {
+        auto b = direct();
+        return operations::jal(b, i_);
     }
     case DecodedOpcode::beq: {
         auto b = direct();
@@ -784,10 +829,14 @@ inline constexpr auto needs_64bit_operations = [] {
         auto b = direct();
         return operations::bne(b, i_);
     }
-    case DecodedOpcode::blez:
-        return branch(as_signed(rs()) <= 0); // BLEZ
-    case DecodedOpcode::bgtz:
-        return branch(as_signed(rs()) > 0); // BGTZ
+    case DecodedOpcode::blez: {
+        auto b = direct();
+        return operations::blez(b, i_);
+    }
+    case DecodedOpcode::bgtz: {
+        auto b = direct();
+        return operations::bgtz(b, i_);
+    }
     case DecodedOpcode::addi: {
         auto b = direct();
         return operations::addi(b, i_);
@@ -796,24 +845,30 @@ inline constexpr auto needs_64bit_operations = [] {
         auto b = direct();
         return operations::addiu(b, i_);
     }
-    case DecodedOpcode::slti: // SLTI
-        cpu_.set_gpr(i_.rt(), as_signed(rs()) < as_signed(i_.signed_immediate()) ? 1 : 0);
-        return sequential();
-    case DecodedOpcode::sltiu: // SLTIU
-        cpu_.set_gpr(i_.rt(), rs() < i_.signed_immediate() ? 1 : 0);
-        return sequential();
-    case DecodedOpcode::andi: // ANDI
-        cpu_.set_gpr(i_.rt(), rs() & i_.immediate());
-        return sequential();
-    case DecodedOpcode::ori: // ORI
-        cpu_.set_gpr(i_.rt(), rs() | i_.immediate());
-        return sequential();
-    case DecodedOpcode::xori: // XORI
-        cpu_.set_gpr(i_.rt(), rs() ^ i_.immediate());
-        return sequential();
-    case DecodedOpcode::lui: // LUI
-        cpu_.set_gpr(i_.rt(), sign_extend_32(i_.immediate() << 16));
-        return sequential();
+    case DecodedOpcode::slti: {
+        auto b = direct();
+        return operations::slti(b, i_);
+    }
+    case DecodedOpcode::sltiu: {
+        auto b = direct();
+        return operations::sltiu(b, i_);
+    }
+    case DecodedOpcode::andi: {
+        auto b = direct();
+        return operations::andi(b, i_);
+    }
+    case DecodedOpcode::ori: {
+        auto b = direct();
+        return operations::ori(b, i_);
+    }
+    case DecodedOpcode::xori: {
+        auto b = direct();
+        return operations::xori(b, i_);
+    }
+    case DecodedOpcode::lui: {
+        auto b = direct();
+        return operations::lui(b, i_);
+    }
     case DecodedOpcode::cop1: // COP1, LWC1, LDC1, SWC1, SDC1
         if (!cpu_.coprocessor_usable(1)) {
             return unusable(1);
@@ -833,26 +888,30 @@ inline constexpr auto needs_64bit_operations = [] {
             return unusable(2);
         }
         return reserved();
-    case DecodedOpcode::beql:
-        return branch(rs() == rt(), true); // BEQL
-    case DecodedOpcode::bnel:
-        return branch(rs() != rt(), true); // BNEL
-    case DecodedOpcode::blezl:
-        return branch(as_signed(rs()) <= 0, true); // BLEZL
-    case DecodedOpcode::bgtzl:
-        return branch(as_signed(rs()) > 0, true); // BGTZL
-    case DecodedOpcode::daddi: {                  // DADDI
-        const std::uint64_t immediate = i_.signed_immediate();
-        const std::uint64_t sum = rs() + immediate;
-        if ((((rs() ^ sum) & (immediate ^ sum)) >> 63) != 0) {
-            return raise(ExceptionCode::overflow);
-        }
-        cpu_.set_gpr(i_.rt(), sum);
-        return sequential();
+    case DecodedOpcode::beql: {
+        auto b = direct();
+        return operations::beql(b, i_);
     }
-    case DecodedOpcode::daddiu: // DADDIU
-        cpu_.set_gpr(i_.rt(), rs() + i_.signed_immediate());
-        return sequential();
+    case DecodedOpcode::bnel: {
+        auto b = direct();
+        return operations::bnel(b, i_);
+    }
+    case DecodedOpcode::blezl: {
+        auto b = direct();
+        return operations::blezl(b, i_);
+    }
+    case DecodedOpcode::bgtzl: {
+        auto b = direct();
+        return operations::bgtzl(b, i_);
+    }
+    case DecodedOpcode::daddi: {
+        auto b = direct();
+        return operations::daddi(b, i_);
+    }
+    case DecodedOpcode::daddiu: {
+        auto b = direct();
+        return operations::daddiu(b, i_);
+    }
     case DecodedOpcode::ldl:
         return load_left_right(true, AccessWidth::bits64); // LDL
     case DecodedOpcode::ldr:
