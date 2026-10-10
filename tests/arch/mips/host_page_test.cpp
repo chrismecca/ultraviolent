@@ -176,4 +176,120 @@ const test::Registration remap{
         t.check_equal(s.gpr(t0), std::uint64_t{0x5a5a'5a5a});
     }};
 
+// The device page cache (cpu.hpp "Device pages") must be invisible too.
+
+// Reads return the device's tag plus the offset; the doubleword at 0xff8 answers with an
+// error; writes are recorded.
+class Echo final : public MmioTarget {
+  public:
+    explicit Echo(std::uint64_t tag) : tag_{tag} {}
+    std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
+                                                        AccessWidth width) override {
+        ++reads;
+        if ((offset & 0xfff) == 0xff8) {
+            return std::unexpected(AccessFault::unmapped);
+        }
+        const std::uint64_t value = tag_ + offset;
+        return width == AccessWidth::bits64 ? value
+                                            : value & ((std::uint64_t{1} << (8 * byte_count(width))) - 1);
+    }
+    std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth /*width*/,
+                                                std::uint64_t value) override {
+        writes.push_back({offset, value});
+        return {};
+    }
+    std::uint64_t reads{};
+    std::vector<Recorder::Write> writes;
+
+  private:
+    std::uint64_t tag_;
+};
+
+constexpr std::uint64_t device_a = 0x20'0000;
+constexpr std::uint64_t device_b = 0x30'0000;
+
+void map_devices(test::Context& t, System& s, Echo& a, Echo& b) {
+    t.check(s.bus.map_mmio({PhysicalAddress{device_a}, 0x2000}, a).has_value());
+    t.check(s.bus.map_mmio({PhysicalAddress{device_b}, 0x2000}, b).has_value());
+}
+
+const test::Registration device_offsets{
+    "mips.device_pages_offsets_and_bus_errors", [](test::Context& t) {
+        System s;
+        Echo a{0x1000'0000}, b{0x2000'0000};
+        map_devices(t, s, a, b);
+        s.set(a0, kseg0(device_a + 0x1000));
+        s.set(t3, 0x66);
+        // The first load fills the page; the others use it, at other offsets and widths.
+        s.run_program({lw(t0, 0x10, a0), ld(t1, 0x20, a0), lhu(t2, 0x32, a0), sb(t3, 0x41, a0)});
+        t.check_equal(s.gpr(t0), std::uint64_t{0x1000'1010});
+        t.check_equal(s.gpr(t1), std::uint64_t{0x1000'1020});
+        t.check_equal(s.gpr(t2), std::uint64_t{0x1032});
+        t.check(a.writes == std::vector<Recorder::Write>{{0x1041, 0x66}});
+        // An error response is a bus error, as on the full path.
+        s.run_program({ld(t0, 0xff8, a0)});
+        t.check_equal(s.exception_code(), code_of(ExceptionCode::bus_error_data));
+        t.check_equal(s.cpu.dmfc0(cp0::epc), testing::kseg0(System::code));
+    }};
+
+const test::Registration device_tlb{
+    "mips.device_pages_follow_tlb_writes", [](test::Context& t) {
+        System s;
+        Echo a{0x1000'0000}, b{0x2000'0000};
+        map_devices(t, s, a, b);
+        const std::uint64_t va = 0xffff'ffff'e000'0000;
+        write_entry(s, va, lo(device_a >> 12, true), lo((device_a >> 12) + 1, true));
+        s.set(a0, va);
+        s.run_program({lw(t0, 4, a0), lw(t0, 8, a0)});
+        t.check_equal(s.gpr(t0), std::uint64_t{0x1000'0008});
+        write_entry(s, va, lo(device_b >> 12, true), lo((device_b >> 12) + 1, true));
+        s.run_program({lw(t0, 8, a0)});
+        t.check_equal(s.gpr(t0), std::uint64_t{0x2000'0008});
+        // A clean page: a load fills the cache, and a store is still TLB Modified.
+        write_entry(s, va, lo(device_a >> 12, false), lo((device_a >> 12) + 1, false));
+        s.run_program({lw(t0, 0, a0), sw(t0, 4, a0)});
+        t.check_equal(s.exception_code(), code_of(ExceptionCode::tlb_modified));
+        t.check(a.writes.empty(), "the store did not reach the device");
+    }};
+
+const test::Registration device_remap{
+    "mips.device_pages_follow_bus_remap", [](test::Context& t) {
+        System s;
+        Echo a{0x1000'0000}, b{0x2000'0000};
+        map_devices(t, s, a, b);
+        s.set(a0, kseg0(device_a));
+        s.run_program({lw(t0, 0x10, a0), lw(t0, 0x14, a0)});
+        t.check_equal(s.gpr(t0), std::uint64_t{0x1000'0014});
+        t.check(s.bus.remap_mmio({PhysicalAddress{device_a}, 0x2000}, b).has_value());
+        s.run_program({lw(t0, 0x18, a0)});
+        t.check_equal(s.gpr(t0), std::uint64_t{0x2000'0018});
+    }};
+
+const test::Registration device_watch{
+    "mips.device_pages_watchpoint_armed_later", [](test::Context& t) {
+        System s;
+        Echo a{0x1000'0000}, b{0x2000'0000};
+        map_devices(t, s, a, b);
+        s.set(a0, kseg0(device_a));
+        s.set(a1, device_a | 0x10 | 2);
+        s.run_program({lw(t0, 0x10, a0), mtc0(a1, cp0::watch_lo), lw(t0, 0x10, a0)});
+        t.check_equal(s.exception_code(), code_of(ExceptionCode::watch));
+        t.check_equal(s.cpu.dmfc0(cp0::epc), testing::kseg0(System::code + 8));
+        t.check_equal(a.reads, std::uint64_t{1});
+    }};
+
+const test::Registration device_mode{
+    "mips.device_pages_mode_change", [](test::Context& t) {
+        System s;
+        Echo a{0x1000'0000}, b{0x2000'0000};
+        map_devices(t, s, a, b);
+        s.map_user_low();
+        s.set(a0, kseg0(device_a));
+        s.run_program({lw(t0, 0x10, a0)});
+        // The same kseg0 address is an address error in User mode.
+        s.run_user_program({lw(t0, 0x10, a0)}, 0);
+        t.check_equal(s.exception_code(), code_of(ExceptionCode::address_error_load));
+        t.check_equal(a.reads, std::uint64_t{1});
+    }};
+
 } // namespace

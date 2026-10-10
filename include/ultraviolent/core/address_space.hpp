@@ -131,6 +131,16 @@ class AddressSpace {
         std::uint64_t offset;
     };
     [[nodiscard]] std::optional<MemoryFrame> memory_frame(PhysicalAddress address) const;
+    // The device behind every address of [address, address + size), and the offset of
+    // `address` in its mapping, when one MMIO mapping covers the whole range: an access there
+    // is exactly target->mmio_read or mmio_write at that offset (for caching device accesses
+    // by page; valid while generation() is unchanged).
+    struct MmioRange {
+        MmioTarget* target;
+        std::uint64_t offset;
+    };
+    [[nodiscard]] std::optional<MmioRange> mmio_range(PhysicalAddress address,
+                                                     std::uint64_t size) const;
     // Writes through this space that touched a frame holding decoded code (write and
     // writable_memory_bytes).
     [[nodiscard]] std::uint64_t code_writes() const {

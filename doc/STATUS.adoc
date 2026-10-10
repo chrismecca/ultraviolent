@@ -9,9 +9,9 @@ at RC-IP27 (the user chose no tag or release). Tier 0 stages A-H are done (2026-
 0 is the default engine, and stage H ended at its stop rule. The user agreed to proceed to
 tier 1 and reframed it as a framework engine (2026-10-09): ADR-022 and doc/JIT.adoc, accepted
 2026-10-10. **J0-J4 are done (2026-10-10), with dispatch inside native code and per-block
-boundary checks: tier 1 runs the PROM, `cpu`, and `fs` faster than a 180 MHz R10000 in real
-time (1.27, 1.47, 1.26x) and `boot` at 0.96x, all digests and same-cycle snapshots
-identical.** Next: see Next task.
+boundary checks, and tier 1 is the default engine: every workload runs faster than a 180 MHz
+R10000 in real time (prom 1.55x, boot 1.12x, cpu 1.45x, fs 1.24x), all digests and
+same-cycle snapshots identical.** Next: see Next task.
 
 * **Tier 1 (JIT.adoc "Progress"):** J0, the processor personality in code (`ProcessorModel`,
   decode by model) and the builder (`operations.hpp`, `DirectBuilder`); J1, the native
@@ -27,6 +27,13 @@ identical.** Next: see Next task.
   leaving native code; J3, the guest register cache (`GuestRegisters`); J4, loads and stores
   in builder form with the host page path inline. Tier 1, one run each, M cycles/s: prom
   228.8, boot 172.3, cpu 264.1, fs 226.3 (1.67-2.50x tier 0).
+  Then `boot` (perf, and a histogram of device loads by pc): firmware delay loops poll Hub
+  PI_RT_COUNT (IP27PROM, about 260 million reads) and an IOC3 UART status byte (IO6PROM, 36
+  million), and each access spent most of its time in translation, bus decode, and two
+  divisions converting cycles to virtual time. `CycleTime` converts without division, and the
+  CPU's device pages (cpu.hpp) cache a virtual page that translates to one device mapping,
+  under the data pages' rules, for every engine. Tier 1, one run each: prom 278.5, boot
+  200.9, cpu 260.1, fs 222.6; 1.55, 1.12, 1.45, 1.24 times real time at 180 MHz.
 
 * **New reference host (2026-10-07):** `uv-dev01`, Ryzen 5 3600, Debian 13; private state on
   its own XFS disk, `/srv/ultraviolent` (`local/` links there); DEVELOPMENT.adoc "Reference
@@ -396,11 +403,11 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **Tier 1 to at least real time on every workload** (tier 1 is the default engine since
-  2026-10-10, where the host has a backend). `boot` is at
-  0.96x of a 180 MHz R10000: profile it (842 million device accesses, each a full bus slow
-  path through `call_semantics`; translation of 352,000 blocks; 4.3% of operations still
-  decoded). Then the remaining J5 work where profiles point (direct links, J6, only if dispatch shows).
+. **Margin above real time, then the multiprocessor.** Every workload is above real time at
+  180 MHz (tier 1, the default engine where the host has a backend); at 200 MHz `boot` is at
+  1.00x. Profile each workload again and take the next largest cost (candidates: the device
+  access path through `call_semantics`; block translation, 352,000 blocks in `boot`; the
+  4-7% of operations still decoded below the threshold; dispatch, then direct links, J6).
   The goal after that (with the user, 2026-10-10): ADR-021's multiprocessor, each CPU at its
   nominal clock in virtual time and host-parallel in fast mode; JIT.adoc "Toward
   host-parallel vCPUs" lists what the engine keeps possible.
@@ -1229,5 +1236,6 @@ Disproven: that block linking could wait for J6 (dispatch was the largest cost a
   that a bus access must end native execution (the engine's checks between blocks suffice).
 Unknowns: where `boot`'s remaining time goes; how many host cycles a device access costs.
 Best checkpoint: unchanged (rc_alpha.remote_login); network not yet set up on uv-dev01.
-Next step: profile `boot` on tier 1 (tier 1 made the default engine afterwards, same day).
+Next step: profile `boot` on tier 1 (done the same day: tier 1 made the default engine;
+  CycleTime and device pages took `boot` to 1.12x real time).
 ----

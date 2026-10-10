@@ -608,6 +608,7 @@ class Cpu final : public InterruptSink {
             ++code_changes_;
             code_pages_.fill({});
             data_pages_.fill({});
+            device_pages_.fill({});
             host_pages_translation_generation_ = translation_generation_;
             host_pages_bus_generation_ = bus_.generation();
         }
@@ -710,6 +711,38 @@ class Cpu final : public InterruptSink {
     }
     std::array<HostPage, host_page_count> code_pages_{};
     std::array<HostPage, host_page_count> data_pages_{};
+    // Device pages: virtual pages whose loads (and, when a store filled the entry, stores)
+    // translate to one device mapping, so an access is that device's mmio_read or
+    // mmio_write at a known offset. Filled, used, and dropped under the data pages' rules (the
+    // translation context, TLB entries, generations, no armed watchpoint, the bus byte order);
+    // transparent. Measured: firmware delay loops poll Hub and UART registers hundreds of
+    // millions of times in `boot`, and translation and bus decode were most of each access.
+    struct DevicePage {
+        std::uint64_t page{~std::uint64_t{0}};
+        std::uint64_t context{};
+        MmioTarget* target{};
+        // The page's offset in the device's mapping, and its bus address (fault reports).
+        std::uint64_t offset{};
+        std::uint64_t physical{};
+        std::int8_t tlb_index{-1};
+        bool stores{};
+    };
+    static constexpr std::size_t device_page_count = 16;
+    [[nodiscard]] const DevicePage* device_page(std::uint64_t address, bool store) const {
+        const DevicePage& page = device_pages_[(address >> 12) % device_page_count];
+        if (page.page != (address & ~page_offset_mask) || page.context != translation_context() ||
+            (store && !page.stores)) {
+            return nullptr;
+        }
+        return &page;
+    }
+    std::expected<std::uint64_t, Exception> device_read(const DevicePage& page,
+                                                        std::uint64_t address, AccessWidth width);
+    void device_write(const DevicePage& page, std::uint64_t address, AccessWidth width,
+                      std::uint64_t value);
+    void remember_device_page(std::uint64_t address, const Translation& translation,
+                              AccessKind kind);
+    std::array<DevicePage, device_page_count> device_pages_{};
     std::uint64_t host_pages_translation_generation_{};
     std::uint64_t host_pages_bus_generation_{};
     // Changes whenever address translation may have changed in a way translation_context()

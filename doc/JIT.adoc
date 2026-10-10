@@ -464,6 +464,14 @@ J5 and J6 are optional for this personality.
 
 * **Default engine (2026-10-10).** Tier 1 is the machine's default where the host has a
   backend (`Ip27Machine` falls back to tier 0 elsewhere); `scripts/bench.py` defaults to it.
+* **Device accesses (2026-10-10).** `boot`'s remaining cost was firmware delay loops polling
+  device registers (Hub PI_RT_COUNT, an IOC3 UART status byte), each access a full
+  translation and bus decode plus two divisions to convert cycles to virtual time. Not tier
+  1's: `CycleTime` (virtual_time.hpp) converts without division and the CPU caches device
+  pages (cpu.hpp), for every engine. Mutation checks of the device page rules (TLB writes,
+  watchpoints, store permission, bus generation, translation context): each fails its test.
+  Result (M cycles/s, prom, boot, cpu, fs): 278.5, 200.9, 260.1, 222.6; at 180 MHz 1.55,
+  1.12, 1.45, and 1.24 times real time.
 
 == Toward host-parallel vCPUs (not built)
 

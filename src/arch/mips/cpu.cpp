@@ -430,6 +430,9 @@ std::expected<std::uint64_t, Exception> Cpu::load_slow(std::uint64_t address, Ac
         return std::unexpected(
             Exception{.code = ExceptionCode::address_error_load, .bad_address = address});
     }
+    if (const DevicePage* page = device_page(address, false)) {
+        return device_read(*page, address, width);
+    }
     auto translation = translate(address, AccessKind::load);
     if (!translation) {
         return std::unexpected(translation.error());
@@ -439,8 +442,77 @@ std::expected<std::uint64_t, Exception> Cpu::load_slow(std::uint64_t address, Ac
     filling_ = false;
     if (value) {
         remember_page(address, *translation, AccessKind::load);
+        remember_device_page(address, *translation, AccessKind::load);
     }
     return value;
+}
+
+// read() for an address in a device page: the same device access, without translation and bus
+// decode (their results are the page's).
+std::expected<std::uint64_t, Exception> Cpu::device_read(const DevicePage& page,
+                                                         std::uint64_t address,
+                                                         AccessWidth width) {
+    left_host_path_ = true;
+    last_bus_access_ = BusAccess::device;
+    const std::uint64_t offset = address & page_offset_mask;
+    auto value = page.target->mmio_read(page.offset + offset, width);
+    invariant(!value || width == AccessWidth::bits64 || *value >> (8 * byte_count(width)) == 0,
+              "MMIO read value wider than the access");
+    check_host_pages();
+    if (!value) {
+        tracer_.log(TraceCategory::memory, "read fault {:#x} width {} fault {}",
+                    page.physical + offset, byte_count(width), std::to_underlying(value.error()));
+        return std::unexpected(Exception{.code = ExceptionCode::bus_error_data});
+    }
+    return *value;
+}
+
+// write() for an address in a device page, likewise.
+void Cpu::device_write(const DevicePage& page, std::uint64_t address, AccessWidth width,
+                       std::uint64_t value) {
+    left_host_path_ = true;
+    last_bus_access_ = BusAccess::device;
+    const std::uint64_t offset = address & page_offset_mask;
+    const std::uint64_t code_writes = bus_.code_writes();
+    auto result = page.target->mmio_write(page.offset + offset, width, value);
+    if (bus_.code_writes() != code_writes) {
+        last_bus_access_ = BusAccess::code_store;
+        ++code_frame_stores_;
+        synchronize_code();
+    }
+    check_host_pages();
+    if (!result) {
+        tracer_.log(TraceCategory::memory, "write fault {:#x} width {} value {:#x} fault {}",
+                    page.physical + offset, byte_count(width), value,
+                    std::to_underlying(result.error()));
+    }
+}
+
+// After a successful access through the full path: remembers its page when the whole page
+// translates to one device mapping under the conditions that make device_read and
+// device_write exact (no watchpoint armed, references in the bus byte order).
+void Cpu::remember_device_page(std::uint64_t address, const Translation& translation,
+                               AccessKind kind) {
+    if (last_bus_access_ != BusAccess::device || (cp0_.watch_lo & 3) != 0 ||
+        big_endian() != (bus_.byte_order() == ByteOrder::big)) {
+        return;
+    }
+    const std::uint64_t page = address & ~page_offset_mask;
+    const PhysicalAddress frame{translation.address.value & ~page_offset_mask};
+    const auto range = bus_.mmio_range(frame, page_offset_mask + 1);
+    if (!range) {
+        return;
+    }
+    DevicePage& entry = device_pages_[(address >> 12) % device_page_count];
+    const bool stores = kind == AccessKind::store || (entry.page == page && entry.stores &&
+                                                       entry.context == translation_context());
+    entry = {.page = page,
+             .context = translation_context(),
+             .target = range->target,
+             .offset = range->offset,
+             .physical = frame.value,
+             .tlb_index = translation.tlb_index,
+             .stores = stores};
 }
 
 std::expected<void, Exception> Cpu::store_slow(std::uint64_t address, AccessWidth width,
@@ -448,6 +520,10 @@ std::expected<void, Exception> Cpu::store_slow(std::uint64_t address, AccessWidt
     if (address % byte_count(width) != 0) {
         return std::unexpected(
             Exception{.code = ExceptionCode::address_error_store, .bad_address = address});
+    }
+    if (const DevicePage* page = device_page(address, true)) {
+        device_write(*page, address, width, value);
+        return {};
     }
     auto translation = translate(address, AccessKind::store);
     if (!translation) {
@@ -458,6 +534,7 @@ std::expected<void, Exception> Cpu::store_slow(std::uint64_t address, AccessWidt
     filling_ = false;
     if (result) {
         remember_page(address, *translation, AccessKind::store);
+        remember_device_page(address, *translation, AccessKind::store);
     }
     return result;
 }
@@ -519,6 +596,11 @@ void Cpu::forget_tlb_pages(std::uint64_t entries) {
     for (std::size_t index = 0; index < Tlb::entry_count; ++index) {
         if ((entries >> index & 1) != 0) {
             ++tlb_generations_[index];
+        }
+    }
+    for (DevicePage& page : device_pages_) {
+        if (page.tlb_index >= 0 && (entries >> page.tlb_index & 1) != 0) {
+            page = {};
         }
     }
     for (auto* pages : {&code_pages_, &data_pages_}) {
@@ -708,6 +790,7 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
     case cp0::watch_lo:
         cp0_.watch_lo = low & 0xffff'fffbu;
         data_pages_.fill({}); // armed watchpoints need the full path
+        device_pages_.fill({});
         watch_pending_ = false;
         return;
     case cp0::watch_hi:

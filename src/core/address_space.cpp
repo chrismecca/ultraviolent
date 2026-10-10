@@ -146,6 +146,19 @@ std::optional<AddressSpace::MemoryFrame> AddressSpace::memory_frame(PhysicalAddr
     return MemoryFrame{memory->block, memory->block_offset + (address - mapping->range.base)};
 }
 
+std::optional<AddressSpace::MmioRange> AddressSpace::mmio_range(PhysicalAddress address,
+                                                                std::uint64_t size) const {
+    const Mapping* mapping = find(address);
+    if (mapping == nullptr || size == 0 || !mapping->range.contains(address + (size - 1))) {
+        return std::nullopt;
+    }
+    auto* const* target = std::get_if<MmioTarget*>(&mapping->target);
+    if (target == nullptr) {
+        return std::nullopt;
+    }
+    return MmioRange{*target, address - mapping->range.base};
+}
+
 const AddressSpace::Mapping* AddressSpace::find(PhysicalAddress address) const {
     if (last_hit_ < mappings_.size() && mappings_[last_hit_].range.contains(address)) {
         return &mappings_[last_hit_];
