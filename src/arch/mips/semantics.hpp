@@ -5,6 +5,8 @@
 #include <ultraviolent/arch/mips/fpu.hpp>
 #include <ultraviolent/arch/mips/instruction.hpp>
 
+#include "operations.hpp"
+
 #include <array>
 #include <cstdint>
 #include <expected>
@@ -84,6 +86,117 @@ constexpr Control sequential() {
     return {};
 }
 
+// The builder that executes (operations.hpp): values are the guest's, operations happen
+// at once, and an exception is taken where it is raised. After inlining it is the code the
+// operation had before it moved into builder form (a gate when an operation moves:
+// unchanged host counters per guest cycle).
+class DirectBuilder {
+  public:
+    using Value = std::uint64_t;
+    using Condition = bool;
+    using Result = Control;
+
+    DirectBuilder(Cpu& cpu, IntegerState& s, std::uint64_t pc) : cpu_{cpu}, s_{s}, pc_{pc} {}
+
+    [[nodiscard]] Value gpr(unsigned r) const {
+        return s_.gpr[r];
+    }
+    void set_gpr(unsigned r, Value v) {
+        cpu_.set_gpr(r, v);
+    }
+    [[nodiscard]] Value hi() const {
+        return s_.hi;
+    }
+    [[nodiscard]] Value lo() const {
+        return s_.lo;
+    }
+    void set_hi(Value v) {
+        s_.hi = v;
+    }
+    void set_lo(Value v) {
+        s_.lo = v;
+    }
+    [[nodiscard]] static Value constant(std::uint64_t x) {
+        return x;
+    }
+    [[nodiscard]] std::uint64_t pc() const {
+        return pc_;
+    }
+
+    static Value add(Value a, Value b) {
+        return a + b;
+    }
+    static Value sub(Value a, Value b) {
+        return a - b;
+    }
+    static Value and_(Value a, Value b) {
+        return a & b;
+    }
+    static Value or_(Value a, Value b) {
+        return a | b;
+    }
+    static Value xor_(Value a, Value b) {
+        return a ^ b;
+    }
+    static Value nor(Value a, Value b) {
+        return ~(a | b);
+    }
+    static Value shift_left(Value v, unsigned n) {
+        return v << n;
+    }
+    static Value shift_right_logical(Value v, unsigned n) {
+        return v >> n;
+    }
+    static Value shift_right_arithmetic(Value v, unsigned n) {
+        return static_cast<std::uint64_t>(as_signed(v) >> n);
+    }
+    static Value sign_extend_32(Value v) {
+        return semantics::sign_extend_32(v);
+    }
+
+    static Condition equal(Value a, Value b) {
+        return a == b;
+    }
+    static Condition not_equal(Value a, Value b) {
+        return a != b;
+    }
+    static Condition less_signed(Value a, Value b) {
+        return as_signed(a) < as_signed(b);
+    }
+    static Condition less_unsigned(Value a, Value b) {
+        return a < b;
+    }
+    static Condition add_overflows_32(Value a, Value b) {
+        const std::int64_t sum = std::int64_t{static_cast<std::int32_t>(a)} +
+                                 std::int64_t{static_cast<std::int32_t>(b)};
+        return sum != static_cast<std::int32_t>(sum);
+    }
+
+    bool raise_if(Condition c, ExceptionCode code) {
+        if (c) [[unlikely]] {
+            cpu_.take_exception(Exception{.code = code});
+        }
+        return c;
+    }
+    [[nodiscard]] static Result raised() {
+        return {.flow = Flow::exception};
+    }
+    [[nodiscard]] static Result sequential() {
+        return {};
+    }
+    [[nodiscard]] static Result branch(Condition taken, std::uint64_t target, bool likely) {
+        return Control{likely ? Flow::branch_likely : Flow::branch, taken, target};
+    }
+    [[nodiscard]] static Result jump(Value target) {
+        return Control{Flow::branch, true, target};
+    }
+
+  private:
+    Cpu& cpu_;
+    IntegerState& s_;
+    std::uint64_t pc_;
+};
+
 class Executor {
   public:
     Executor(Cpu& cpu, const DecodedInstruction& instruction, std::uint64_t pc)
@@ -131,6 +244,9 @@ class Executor {
         return result ? *result : fail(result.error());
     }
 
+    DirectBuilder direct() {
+        return DirectBuilder{cpu_, s_, pc_};
+    }
     Result branch(bool condition, bool likely = false);
     template <AccessWidth W, bool SignExtend> Result load();
     template <AccessWidth W> Result store();
@@ -316,9 +432,10 @@ inline constexpr auto needs_64bit_operations = [] {
         return reserved();
     }
     switch (op_) {
-    case DecodedOpcode::sll: // SLL
-        cpu_.set_gpr(i_.rd(), sign_extend_32(rt32() << i_.sa()));
-        return sequential();
+    case DecodedOpcode::sll: {
+        auto b = direct();
+        return operations::sll(b, i_);
+    }
     case DecodedOpcode::movci: // MOVF, MOVT (MIPS IV)
         if (!cpu_.allows_mips4()) {
             return reserved();
@@ -470,9 +587,10 @@ inline constexpr auto needs_64bit_operations = [] {
         cpu_.set_gpr(i_.rd(), static_cast<std::uint64_t>(sum));
         return sequential();
     }
-    case DecodedOpcode::addu: // ADDU
-        cpu_.set_gpr(i_.rd(), sign_extend_32(rs32() + rt32()));
-        return sequential();
+    case DecodedOpcode::addu: {
+        auto b = direct();
+        return operations::addu(b, i_);
+    }
     case DecodedOpcode::sub: { // SUB
         const std::int64_t difference =
             std::int64_t{static_cast<std::int32_t>(rs32())} - static_cast<std::int32_t>(rt32());
@@ -658,26 +776,26 @@ inline constexpr auto needs_64bit_operations = [] {
         }
         return Control{Flow::branch, true, target};
     }
-    case DecodedOpcode::beq:
-        return branch(rs() == rt()); // BEQ
-    case DecodedOpcode::bne:
-        return branch(rs() != rt()); // BNE
+    case DecodedOpcode::beq: {
+        auto b = direct();
+        return operations::beq(b, i_);
+    }
+    case DecodedOpcode::bne: {
+        auto b = direct();
+        return operations::bne(b, i_);
+    }
     case DecodedOpcode::blez:
         return branch(as_signed(rs()) <= 0); // BLEZ
     case DecodedOpcode::bgtz:
         return branch(as_signed(rs()) > 0); // BGTZ
-    case DecodedOpcode::addi: {             // ADDI
-        const std::int64_t sum = std::int64_t{static_cast<std::int32_t>(rs())} +
-                                 static_cast<std::int16_t>(i_.immediate());
-        if (sum != static_cast<std::int32_t>(sum)) {
-            return raise(ExceptionCode::overflow);
-        }
-        cpu_.set_gpr(i_.rt(), static_cast<std::uint64_t>(sum));
-        return sequential();
+    case DecodedOpcode::addi: {
+        auto b = direct();
+        return operations::addi(b, i_);
     }
-    case DecodedOpcode::addiu: // ADDIU
-        cpu_.set_gpr(i_.rt(), sign_extend_32(rs() + i_.signed_immediate()));
-        return sequential();
+    case DecodedOpcode::addiu: {
+        auto b = direct();
+        return operations::addiu(b, i_);
+    }
     case DecodedOpcode::slti: // SLTI
         cpu_.set_gpr(i_.rt(), as_signed(rs()) < as_signed(i_.signed_immediate()) ? 1 : 0);
         return sequential();
