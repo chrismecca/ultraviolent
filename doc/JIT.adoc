@@ -473,6 +473,15 @@ J5 and J6 are optional for this personality.
   Result (M cycles/s, prom, boot, cpu, fs): 278.5, 200.9, 260.1, 222.6; at 180 MHz 1.55,
   1.12, 1.45, and 1.24 times real time.
 
+* **FPU flags and tier 0's cache (2026-10-10).** `cpu` (awk computes in floating point)
+  spent about 9% of host time in `<cfenv>` calls around each FP operation; on x86-64 the FPU
+  now reads and writes MXCSR directly (fpu.cpp): `cpu` 260.1 to 301.4 M cycles/s. `fs` spent
+  about 28% in tier 0 on the 7% of operations not yet native: lukewarm blocks were evicted
+  from tier 0's 4096-entry cache before reaching the threshold. Sweep (M cycles/s, `fs` and
+  `boot`): 4096 entries 222.5 and 199.4; 16384, 269.9 and 200.0; 32768, 281.0 and 203.6;
+  threshold 16 instead of 64 helps less (240.5) and costs `boot` translation time. The
+  default is now 32768 (tier 0 alone also gains: `fs` 105.4 to 111.7).
+
 == Toward host-parallel vCPUs (not built)
 
 The next machine goal after one CPU at its nominal clock is ADR-021's four CPUs, each at the

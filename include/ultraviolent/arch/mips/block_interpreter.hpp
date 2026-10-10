@@ -102,7 +102,10 @@ struct BlockStatistics {
 // steps. Keeps no architectural state.
 class BlockInterpreter {
   public:
-    static constexpr std::size_t default_cache_entries = 4096;
+    // 4096 was chosen for tier 0 alone (IR.adoc "Stage F"). Under tier 1, tier 0 runs only
+    // blocks not yet translated, which a small cache keeps evicting before they reach the
+    // translation threshold: 32768 measured best on every workload (JIT.adoc "Progress").
+    static constexpr std::size_t default_cache_entries = 32768;
     // Chosen from J2's measurements (JIT.adoc "Progress").
     static constexpr std::uint64_t default_native_threshold = 64;
 

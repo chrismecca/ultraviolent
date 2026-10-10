@@ -93,7 +93,7 @@ void usage() {
         "against, doc/IR.adoc).\n"
         "--trace cpu and --probe always use the reference. --engine-statistics prints tier\n"
         "0's block statistics at the end of the run. --tier0-cache-entries N sizes its\n"
-        "block cache (a power of two; default 4096). --tier1-threshold N translates a block\n"
+        "block cache (a power of two; default 32768). --tier1-threshold N translates a block\n"
         "to native code after N cache hits (0: on first execution).\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
         "scsi ethernet irq scheduler firmware machine all\n",

@@ -252,8 +252,9 @@ A block depends on the translation that found its bytes and on the bytes.
 
 === The block cache (stage F)
 
-* `BlockInterpreter` keeps a direct-mapped table of blocks, a power of two in size (default
-  4096 entries, `--tier0-cache-entries`), indexed by `(pc >> 2) & (entries - 1)` and tagged by
+* `BlockInterpreter` keeps a direct-mapped table of blocks, a power of two in size (4096
+  entries in stage F; 32768 since tier 1, which leaves tier 0 the blocks not yet translated:
+  JIT.adoc "Progress"; `--tier0-cache-entries`), indexed by `(pc >> 2) & (entries - 1)` and tagged by
   pc and translation context. An entry owns its block's operations; replacing it reuses
   their storage.
 * An entry records its dependencies when built: the code epoch (`Cpu::code_epoch`, advanced
