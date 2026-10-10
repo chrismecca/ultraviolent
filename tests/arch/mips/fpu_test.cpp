@@ -179,6 +179,15 @@ const test::Registration denormal_results{
                 {mul_fmt(fmt_d, 4, 0, 2)}, fcsr::flush);
         t.check_equal(flushed.cpu.fpu().fpr[4], std::uint64_t{1} << 63); // -0
         t.check_equal(cause_of(flushed), std::uint32_t{0});
+
+        // 1e-200 squared underflows past the denormals and rounds to zero, a result that is
+        // not itself denormal: only the host's underflow flag shows it, and FS=0 traps.
+        System vanished;
+        run_fpu(vanished, {bits(1e-200), bits(9.0)}, {mul_fmt(fmt_d, 2, 0, 0)});
+        t.check(took_fpe(vanished), "unimplemented operation");
+        t.check_equal(cause_of(vanished),
+                      fcsr::unimplemented | fcsr::underflow | fcsr::inexact);
+        t.check_equal(vanished.cpu.fpu().fpr[2], bits(9.0));
     }};
 
 const test::Registration conversions{

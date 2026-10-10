@@ -6,6 +6,10 @@
 #include <cstdint>
 #include <limits>
 
+#if defined(__x86_64__) && defined(__SSE2__)
+#include <immintrin.h>
+#endif
+
 // MIPS IV floating point (ISA appendix B) with R10000 specifics (UM chapter 15).
 //
 // Arithmetic runs on the host's IEEE 754 binary32/binary64 hardware under the FCSR rounding
@@ -67,6 +71,42 @@ struct Outcome {
 };
 
 // Sets the host rounding mode for one operation and collects the IEEE exceptions it raises.
+#if defined(__x86_64__) && defined(__SSE2__)
+// On x86-64, binary32 and binary64 arithmetic is SSE, so MXCSR alone holds the rounding mode
+// and the exception flags. Read and written directly: the <cfenv> calls also save and load
+// the x87 control and status words, about 9% of host time in `cpu` (perf, 2026-10-10).
+class HostOperation {
+  public:
+    explicit HostOperation(unsigned rounding) : saved_{_mm_getcsr()} {
+        // FCSR RM (RN, RZ, RP, RM) to MXCSR RC (nearest 00, down 01, up 10, zero 11).
+        static constexpr std::uint32_t modes[] = {0u << 13, 3u << 13, 2u << 13, 1u << 13};
+        _mm_setcsr((saved_ & ~(rounding_mask | flag_mask)) | modes[rounding & 3]);
+    }
+    HostOperation(const HostOperation&) = delete;
+    HostOperation& operator=(const HostOperation&) = delete;
+    ~HostOperation() {
+        _mm_setcsr(saved_);
+    }
+
+    [[nodiscard]] std::uint32_t raised() const {
+        // MXCSR flags: IE 0, DE 1 (denormal operand, not an IEEE exception), ZE 2, OE 3,
+        // UE 4, PE 5.
+        const std::uint32_t raised = _mm_getcsr();
+        std::uint32_t cause = 0;
+        cause |= (raised & 0x20u) != 0 ? fcsr::inexact : 0;
+        cause |= (raised & 0x10u) != 0 ? fcsr::underflow : 0;
+        cause |= (raised & 0x08u) != 0 ? fcsr::overflow : 0;
+        cause |= (raised & 0x04u) != 0 ? fcsr::divide_by_zero : 0;
+        cause |= (raised & 0x01u) != 0 ? fcsr::invalid : 0;
+        return cause;
+    }
+
+  private:
+    static constexpr std::uint32_t rounding_mask = 3u << 13;
+    static constexpr std::uint32_t flag_mask = 0x3fu;
+    std::uint32_t saved_;
+};
+#else
 class HostOperation {
   public:
     explicit HostOperation(unsigned rounding) : saved_{std::fegetround()} {
@@ -94,6 +134,7 @@ class HostOperation {
   private:
     int saved_;
 };
+#endif
 
 template <class T, class Op> T guarded(Op op, T a, T b) {
     volatile T x = a;
