@@ -10,8 +10,9 @@ at RC-IP27 (the user chose no tag or release). Tier 0 stages A-H are done (2026-
 tier 1 and reframed it as a framework engine (2026-10-09): ADR-022 and doc/JIT.adoc, accepted
 2026-10-10. **J0-J4 are done (2026-10-10), with dispatch inside native code and per-block
 boundary checks, and tier 1 is the default engine: every workload runs faster than a 180 MHz
-R10000 in real time (prom 1.55x, boot 1.12x, cpu 1.45x, fs 1.24x), all digests and
-same-cycle snapshots identical.** Next: see Next task.
+R10000 in real time (best of 3: prom 1.67x, boot 1.20x, cpu 1.68x, fs 1.61x; 300.8, 215.9,
+302.8, 289.8 M cycles/s), all digests and same-cycle snapshots identical.** Next: see Next
+task.
 
 * **Tier 1 (JIT.adoc "Progress"):** J0, the processor personality in code (`ProcessorModel`,
   decode by model) and the builder (`operations.hpp`, `DirectBuilder`); J1, the native
@@ -34,6 +35,10 @@ same-cycle snapshots identical.** Next: see Next task.
   CPU's device pages (cpu.hpp) cache a virtual page that translates to one device mapping,
   under the data pages' rules, for every engine. Tier 1, one run each: prom 278.5, boot
   200.9, cpu 260.1, fs 222.6; 1.55, 1.12, 1.45, 1.24 times real time at 180 MHz.
+  Then: the FPU reads and writes MXCSR directly on x86-64 (`cpu` +16%); tier 0's cache
+  defaults to 32768 entries (`fs` +26%: lukewarm blocks reach the threshold); the scheduler
+  keeps its next deadline; 256 host page entries. Best of 3 (`k-tier1.json`): prom 300.8,
+  boot 215.9, cpu 302.8, fs 289.8 M cycles/s (JIT.adoc "Progress").
 
 * **New reference host (2026-10-07):** `uv-dev01`, Ryzen 5 3600, Debian 13; private state on
   its own XFS disk, `/srv/ultraviolent` (`local/` links there); DEVELOPMENT.adoc "Reference
@@ -403,14 +408,18 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **Margin above real time, then the multiprocessor.** Every workload is above real time at
-  180 MHz (tier 1, the default engine where the host has a backend); at 200 MHz `boot` is at
-  1.00x. Profile each workload again and take the next largest cost (candidates: the device
-  access path through `call_semantics`; block translation, 352,000 blocks in `boot`; the
-  4-7% of operations still decoded below the threshold; dispatch, then direct links, J6).
-  The goal after that (with the user, 2026-10-10): ADR-021's multiprocessor, each CPU at its
-  nominal clock in virtual time and host-parallel in fast mode; JIT.adoc "Toward
-  host-parallel vCPUs" lists what the engine keeps possible.
+. **The multiprocessor (with the user, 2026-10-10): review the plan first.** One CPU now
+  runs above real time on every workload at 180 MHz (1.20-1.68x) and at 200 MHz
+  (1.08-1.51x); at 250 MHz `boot` is at 0.86x (device-access-bound firmware delay loops),
+  the others 1.16-1.21x. The user's next goal is ADR-021's multiprocessor, each CPU at its
+  nominal clock in virtual time and host-parallel in fast mode (JIT.adoc "Toward
+  host-parallel vCPUs"). First step, within one node: the second CPU on the Hub (slice B), its
+  interrupts and IPIs, the PROM's CPU discovery and slave launch, deterministic reference
+  scheduling of two CPUs; then fast mode on host threads. Read what `slate`'s PROM and IRIX
+  do with two CPUs per node before modeling (ADR-021). Performance work left, by size:
+  device accesses in `boot` (about 140 host cycles each, spread over four layers); tier 0
+  and translation for lukewarm code (`boot` 13% in the engine loop); then dispatch and
+  direct links (J6).
 . **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
   inventory ID). What the PROM reads there may also select the deskside slot table.
 . **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.
@@ -1238,4 +1247,32 @@ Unknowns: where `boot`'s remaining time goes; how many host cycles a device acce
 Best checkpoint: unchanged (rc_alpha.remote_login); network not yet set up on uv-dev01.
 Next step: profile `boot` on tier 1 (done the same day: tier 1 made the default engine;
   CycleTime and device pages took `boot` to 1.12x real time).
+----
+
+----
+Date: 2026-10-10
+Milestone: JIT (ROADMAP): above real time on every workload
+Hypothesis: what keeps `boot` below real time is device accesses in firmware delay loops,
+  and `cpu` and `fs` have large costs outside native code.
+Evidence: perf of each workload on tier 1; a temporary histogram of device loads by pc and
+  address (Hub PI_RT_COUNT from IP27PROM, an IOC3 UART status byte from IO6PROM); exact
+  counts of device and slow-path accesses (boot: 736 million device reads, 67 million
+  writes); sweeps of tier 0's cache size and the threshold.
+Changed: tier 1 the default engine (c4359b8); CycleTime, exact division by an invariant
+  divisor (288e984); CPU device pages (d9c0e6a); FPU through MXCSR (x86-64); tier 0's cache
+  32768 entries (a20f8ee); the scheduler's kept next deadline; 256 host page entries.
+Tests: all presets; virtual_time.invariant_divisor_divides_exactly and
+  cycle_time_matches_time_at_cycles; mips.device_pages_* (five rules, each mutation fails
+  its test); mips.fpu.denormal_results underflow to zero (catches a wrong underflow flag);
+  scheduler.next_deadline_follows_changes; same-cycle snapshots on all three engines; all
+  digests at thresholds 0 and 64.
+Newly proven: one CPU above real time at 180 and 200 MHz on every workload (best of 3: 300.8,
+  215.9, 302.8, 289.8 M cycles/s).
+Disproven: that lowering the translation threshold helps `fs` most (the tier-0 cache size
+  did: lukewarm blocks were evicted before reaching it); that the divisions were most of a
+  device access (about 17 of 220 host cycles).
+Unknowns: what slate's PROM and IRIX do with two CPUs per node; how the four-CPU fast mode
+  keeps virtual time in step across host threads.
+Best checkpoint: unchanged (rc_alpha.remote_login); network not yet set up on uv-dev01.
+Next step: review the multiprocessor plan with the user.
 ----

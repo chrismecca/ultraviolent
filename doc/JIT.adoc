@@ -482,6 +482,16 @@ J5 and J6 are optional for this personality.
   threshold 16 instead of 64 helps less (240.5) and costs `boot` translation time. The
   default is now 32768 (tier 0 alone also gains: `fs` 105.4 to 111.7).
 
+* **Scheduler and host pages (2026-10-10).** The scheduler keeps its next deadline and
+  advances with nothing due by moving the clock only (`boot` 203.6 to 212.2); the host page
+  caches have 256 entries (3-5% on every workload). Best of 3 (`local/bench/r3600/
+  k-tier1.json`), M cycles/s: prom 300.8, boot 215.9, cpu 302.8, fs 289.8; 2.26-3.08x J2,
+  2.83-4.03x stage G; at 180 MHz 1.67, 1.20, 1.68, 1.61 times real time. Gates: all presets;
+  same-cycle snapshots on all three engines; all digests at thresholds 0 and 64. What remains
+  in `boot` is about 800 million device accesses (firmware delay loops) at about 140 host
+  cycles each, spread over the helper, the CPU's access path, the synchronized target, and
+  the Hub: no single cost dominates.
+
 == Toward host-parallel vCPUs (not built)
 
 The next machine goal after one CPU at its nominal clock is ADR-021's four CPUs, each at the
