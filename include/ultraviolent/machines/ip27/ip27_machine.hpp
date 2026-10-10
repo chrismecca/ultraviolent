@@ -295,6 +295,8 @@ class Ip27Machine {
     };
 
     Ip27Config config_;
+    // Cycle counts to virtual time for the CPU clock, on every synchronized access.
+    CycleTime cpu_time_{config_.cpu_clock};
     // FNV-1a hash of the flash contents, to match snapshots with their PROM.
     std::uint64_t flash_hash_{};
     std::vector<std::uint64_t> pc_probes_;

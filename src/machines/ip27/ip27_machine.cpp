@@ -556,7 +556,7 @@ void Ip27Machine::step() {
 void Ip27Machine::synchronize_time() {
     invariant(!executing_ || synchronized_accesses_ != 0,
               "events run only between instructions or inside a synchronized access");
-    scheduler_.advance_to(time_at_cycles(cpu_.cycles(), config_.cpu_clock));
+    scheduler_.advance_to(cpu_time_.time_at(cpu_.cycles()));
     update_next_event();
 }
 
@@ -569,7 +569,7 @@ void Ip27Machine::update_next_event() {
         // deadline: this runs after every device access.
         if (*deadline != converted_deadline_) {
             std::uint64_t cycle = cycles_at(*deadline, config_.cpu_clock);
-            if (time_at_cycles(cycle, config_.cpu_clock) < *deadline) {
+            if (cpu_time_.time_at(cycle) < *deadline) {
                 ++cycle;
             }
             converted_deadline_ = *deadline;
