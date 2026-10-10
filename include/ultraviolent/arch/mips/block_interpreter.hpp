@@ -91,6 +91,8 @@ struct BlockStatistics {
 class BlockInterpreter {
   public:
     static constexpr std::size_t default_cache_entries = 4096;
+    // Chosen from J2's measurements (JIT.adoc "Progress").
+    static constexpr std::uint64_t default_native_threshold = 64;
 
     explicit BlockInterpreter(Cpu& cpu, std::size_t cache_entries = default_cache_entries);
 
@@ -104,6 +106,13 @@ class BlockInterpreter {
     // Between runs; not owned.
     void set_native_code(NativeCode* native) {
         native_ = native;
+    }
+    // Tier 1 translates a block once its cache entry has been hit `hits` times since it was
+    // built, and runs it decoded until then: translation costs microseconds, and a block the
+    // direct-mapped cache keeps evicting would otherwise be translated again every time
+    // (JIT.adoc "Progress", J1). 0 translates on first execution (tests).
+    void set_native_threshold(std::uint64_t hits) {
+        native_threshold_ = hits;
     }
     [[nodiscard]] std::size_t cache_entries() const {
         return cache_.size();
@@ -146,6 +155,7 @@ class BlockInterpreter {
     std::uint64_t mask_{};
     BlockStatistics statistics_;
     NativeCode* native_{};
+    std::uint64_t native_threshold_{default_native_threshold};
 };
 
 } // namespace ultraviolent::mips

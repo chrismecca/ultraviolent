@@ -57,7 +57,7 @@ void usage() {
         "                    [--sample-pc NS] [--date DATE] [--stop-at-prompt]\n"
         "                    [--interactive] [--ethernet tap:IFNAME|pcap:FILE]\n"
         "                    [--engine reference|tier0|tier1] [--engine-statistics]\n"
-        "                    [--tier0-cache-entries N]\n"
+        "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
         "from a snapshot. Snapshots are for exploration; checkpoints need a cold run.\n"
@@ -92,7 +92,8 @@ void usage() {
         "engine is tested against, doc/IR.adoc).\n"
         "--trace cpu and --probe always use the reference. --engine-statistics prints tier\n"
         "0's block statistics at the end of the run. --tier0-cache-entries N sizes its\n"
-        "block cache (a power of two; default 4096).\n"
+        "block cache (a power of two; default 4096). --tier1-threshold N translates a block\n"
+        "to native code after N cache hits (0: on first execution).\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
         "scsi ethernet irq scheduler firmware machine all\n",
         stderr);
@@ -229,6 +230,7 @@ struct Options {
     mips::ExecutionEngine engine{mips::ExecutionEngine::tier0};
     bool engine_statistics{};
     std::uint64_t block_cache_entries{mips::BlockInterpreter::default_cache_entries};
+    std::uint64_t native_threshold{mips::BlockInterpreter::default_native_threshold};
 };
 
 // "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" (UTC) as Unix seconds.
@@ -335,6 +337,13 @@ std::optional<Options> parse(std::span<char*> arguments) {
                 return std::nullopt;
             }
             options.block_cache_entries = *number;
+        } else if (flag == "--tier1-threshold") {
+            const auto number = parse_number(value);
+            if (!number) {
+                std::fprintf(stderr, "--tier1-threshold takes a number\n");
+                return std::nullopt;
+            }
+            options.native_threshold = *number;
         } else if (flag == "--memory" || flag == "--cycles") {
             const auto number = parse_number(value);
             if (!number) {
@@ -428,6 +437,7 @@ int main(int argc, char** argv) {
         return exit_usage;
     }
     machine.set_block_cache_entries(options->block_cache_entries);
+    machine.set_native_threshold(options->native_threshold);
     backends::StreamTraceSink sink{stderr};
     machine.tracer().set_sink(&sink);
     // The guest console: the IOC3's first serial port, on standard output, with scripted input.

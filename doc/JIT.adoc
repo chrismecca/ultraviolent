@@ -1,7 +1,7 @@
 = Tier 1: Native Execution Engine Design
 
 Status: accepted (2026-10-10: the builder approach, the J0 scope, an in-house encoder, and
-compile policy left to measurement). J0 and J1 are implemented ("Progress"). This document
+compile policy left to measurement). J0, J1, and J2 are implemented ("Progress"). This document
 replaces the outline in IR.adoc "Proposal: tier 1"; IR.adoc remains the reference for the
 execution rules, decoded blocks, the block cache, and tier 0.
 
@@ -321,6 +321,36 @@ J5 and J6 are optional for this personality.
   rebuilds (mean reuse about 20). **Compile policy, decided from this:** translate a block only
   once its cache entry has proved hot; the threshold is chosen from J2's measurements, and
   tests translate on first execution.
+* **J2 (2026-10-10):** native emission from the one source. 63 operations (shifts, HI/LO
+  moves, register and immediate arithmetic, logic, and comparisons with their overflow
+  exceptions, LUI, every branch, branch-likely, and BxxZAL, J/JAL/JR/JALR) are in builder form
+  (`operations.hpp`); the interpreters execute them through `DirectBuilder` and tier 1 emits
+  them through `EmitBuilder` (`x86_64_translator.cpp`): values are translation-time constants
+  or scratch registers, register zero is a constant and writes to it vanish, constants fold,
+  J2's register file loads and stores the Cpu, conditions are 0/1 registers, `raise_if` is a
+  side exit that takes the exception through a helper, and `apply_flow` and `end_cycle` are
+  emitted (the internal event out of line). A MIPS III operation that the block's
+  translation context makes reserved goes to `call_semantics`, decided at translation time.
+  Everything else (multiply and divide, traps, MOVZ/MOVN, loads and stores, CP0, the FPU)
+  stays `call_semantics`.
+  Gates: `mips.tier1.builder_operations.*` (every builder operation from random registers,
+  including 0 and 31, at overflow and sign edges, every branch kind, JALR/JR/JAL, against the
+  reference on tier 0 and tier 1); the whole differential suite; mutation checks of the
+  emitter (SUB as ADD: 4 failures; branch-likely nullification off by 4: 6; 32-bit overflow
+  computed at 64 bits: 6; no internal event: 2); all presets; all four digests identical with
+  every block native (threshold 0) and with the default threshold; same-cycle snapshots and
+  disk byte-identical to stage G on tier 1.
+  **Compile policy, decided:** translate after 64 cache hits (`--tier1-threshold`; tests use 0).
+  Translating on first execution spent 123 of 300 s of `boot` and 34 of 49 s of `fs`
+  translating (44 and 12.6 million translations); the sweep on `fs` (M cycles/s by threshold:
+  1: 58.8, 4: 85.3, 16: 103.8, 64: 111.3, 256: 114.2; `cpu` 96.0 to 97.5 throughout) chose 64,
+  which keeps hot code native for J3 and J4. Revisit with them.
+  Result (best of 3, M cycles/s, prom, boot, cpu, fs): 120.5, 95.6, 98.4, 111.6, 0.93-0.95x
+  tier 0. Expected at J2: each native operation still has tier 0's boundary checks and loads
+  and stores guest registers in memory, and 43-50% of operations (mostly loads and stores)
+  still go through a helper call. J3 (the register cache) and J4 (the memory fast path) are
+  where native code should pass tier 0; translation itself is 2-3 us per block and is worth
+  reducing before lowering the threshold.
 
 == Review questions
 

@@ -299,6 +299,7 @@ class Tier1EngineSized {
     explicit Tier1EngineSized(Cpu& cpu)
         : native_{make_native_code(cpu, CodeBytes)}, interpreter_{cpu, Entries} {
         interpreter_.set_native_code(native_.get());
+        interpreter_.set_native_threshold(0); // every block native
     }
 
     void add(std::uint64_t /*virtual_address*/, std::uint32_t /*word*/) {}

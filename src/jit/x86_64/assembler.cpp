@@ -99,6 +99,17 @@ void Assembler::mov(Reg dst, std::uint64_t immediate) {
     }
 }
 
+void Assembler::mov(Mem dst, std::int32_t immediate) {
+    rex(true, 0, 0, code(dst.base));
+    byte(0xc7);
+    modrm_memory(0, dst);
+    bytes32(static_cast<std::uint32_t>(immediate));
+}
+
+void Assembler::mov32(Reg dst, Reg src) {
+    op_rr(0x89, src, dst, false);
+}
+
 void Assembler::mov_byte(Mem dst, std::uint8_t immediate) {
     rex(false, 0, 0, code(dst.base));
     byte(0xc6);
@@ -187,6 +198,9 @@ void Assembler::add(Reg dst, std::int32_t immediate) {
 void Assembler::or_(Reg dst, std::int32_t immediate) {
     group1(1, dst, immediate);
 }
+void Assembler::sub(Reg dst, std::int32_t immediate) {
+    group1(5, dst, immediate);
+}
 void Assembler::and_(Reg dst, std::int32_t immediate) {
     group1(4, dst, immediate);
 }
@@ -198,6 +212,9 @@ void Assembler::cmp(Reg a, std::int32_t immediate) {
 }
 void Assembler::add32(Reg dst, std::int32_t immediate) {
     group1(0, dst, immediate, false);
+}
+void Assembler::sub32(Reg dst, std::int32_t immediate) {
+    group1(5, dst, immediate, false);
 }
 
 void Assembler::cmp(Reg a, Mem b) {

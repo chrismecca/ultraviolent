@@ -47,6 +47,9 @@ void BlockInterpreter::run_until(const std::uint64_t& limit) {
 // region never removes code that is running (JIT.adoc "Native code: memory, lifetime, calls").
 bool BlockInterpreter::run_native(Entry& entry, const std::uint64_t& limit, bool cached) {
     if (entry.native == nullptr || entry.native_epoch != native_->epoch()) {
+        if (entry.uses < native_threshold_) {
+            return false;
+        }
         entry.native = native_->translate(entry.block);
         entry.native_epoch = native_->epoch();
         if (entry.native == nullptr) {

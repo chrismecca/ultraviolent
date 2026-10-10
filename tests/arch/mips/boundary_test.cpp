@@ -193,6 +193,7 @@ const test::Registration tier0_interrupt_from_access{
 struct Tier1 {
     explicit Tier1(Cpu& cpu) : native{make_native_code(cpu)}, engine{cpu} {
         engine.set_native_code(native.get());
+        engine.set_native_threshold(0);
     }
     std::unique_ptr<NativeCode> native;
     BlockInterpreter engine;

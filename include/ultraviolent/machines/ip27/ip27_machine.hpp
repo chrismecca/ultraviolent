@@ -172,6 +172,10 @@ class Ip27Machine {
     void set_block_cache_entries(std::size_t entries) {
         block_interpreter_.set_cache_entries(entries);
     }
+    // Tier 1's translation threshold (BlockInterpreter::set_native_threshold).
+    void set_native_threshold(std::uint64_t hits) {
+        block_interpreter_.set_native_threshold(hits);
+    }
     // 4 KiB frames of memory and flash now marked as holding decoded code.
     [[nodiscard]] std::size_t marked_code_frames() const {
         return memory_.marked_frames() + flash_.marked_frames();

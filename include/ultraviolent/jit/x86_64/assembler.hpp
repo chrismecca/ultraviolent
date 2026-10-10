@@ -86,6 +86,10 @@ class Assembler {
     void mov(Mem dst, Reg src);
     // The shortest form: mov r32, imm32 (zero-extending), mov r64, simm32, or movabs.
     void mov(Reg dst, std::uint64_t immediate);
+    // mov qword [mem], simm32 (sign-extended).
+    void mov(Mem dst, std::int32_t immediate);
+    // mov r32, r32: the low 32 bits, zero-extended.
+    void mov32(Reg dst, Reg src);
     void mov_byte(Mem dst, std::uint8_t immediate);
     void mov_byte(Mem dst, Reg src);
     void movzx_byte(Reg dst, Mem src);
@@ -101,6 +105,7 @@ class Assembler {
     void cmp(Reg a, Reg b);
     void test(Reg a, Reg b);
     void add(Reg dst, std::int32_t immediate);
+    void sub(Reg dst, std::int32_t immediate);
     void and_(Reg dst, std::int32_t immediate);
     void or_(Reg dst, std::int32_t immediate);
     void xor_(Reg dst, std::int32_t immediate);
@@ -112,6 +117,7 @@ class Assembler {
     void add32(Reg dst, Reg src);
     void sub32(Reg dst, Reg src);
     void add32(Reg dst, std::int32_t immediate);
+    void sub32(Reg dst, std::int32_t immediate);
 
     void shl(Reg dst, std::uint8_t count);
     void shr(Reg dst, std::uint8_t count);

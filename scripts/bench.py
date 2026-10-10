@@ -85,7 +85,9 @@ def base_command(args, scratch):
     return [args.binary, "--machine", "ip27", "--prom", args.prom, "--io6prom", args.io6prom,
             "--flash", os.path.join(scratch, "flash.bin"),
             "--nvram", os.path.join(scratch, "nvram.bin"), "--engine", args.engine] + (
-                ["--tier0-cache-entries", str(args.cache_entries)] if args.cache_entries else [])
+                ["--tier0-cache-entries", str(args.cache_entries)] if args.cache_entries else []) + (
+                ["--tier1-threshold", str(args.tier1_threshold)]
+                if args.tier1_threshold is not None else [])
 
 
 def make_fixture(args):
@@ -246,7 +248,8 @@ def run(args):
             print(counter_summary(entry), flush=True)
     if args.save:
         host = {"binary": args.binary, "engine": args.engine,
-                "cache_entries": args.cache_entries, "cpu": cpu_model(),
+                "cache_entries": args.cache_entries, "tier1_threshold": args.tier1_threshold,
+                "cpu": cpu_model(),
                 "kernel": os.uname().release,
                 "repeat": args.repeat, "date": time.strftime("%Y-%m-%d %H:%M")}
         with open(args.save, "w") as f:
@@ -277,6 +280,8 @@ def main():
     common.add_argument("--io6prom", default=os.path.join(FIRMWARE, "io6prom.img"))
     common.add_argument("--engine", default="tier0", choices=["reference", "tier0", "tier1"])
     common.add_argument("--cache-entries", type=int, help="tier 0's block cache size")
+    common.add_argument("--tier1-threshold", type=int,
+                        help="cache hits before tier 1 translates a block")
     commands = parser.add_subparsers(dest="command", required=True)
     fixture = commands.add_parser("fixture", parents=[common],
                                   help="build the fixture from an installed system")

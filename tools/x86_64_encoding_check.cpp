@@ -64,6 +64,8 @@ int main() {
             [=](Assembler& a) { a.add32(reg, other); });
         add(std::format("sub {}, {}", names32[r], names32[(r * 7 + 3) % 16]),
             [=](Assembler& a) { a.sub32(reg, other); });
+        add(std::format("mov {}, {}", names32[r], names32[(r * 7 + 3) % 16]),
+            [=](Assembler& a) { a.mov32(reg, other); });
         add(std::format("movsxd {}, {}", n, names32[(r * 7 + 3) % 16]),
             [=](Assembler& a) { a.movsxd(reg, other); });
         add(std::format("movzx {}, {}", names32[r], names8[(r * 7 + 3) % 16]),
@@ -75,6 +77,8 @@ int main() {
             add(std::format("xor {}, {}", n, imm), [=](Assembler& a) { a.xor_(reg, imm); });
             add(std::format("cmp {}, {}", n, imm), [=](Assembler& a) { a.cmp(reg, imm); });
             add(std::format("add {}, {}", names32[r], imm), [=](Assembler& a) { a.add32(reg, imm); });
+            add(std::format("sub {}, {}", n, imm), [=](Assembler& a) { a.sub(reg, imm); });
+            add(std::format("sub {}, {}", names32[r], imm), [=](Assembler& a) { a.sub32(reg, imm); });
         }
         add(std::format("not {}", n), [=](Assembler& a) { a.not_(reg); });
         for (const std::uint8_t c : std::initializer_list<std::uint8_t>{1, 5, 31, 63}) {
@@ -127,6 +131,10 @@ int main() {
                     add(std::format("cmp {}, 0x1", mem(m, "BYTE")),
                         [=](Assembler& a) { a.cmp_byte(m, 1); });
                     add(std::format("add {}, 1", mem(m)), [=](Assembler& a) { a.add(m, 1); });
+                    add(std::format("mov {}, -5", mem(m)),
+                        [=](Assembler& a) { a.mov(m, std::int32_t{-5}); });
+                    add(std::format("mov {}, 0x12345678", mem(m)),
+                        [=](Assembler& a) { a.mov(m, std::int32_t{0x1234'5678}); });
                     add(std::format("add {}, 0x1000", mem(m)),
                         [=](Assembler& a) { a.add(m, 0x1000); });
                 }
