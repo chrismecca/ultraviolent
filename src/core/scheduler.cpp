@@ -23,6 +23,7 @@ void Scheduler::schedule_at(EventId event, VirtualTime deadline) {
     heap_.push_back(event.index);
     target.heap_position = heap_.size() - 1;
     sift_up(target.heap_position);
+    heap_changed();
 }
 
 void Scheduler::schedule_after(EventId event, VirtualDuration delay) {
@@ -47,16 +48,20 @@ std::optional<VirtualTime> Scheduler::deadline(EventId event) const {
     return target.deadline;
 }
 
-std::optional<VirtualTime> Scheduler::next_deadline() const {
-    if (heap_.empty()) {
-        return std::nullopt;
+void Scheduler::heap_changed() {
+    if (!heap_.empty()) {
+        next_deadline_ = events_[heap_.front()].deadline;
     }
-    return events_[heap_.front()].deadline;
 }
 
 std::size_t Scheduler::advance_to(VirtualTime limit) {
     invariant(!dispatching_, "Scheduler::advance_to is not reentrant");
     invariant(limit >= now(), "virtual time must not move backwards");
+    if (heap_.empty() || next_deadline_ > limit) {
+        // Nothing is due: only the clock moves.
+        clock_.advance_to(limit);
+        return 0;
+    }
 
     struct DispatchGuard {
         bool& flag;
@@ -136,6 +141,7 @@ void Scheduler::load_state(const StateImage& image) {
             sift_up(event.heap_position);
         }
     }
+    heap_changed();
 }
 
 const Scheduler::Event& Scheduler::event_at(EventId event) const {
@@ -206,6 +212,7 @@ void Scheduler::remove_from_heap(std::uint32_t index) {
     place(position, last);
     sift_up(position);
     sift_down(events_[last].heap_position);
+    heap_changed();
 }
 
 } // namespace ultraviolent

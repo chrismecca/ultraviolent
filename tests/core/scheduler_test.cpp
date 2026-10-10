@@ -216,4 +216,31 @@ const test::Registration dispatch_trace_is_deterministic{
                                          "31 scheduler fire ping", "38 scheduler fire pong"});
     }};
 
+// next_deadline follows every change to the pending set (the scheduler keeps it, and
+// advance_to skips dispatch when nothing is due before its limit).
+const test::Registration next_deadline_follows_changes{
+    "scheduler.next_deadline_follows_changes", [](test::Context& t) {
+        Harness h;
+        std::vector<std::string> fired;
+        const EventId a = h.scheduler.add_event("a", [&] { fired.push_back("a"); });
+        const EventId b = h.scheduler.add_event("b", [&] { fired.push_back("b"); });
+        t.check(!h.scheduler.next_deadline().has_value(), "nothing pending");
+        h.scheduler.schedule_at(a, VirtualTime{100});
+        t.check_equal(h.scheduler.next_deadline()->nanoseconds, std::uint64_t{100});
+        h.scheduler.schedule_at(b, VirtualTime{50});
+        t.check_equal(h.scheduler.next_deadline()->nanoseconds, std::uint64_t{50});
+        h.scheduler.schedule_at(b, VirtualTime{150}); // rescheduled later: a is next
+        t.check_equal(h.scheduler.next_deadline()->nanoseconds, std::uint64_t{100});
+        h.scheduler.cancel(a);
+        t.check_equal(h.scheduler.next_deadline()->nanoseconds, std::uint64_t{150});
+        h.scheduler.schedule_at(a, VirtualTime{120});
+        t.check_equal(h.scheduler.advance_to(VirtualTime{110}), std::size_t{0});
+        t.check_equal(h.scheduler.now().nanoseconds, std::uint64_t{110});
+        t.check_equal(h.scheduler.advance_to(VirtualTime{130}), std::size_t{1});
+        t.check_equal(h.scheduler.next_deadline()->nanoseconds, std::uint64_t{150});
+        t.check_equal(h.scheduler.advance_to(VirtualTime{150}), std::size_t{1});
+        t.check(!h.scheduler.next_deadline().has_value(), "nothing pending");
+        t.check(fired == std::vector<std::string>{"a", "b"});
+    }};
+
 } // namespace
