@@ -19,6 +19,7 @@
 #include <format>
 #include <functional>
 #include <initializer_list>
+#include <memory>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -287,9 +288,53 @@ template <class Engine> struct DifferentialWith {
     }
 };
 
+// The engine under test from tier 1 (JIT.adoc): tier 0's executor with native code for its
+// blocks. On hosts without a tier-1 backend it is tier 0.
+template <std::size_t Entries = BlockInterpreter::default_cache_entries,
+          std::size_t CodeBytes = default_native_code_bytes>
+class Tier1EngineSized {
+  public:
+    static constexpr bool decodes_unsupported = false;
+
+    explicit Tier1EngineSized(Cpu& cpu)
+        : native_{make_native_code(cpu, CodeBytes)}, interpreter_{cpu, Entries} {
+        interpreter_.set_native_code(native_.get());
+    }
+
+    void add(std::uint64_t /*virtual_address*/, std::uint32_t /*word*/) {}
+
+    void run_until(const std::uint64_t& limit) {
+        interpreter_.run_until(limit);
+        const BlockStatistics& s = interpreter_.statistics();
+        decoded_steps = s.operations;
+        fallback_reasons = s.fallbacks;
+        fallback_steps = 0;
+        for (const std::uint64_t n : s.fallbacks) {
+            fallback_steps += n;
+        }
+    }
+
+    [[nodiscard]] const BlockStatistics& statistics() const {
+        return interpreter_.statistics();
+    }
+    [[nodiscard]] const NativeCode* native() const {
+        return native_.get();
+    }
+
+    std::uint64_t decoded_steps{};
+    std::uint64_t fallback_steps{};
+    std::array<std::uint64_t, no_block_count> fallback_reasons{};
+
+  private:
+    std::unique_ptr<NativeCode> native_;
+    BlockInterpreter interpreter_;
+};
+
 using Differential = DifferentialWith<PredecodedEngine>;
 using Tier0Engine = Tier0EngineSized<>;
 // Two entries: nearly every block change replaces an entry.
 using Tier0TinyCacheEngine = Tier0EngineSized<2>;
+using Tier1Engine = Tier1EngineSized<>;
+using Tier1TinyCacheEngine = Tier1EngineSized<2>;
 
 } // namespace ultraviolent::mips::testing

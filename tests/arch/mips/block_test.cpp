@@ -55,14 +55,14 @@ const test::Registration state_changes{
     "mips.block.ends_after_state_changes", [](test::Context& t) {
         for (const std::uint32_t word :
              {mtc0(t0, cp0::status), dmtc0(t0, cp0::entry_hi), eret(), tlbr(), tlbwi(), tlbwr(),
-              tlbp(), cache(0x19, 0, t0), sync()}) {
+              tlbp(), cache(0x19, 0, t0), assembler::sync()}) {
             const auto b = build({nop(), word, nop(), nop()});
             t.check(!b.none);
             t.check_equal(b.block.operations.size(), std::size_t{2});
             t.check(b.block.end == BlockEnd::state_change);
         }
         // MFC0 and SYSCALL continue the block (exceptions end execution when taken).
-        const auto b = build({mfc0(t0, cp0::count), syscall(), nop(), sync()});
+        const auto b = build({mfc0(t0, cp0::count), syscall(), nop(), assembler::sync()});
         t.check_equal(b.block.operations.size(), std::size_t{4});
     }};
 

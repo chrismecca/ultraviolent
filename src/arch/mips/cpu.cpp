@@ -71,6 +71,24 @@ Cpu::Cpu(AddressSpace& bus, Tracer& tracer, const ProcessorModel& model)
     reset(ResetKind::power_on);
 }
 
+Cpu::NativeLayout Cpu::native_layout() const {
+    const auto at = [this](const void* field) {
+        return static_cast<std::int32_t>(static_cast<const std::byte*>(field) -
+                                         reinterpret_cast<const std::byte*>(this));
+    };
+    return {.gpr = at(state_.gpr.data()),
+            .hi = at(&state_.hi),
+            .lo = at(&state_.lo),
+            .pc = at(&state_.pc),
+            .next_pc = at(&state_.next_pc),
+            .delay_slot = at(&state_.delay_slot),
+            .cycles = at(&cycles_),
+            .unretired_cycles = at(&unretired_cycles_),
+            .timer_cycle = at(&timer_cycle_),
+            .interrupt_check = at(&interrupt_check_),
+            .left_host_path = at(&left_host_path_)};
+}
+
 void Cpu::reset(ResetKind kind) {
     if (kind == ResetKind::warm) {
         // Soft Reset exception (UM 17 "Soft Reset Exception"): registers are preserved except

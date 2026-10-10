@@ -397,14 +397,41 @@ class Cpu final : public InterruptSink {
         if (!retired) {
             ++unretired_cycles_;
         }
-        // Count advances on every other cycle; IP[7] is set when it becomes equal to Compare,
-        // which next happens at timer_cycle_.
         if (cycles_ == timer_cycle_) [[unlikely]] {
-            timer_interrupt_ = true;
-            timer_cycle_ += timer_period();
-            update_derived_state();
+            reach_internal_event();
         }
     }
+    // The earliest cycle count at which something inside the processor becomes observable
+    // (today the Count/Compare match). An engine that accounts cycles itself calls
+    // reach_internal_event when cycles() becomes equal to it, as end_cycle does; it need not
+    // know what the event is (JIT.adoc "Timing").
+    [[nodiscard]] std::uint64_t next_internal_event_cycle() const {
+        return timer_cycle_;
+    }
+    void reach_internal_event() {
+        // Count became equal to Compare: IP[7] is set (UM 14.8).
+        timer_interrupt_ = true;
+        timer_cycle_ += timer_period();
+        update_derived_state();
+    }
+
+    // Where generated code finds the fields it reads and writes directly, as byte offsets from
+    // the Cpu object (tier 1, JIT.adoc). Taken from member addresses, so they describe this
+    // build's layout. Everything else goes through Cpu's functions.
+    struct NativeLayout {
+        std::int32_t gpr;
+        std::int32_t hi;
+        std::int32_t lo;
+        std::int32_t pc;
+        std::int32_t next_pc;
+        std::int32_t delay_slot; // bool
+        std::int32_t cycles;
+        std::int32_t unretired_cycles;
+        std::int32_t timer_cycle;
+        std::int32_t interrupt_check; // bool
+        std::int32_t left_host_path;  // bool
+    };
+    [[nodiscard]] NativeLayout native_layout() const;
 
     // Snapshot support (StateImage).
     void save_state(StateImage& image) const;

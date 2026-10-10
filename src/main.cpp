@@ -56,7 +56,7 @@ void usage() {
         "                    [--console LINE]... [--cdrom FILE] [--disk FILE]\n"
         "                    [--sample-pc NS] [--date DATE] [--stop-at-prompt]\n"
         "                    [--interactive] [--ethernet tap:IFNAME|pcap:FILE]\n"
-        "                    [--engine reference|tier0] [--engine-statistics]\n"
+        "                    [--engine reference|tier0|tier1] [--engine-statistics]\n"
         "                    [--tier0-cache-entries N]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
@@ -87,8 +87,9 @@ void usage() {
         "ends a run early; the snapshot, flash, NVRAM, and disk are still written.\n"
         "--date YYYY-MM-DD[THH:MM:SS] sets the time-of-day clock at power-on (UTC; default\n"
         "2026-01-01): virtual time runs it from there.\n"
-        "--engine reference|tier0 selects the execution engine (default tier0, decoded\n"
-        "blocks; reference is the interpreter every engine is tested against, doc/IR.adoc).\n"
+        "--engine reference|tier0|tier1 selects the execution engine (default tier0, decoded\n"
+        "blocks; tier1, native code for them, doc/JIT.adoc; reference is the interpreter every\n"
+        "engine is tested against, doc/IR.adoc).\n"
         "--trace cpu and --probe always use the reference. --engine-statistics prints tier\n"
         "0's block statistics at the end of the run. --tier0-cache-entries N sizes its\n"
         "block cache (a power of two; default 4096).\n"
@@ -300,8 +301,10 @@ std::optional<Options> parse(std::span<char*> arguments) {
                 options.engine = mips::ExecutionEngine::reference;
             } else if (value == "tier0") {
                 options.engine = mips::ExecutionEngine::tier0;
+            } else if (value == "tier1") {
+                options.engine = mips::ExecutionEngine::tier1;
             } else {
-                std::fprintf(stderr, "--engine takes reference or tier0\n");
+                std::fprintf(stderr, "--engine takes reference, tier0, or tier1\n");
                 return std::nullopt;
             }
         } else if (flag == "--cdrom") {
@@ -420,7 +423,10 @@ int main(int argc, char** argv) {
     }
 
     ip27::Ip27Machine machine{config, *prom};
-    machine.set_execution_engine(options->engine);
+    if (!machine.set_execution_engine(options->engine)) {
+        std::fprintf(stderr, "configuration error: tier 1 is not available on this host\n");
+        return exit_usage;
+    }
     machine.set_block_cache_entries(options->block_cache_entries);
     backends::StreamTraceSink sink{stderr};
     machine.tracer().set_sink(&sink);
@@ -634,6 +640,18 @@ int main(int argc, char** argv) {
     if (options->engine_statistics) {
         print_block_statistics(machine.block_statistics(), machine.marked_code_frames(),
                                machine.cpu().code_frame_stores());
+        if (const mips::NativeCode* native = machine.native_code()) {
+            const mips::NativeStatistics& n = native->statistics();
+            std::fprintf(stderr,
+                         "tier1: %llu blocks translated, %llu native bytes, %.3f s translating, "
+                         "%llu discards, %llu operations native, %llu through call_semantics\n",
+                         static_cast<unsigned long long>(n.blocks_translated),
+                         static_cast<unsigned long long>(n.native_bytes),
+                         static_cast<double>(n.translation_nanoseconds) / 1e9,
+                         static_cast<unsigned long long>(n.discards),
+                         static_cast<unsigned long long>(n.native_operations),
+                         static_cast<unsigned long long>(n.helper_operations));
+        }
     }
     const auto& state = machine.cpu().state();
     std::fprintf(stderr, "stopped after %llu cycles at virtual %llu ns, pc %#018llx\n",

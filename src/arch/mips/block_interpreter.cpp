@@ -30,19 +30,51 @@ void BlockInterpreter::run_until(const std::uint64_t& limit) {
             continue;
         }
         const std::uint64_t hits = statistics_.hits;
-        const Block* block = lookup(cpu_.state().pc);
-        if (block == nullptr) {
+        Entry* entry = lookup(cpu_.state().pc);
+        if (entry == nullptr) {
             reference_.step();
             continue;
         }
-        run_block(*block, limit, statistics_.hits != hits);
+        const bool cached = statistics_.hits != hits;
+        if (native_ != nullptr && run_native(*entry, limit, cached)) {
+            continue;
+        }
+        run_block(entry->block, limit, cached);
     }
+}
+
+// Native code is made only here, between blocks, so a translation that discards the code
+// region never removes code that is running (JIT.adoc "Native code: memory, lifetime, calls").
+bool BlockInterpreter::run_native(Entry& entry, const std::uint64_t& limit, bool cached) {
+    if (entry.native == nullptr || entry.native_epoch != native_->epoch()) {
+        entry.native = native_->translate(entry.block);
+        entry.native_epoch = native_->epoch();
+        if (entry.native == nullptr) {
+            return false;
+        }
+    }
+    const NativeExit exit = native_->run(entry.native, limit);
+    if (exit.reason == BlockExit::host_path) {
+        ++statistics_.barriers[static_cast<std::size_t>(cpu_.last_bus_access())];
+    }
+    count_exit(exit.reason, exit.operations, cached);
+    return true;
+}
+
+void BlockInterpreter::count_exit(BlockExit exit, std::size_t operations, bool cached) {
+    ++statistics_.entries;
+    statistics_.operations += operations;
+    if (cached) {
+        statistics_.cached_operations += operations;
+    }
+    ++statistics_.run_lengths[operations];
+    ++statistics_.exits[static_cast<std::size_t>(exit)];
 }
 
 // Lookups happen only between blocks, so replacing an entry never touches the block being
 // executed, and invalidation never frees anything: a stale entry simply stops matching
 // (IR.adoc "Keeping blocks valid").
-const Block* BlockInterpreter::lookup(std::uint64_t pc) {
+BlockInterpreter::Entry* BlockInterpreter::lookup(std::uint64_t pc) {
     ++statistics_.lookups;
     Entry& entry = cache_[(pc >> 2) & mask_];
     const std::uint64_t context = cpu_.code_context();
@@ -59,7 +91,7 @@ const Block* BlockInterpreter::lookup(std::uint64_t pc) {
     } else {
         ++statistics_.hits;
         ++entry.uses;
-        return &entry.block;
+        return &entry;
     }
     ++statistics_.misses[static_cast<std::size_t>(miss)];
     if (entry.pc != empty_pc) {
@@ -67,6 +99,7 @@ const Block* BlockInterpreter::lookup(std::uint64_t pc) {
     }
     entry.pc = empty_pc;
     entry.uses = 0;
+    entry.native = nullptr;
     if (const auto none = build_block(cpu_, pc, entry.block)) {
         ++statistics_.fallbacks[static_cast<std::size_t>(*none)];
         return nullptr;
@@ -84,7 +117,7 @@ const Block* BlockInterpreter::lookup(std::uint64_t pc) {
     ++statistics_.blocks_built;
     ++statistics_.built_lengths[entry.block.operations.size()];
     ++statistics_.built_ends[static_cast<std::size_t>(entry.block.end)];
-    return &entry.block;
+    return &entry;
 }
 
 // The first operation follows the checks run_until made; every later one gets the
@@ -133,13 +166,13 @@ void BlockInterpreter::run_block(const Block& block, const std::uint64_t& limit,
             break;
         }
     }
-    ++statistics_.entries;
-    statistics_.operations += next;
-    if (cached) {
-        statistics_.cached_operations += next;
-    }
-    ++statistics_.run_lengths[next];
-    ++statistics_.exits[static_cast<std::size_t>(exit)];
+    count_exit(exit, next, cached);
 }
+
+#ifndef ULTRAVIOLENT_TIER1
+std::unique_ptr<NativeCode> make_native_code(Cpu& /*cpu*/, std::size_t /*code_bytes*/) {
+    return nullptr;
+}
+#endif
 
 } // namespace ultraviolent::mips

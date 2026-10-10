@@ -159,7 +159,7 @@ def run_once(args, name, workload):
         os.makedirs(args.statistics, exist_ok=True)
         with open(os.path.join(args.statistics, name + ".txt"), "wb") as f:
             f.write(b"".join(line + b"\n" for line in result.stderr.splitlines()
-                             if line.startswith(b"tier0")))
+                             if line.startswith(b"tier")))
     origin = {"cycles": 0, "virtual_ns": 0}
     if workload.get("snapshot"):
         with open(paths["shell.json"]) as f:
@@ -275,7 +275,7 @@ def main():
     common.add_argument("--binary", default="build/pgo/ultraviolent")
     common.add_argument("--prom", default=os.path.join(FIRMWARE, "ip27prom.img"))
     common.add_argument("--io6prom", default=os.path.join(FIRMWARE, "io6prom.img"))
-    common.add_argument("--engine", default="tier0", choices=["reference", "tier0"])
+    common.add_argument("--engine", default="tier0", choices=["reference", "tier0", "tier1"])
     common.add_argument("--cache-entries", type=int, help="tier 0's block cache size")
     commands = parser.add_subparsers(dest="command", required=True)
     fixture = commands.add_parser("fixture", parents=[common],

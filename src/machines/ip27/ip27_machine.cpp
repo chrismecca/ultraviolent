@@ -609,7 +609,7 @@ void Ip27Machine::run(std::uint64_t cycles) {
             continue;
         }
         executing_ = true;
-        if (engine_ == mips::ExecutionEngine::tier0) {
+        if (engine_ != mips::ExecutionEngine::reference) {
             block_interpreter_.run_until(stop_cycle_);
         } else {
             interpreter_.run_until(stop_cycle_);

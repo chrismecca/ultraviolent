@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -144,14 +145,28 @@ class Ip27Machine {
     // accessed (IP27.adoc "Machine loop"); run() leaves it current.
     void step();
     void run(std::uint64_t cycles);
-    // The engine run() uses (IR.adoc "Stages"; tier 0 by default since stage G): a host
-    // choice, not guest configuration, and not part of snapshots. Tracing and PC probes
-    // always step the reference interpreter.
-    void set_execution_engine(mips::ExecutionEngine engine) {
+    // The engine run() uses (IR.adoc "Stages"; tier 0 by default since stage G; tier 1,
+    // JIT.adoc): a host choice, not guest configuration, and not part of snapshots. Tracing and
+    // PC probes always step the reference interpreter. Returns false, changing nothing, when
+    // this host has no tier-1 backend.
+    bool set_execution_engine(mips::ExecutionEngine engine) {
+        if (engine == mips::ExecutionEngine::tier1 && native_ == nullptr) {
+            native_ = mips::make_native_code(cpu_);
+            if (native_ == nullptr) {
+                return false;
+            }
+        }
+        block_interpreter_.set_native_code(engine == mips::ExecutionEngine::tier1 ? native_.get()
+                                                                                  : nullptr);
         engine_ = engine;
+        return true;
     }
     [[nodiscard]] const mips::BlockStatistics& block_statistics() const {
         return block_interpreter_.statistics();
+    }
+    // Tier 1's statistics, when it has been selected.
+    [[nodiscard]] const mips::NativeCode* native_code() const {
+        return native_.get();
     }
     // Tier 0's block cache size, a power of two (IR.adoc "Keeping blocks valid").
     void set_block_cache_entries(std::size_t entries) {
@@ -307,6 +322,7 @@ class Ip27Machine {
     mips::Cpu cpu_;
     mips::Interpreter interpreter_{cpu_};
     mips::BlockInterpreter block_interpreter_{cpu_};
+    std::unique_ptr<mips::NativeCode> native_;
     mips::ExecutionEngine engine_{mips::ExecutionEngine::tier0};
     SynchronizedTarget synchronized_hub_{*this, hub_};
     SynchronizedTarget synchronized_flash_{*this, flash_interface_};

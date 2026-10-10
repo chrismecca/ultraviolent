@@ -34,6 +34,20 @@ target_include_directories(ultraviolent_core
 ultraviolent_enable_warnings(ultraviolent_core)
 ultraviolent_enable_sanitizers(ultraviolent_core)
 
+# Host code generation for tier 1 (JIT.adoc): x86-64 only. Other hosts build without tier 1.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(ULTRAVIOLENT_TIER1 ON)
+    add_library(ultraviolent_jit
+        src/jit/executable_memory.cpp
+        src/jit/x86_64/assembler.cpp
+    )
+    target_link_libraries(ultraviolent_jit PUBLIC ultraviolent_core)
+    ultraviolent_enable_warnings(ultraviolent_jit)
+    ultraviolent_enable_sanitizers(ultraviolent_jit)
+else()
+    set(ULTRAVIOLENT_TIER1 OFF)
+endif()
+
 add_library(ultraviolent_mips
     src/arch/mips/block.cpp
     src/arch/mips/block_interpreter.cpp
@@ -47,6 +61,11 @@ add_library(ultraviolent_mips
 )
 
 target_link_libraries(ultraviolent_mips PUBLIC ultraviolent_core)
+if(ULTRAVIOLENT_TIER1)
+    target_sources(ultraviolent_mips PRIVATE src/arch/mips/tier1/x86_64_translator.cpp)
+    target_link_libraries(ultraviolent_mips PUBLIC ultraviolent_jit)
+    target_compile_definitions(ultraviolent_mips PUBLIC ULTRAVIOLENT_TIER1=1)
+endif()
 ultraviolent_enable_warnings(ultraviolent_mips)
 ultraviolent_enable_sanitizers(ultraviolent_mips)
 
@@ -150,6 +169,7 @@ if(BUILD_TESTING)
         tests/arch/mips/integer_test.cpp
         tests/arch/mips/memory_test.cpp
         tests/arch/mips/processor_model_test.cpp
+        tests/arch/mips/tier1_test.cpp
         tests/arch/mips/host_page_test.cpp
         tests/arch/mips/exception_test.cpp
         tests/arch/mips/fpu_test.cpp
@@ -159,6 +179,17 @@ if(BUILD_TESTING)
     ultraviolent_enable_warnings(mips_tests)
     ultraviolent_enable_sanitizers(mips_tests)
     add_test(NAME mips COMMAND mips_tests)
+
+    if(ULTRAVIOLENT_TIER1)
+        # The x86-64 encoder against GNU as (skipped when binutils is missing).
+        add_executable(x86_64_encoding_check tools/x86_64_encoding_check.cpp)
+        target_link_libraries(x86_64_encoding_check PRIVATE ultraviolent_jit)
+        ultraviolent_enable_warnings(x86_64_encoding_check)
+        ultraviolent_enable_sanitizers(x86_64_encoding_check)
+        add_test(NAME x86_64_encodings
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_x86_64_encodings.sh"
+                $<TARGET_FILE:x86_64_encoding_check>)
+    endif()
 
     add_executable(device_tests
         tests/devices/am29f080_test.cpp

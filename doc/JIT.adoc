@@ -1,6 +1,7 @@
 = Tier 1: Native Execution Engine Design
 
-Status: proposed for review with the user (2026-10-09). No tier-1 code exists. This document
+Status: accepted (2026-10-10: the builder approach, the J0 scope, an in-house encoder, and
+compile policy left to measurement). J0 and J1 are implemented ("Progress"). This document
 replaces the outline in IR.adoc "Proposal: tier 1"; IR.adoc remains the reference for the
 execution rules, decoded blocks, the block cache, and tier 0.
 
@@ -218,8 +219,9 @@ has single digits. The interface must allow amortized accounting later; J1-J4 do
   entered only through a validated lookup.
 * **Lifetime.** Invalidation makes native code stale, exactly as for decoded blocks; it is
   never freed or overwritten while it may be executing. Reclamation happens only between
-  engine invocations: when the region is full, the whole native cache is discarded (epoch
-  advanced) and refilled. A snapshot load discards it.
+  blocks, where no native code is on the stack: when a translation does not fit, the whole
+  native cache is discarded (epoch advanced) and the translation retried. A snapshot load
+  makes every block stale through the code epoch.
 * **Entry and exit.** A generated entry trampoline saves the host callee-saved registers,
   loads the `Cpu` base and engine context into fixed registers, and jumps into the block;
   every exit returns through it with an exit reason, as `BlockExit` does today.
@@ -287,6 +289,38 @@ J6. Block linking, only if profiling shows dispatcher transitions matter.
 
 The 180 M cycles/s objective for the R10000 is expected somewhere in J2-J4; if it is reached,
 J5 and J6 are optional for this personality.
+
+== Progress
+
+* **J0 (2026-10-10):** `ProcessorModel` (`processor_model.hpp`; `r10000()` the one
+  implementation; `decode` takes the model; the Count rate is the model's `count_shift`). The
+  builder interface and the direct builder (`src/arch/mips/operations.hpp`,
+  `semantics.hpp` `DirectBuilder`), with ADDU, ADDIU, ADDI, SLL, BEQ, and BNE in builder form.
+  Gates: tests, same-cycle snapshots, unchanged host counters per guest cycle.
+* **J1 (2026-10-10):** the skeleton. The x86-64 encoder (`include/ultraviolent/jit/x86_64/`,
+  9,843 encodings identical to GNU as, CTest `x86_64_encodings`); executable memory from a
+  memfd mapped writable and executable at two addresses (`jit/executable_memory.hpp`); the
+  backend interface (`native_code.hpp`) and the x86-64 translator
+  (`src/arch/mips/tier1/x86_64_translator.cpp`): a helper table at the region's start, a
+  shared entry that saves the callee-saved registers (rbx the Cpu, r12 the run's context),
+  every operation through `call_semantics` with tier 0's boundary checks inline, exits out
+  of line with the reason and the operations run; `BlockInterpreter` cache entries hold native
+  code and its epoch; `--engine tier1`. `Cpu` publishes `native_layout()` (field offsets) and
+  `next_internal_event_cycle()` / `reach_internal_event()`.
+  Gates: the whole differential suite on tier 1 with 4096- and 2-entry caches; tier-1
+  boundary tests; native code runs (`mips.tier1.native_code_runs`); discards with a 4 KiB
+  region (`mips.tier1.discard_when_the_region_is_full`); machine tests; mutation checks (no
+  pending check: 2 failures; native code kept when its entry is rebuilt: 14; no epoch advance
+  on discard: the test process crashes running stale code); all presets; **all four workload
+  digests identical** (the PROM, IRIX booted to `login:`, `cpu`, `fs`); same-cycle snapshots
+  and disk byte-identical to stage G.
+  Speed, as expected for this milestone (M cycles/s, prom, boot, cpu, fs): 86.9, 49.8, 72.2,
+  31.3, against tier 0's 129.4, 103.2, 105.5, 117.5. `fs` spent 27.1 of 47.7 s translating:
+  12.5 million translations (2.2 us each, about 770 bytes of code per block), because
+  compiling on first execution retranslates every block the direct-mapped cache evicts and
+  rebuilds (mean reuse about 20). **Compile policy, decided from this:** translate a block only
+  once its cache entry has proved hot; the threshold is chosen from J2's measurements, and
+  tests translate on first execution.
 
 == Review questions
 

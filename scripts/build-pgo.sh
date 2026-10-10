@@ -30,8 +30,8 @@ cmake -S "$root" -B "$generate" -G Ninja -DCMAKE_CXX_COMPILER=clang++ \
     -DCMAKE_CXX_FLAGS=-fprofile-instr-generate \
     -DCMAKE_EXE_LINKER_FLAGS=-fprofile-instr-generate >/dev/null
 cmake --build "$generate" --target ultraviolent
-# Train both execution engines, so neither is laid out without a profile.
-for engine in reference tier0; do
+# Train every execution engine, so none is laid out without a profile.
+for engine in reference tier0 tier1; do
     LLVM_PROFILE_FILE=$generate/training-$engine.profraw \
         "$generate/ultraviolent" --machine ip27 --prom "$prom" --cycles "$cycles" \
         --engine "$engine" >/dev/null

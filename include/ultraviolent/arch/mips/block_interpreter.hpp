@@ -3,6 +3,7 @@
 #include <ultraviolent/arch/mips/block.hpp>
 #include <ultraviolent/arch/mips/cpu.hpp>
 #include <ultraviolent/arch/mips/interpreter.hpp>
+#include <ultraviolent/arch/mips/native_code.hpp>
 
 #include <array>
 #include <cstddef>
@@ -17,6 +18,8 @@ namespace ultraviolent::mips {
 enum class ExecutionEngine : std::uint8_t {
     reference,
     tier0,
+    // Native code for tier 0's blocks (JIT.adoc), where the host has a backend.
+    tier1,
 };
 
 // Why the tier-0 executor left a block (IR.adoc "Executor").
@@ -97,6 +100,11 @@ class BlockInterpreter {
 
     // Replaces the cache with an empty one of `entries` (a power of two), between runs.
     void set_cache_entries(std::size_t entries);
+    // Runs blocks as native code from `native` (tier 1), or decoded (tier 0) when null.
+    // Between runs; not owned.
+    void set_native_code(NativeCode* native) {
+        native_ = native;
+    }
     [[nodiscard]] std::size_t cache_entries() const {
         return cache_.size();
     }
@@ -118,18 +126,26 @@ class BlockInterpreter {
         std::int8_t tlb_index{-1};
         std::uint64_t uses{};
         Block block;
+        // Tier 1: the block's native code, valid while the backend's epoch is native_epoch.
+        const void* native{};
+        std::uint64_t native_epoch{};
     };
 
-    // The valid block for pc, from the cache or newly built into its entry; null when none
-    // could be built (the reason is counted).
-    const Block* lookup(std::uint64_t pc);
+    // The entry holding the valid block for pc, from the cache or newly built; null when no
+    // block could be built (the reason is counted).
+    Entry* lookup(std::uint64_t pc);
     void run_block(const Block& block, const std::uint64_t& limit, bool cached);
+    // Tier 1: runs the entry's native code, translating it first when it has none.
+    // Returns false when no native code could be made (the caller runs the block decoded).
+    bool run_native(Entry& entry, const std::uint64_t& limit, bool cached);
+    void count_exit(BlockExit exit, std::size_t operations, bool cached);
 
     Cpu& cpu_;
     Interpreter reference_;
     std::vector<Entry> cache_;
     std::uint64_t mask_{};
     BlockStatistics statistics_;
+    NativeCode* native_{};
 };
 
 } // namespace ultraviolent::mips
