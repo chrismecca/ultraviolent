@@ -308,3 +308,7 @@ mirror the hardware's separate SysAD connections and carry over to host-parallel
 Revisit if guest software is found to depend on cross-CPU timing finer than the default
 slice, or when host-parallel execution (SMP.adoc S4) is designed.
 
+Refined in S2 (2026-10-12): devices see the time of the CPU furthest behind rather than
+making a CPU wait to the device clock (SMP.adoc "Decisions", "Device time"); the bound on
+skew between a CPU and devices is the same slice.
+

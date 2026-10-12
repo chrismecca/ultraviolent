@@ -58,6 +58,7 @@ void usage() {
         "                    [--interactive] [--ethernet tap:IFNAME|pcap:FILE]\n"
         "                    [--engine reference|tier0|tier1] [--engine-statistics]\n"
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
+        "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
         "from a snapshot. Snapshots are for exploration; checkpoints need a cold run.\n"
@@ -95,6 +96,10 @@ void usage() {
         "0's block statistics at the end of the run. --tier0-cache-entries N sizes its\n"
         "block cache (a power of two; default 32768). --tier1-threshold N translates a block\n"
         "to native code after N cache hits (0: on first execution).\n"
+        "--cpus 2 puts a second CPU in the node's slice B (default 1, doc/SMP.adoc); the\n"
+        "CPUs take turns, the one behind running until it is --cpu-slice cycles ahead\n"
+        "(default 180, 1 us at 180 MHz; 1 alternates every cycle). --cycles counts each\n"
+        "CPU's cycles.\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
         "scsi ethernet irq scheduler firmware machine all\n",
         stderr);
@@ -212,6 +217,8 @@ struct Options {
     std::string machine;
     std::string prom;
     std::uint64_t memory_mib{512};
+    unsigned cpus{1};
+    std::uint64_t cpu_slice{180};
     std::uint64_t cycles{1'000'000};
     std::vector<TraceCategory> trace;
     std::vector<std::uint64_t> probes;
@@ -339,6 +346,19 @@ std::optional<Options> parse(std::span<char*> arguments) {
                 return std::nullopt;
             }
             options.block_cache_entries = *number;
+        } else if (flag == "--cpus") {
+            if (value != "1" && value != "2") {
+                std::fprintf(stderr, "--cpus takes 1 or 2\n");
+                return std::nullopt;
+            }
+            options.cpus = value == "2" ? 2 : 1;
+        } else if (flag == "--cpu-slice") {
+            const auto number = parse_number(value);
+            if (!number || *number == 0) {
+                std::fprintf(stderr, "--cpu-slice takes a number of cycles, at least 1\n");
+                return std::nullopt;
+            }
+            options.cpu_slice = *number;
         } else if (flag == "--tier1-threshold") {
             const auto number = parse_number(value);
             if (!number) {
@@ -411,6 +431,8 @@ int main(int argc, char** argv) {
 
     ip27::Ip27Config config;
     config.memory_bytes = options->memory_mib << 20;
+    config.cpus = options->cpus;
+    config.cpu_slice = options->cpu_slice;
     if (options->date) {
         config.clock_epoch = *options->date;
     }

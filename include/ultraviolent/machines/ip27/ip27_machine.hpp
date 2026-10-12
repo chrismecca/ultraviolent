@@ -1,11 +1,13 @@
 #pragma once
 
 #include <ultraviolent/arch/mips/block_interpreter.hpp>
+#include <ultraviolent/arch/mips/coherence.hpp>
 #include <ultraviolent/arch/mips/cpu.hpp>
 #include <ultraviolent/arch/mips/interpreter.hpp>
 #include <ultraviolent/core/address_space.hpp>
 #include <ultraviolent/core/block_store.hpp>
 #include <ultraviolent/core/ethernet_link.hpp>
+#include <ultraviolent/core/invariant.hpp>
 #include <ultraviolent/core/memory_block.hpp>
 #include <ultraviolent/core/reset.hpp>
 #include <ultraviolent/core/scheduler.hpp>
@@ -29,10 +31,12 @@
 #include <ultraviolent/scsi/cdrom.hpp>
 #include <ultraviolent/scsi/disk.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -66,6 +70,9 @@ struct Ip27Config {
     unsigned node_slot{1};
     // CPUs on the node board, from slice A: 1 or 2 (SMP.adoc; slate's node boards hold two).
     unsigned cpus{1};
+    // With two CPUs, how far (in processor cycles) the one running may get ahead of the other
+    // before they swap (ADR-023): 1 alternates every cycle; the default is 1 µs at 180 MHz.
+    std::uint64_t cpu_slice{180};
     // The module number in the system controller's NVRAM (1-255; 0 means unassigned). slate
     // is module 1.
     std::uint8_t module_number{1};
@@ -143,43 +150,60 @@ class Ip27Machine {
         pc_probes_.push_back(pc);
     }
 
-    // One CPU cycle. Virtual time catches up with the CPU when an event is due or a device is
-    // accessed (IP27.adoc "Machine loop"); run() leaves it current.
+    // One cycle of CPU A. Virtual time catches up with the CPU when an event is due or a device
+    // is accessed (IP27.adoc "Machine loop"); run() leaves it current.
     void step();
+    // Runs until every CPU has completed `cycles` more cycles. With two CPUs, they take turns
+    // in slices (SMP.adoc "Time and scheduling"), and the run ends between slices: one CPU may
+    // have run up to a slice further.
     void run(std::uint64_t cycles);
     // The engine run() uses (IR.adoc "Stages"; tier 0 by default since stage G; tier 1,
     // JIT.adoc): a host choice, not guest configuration, and not part of snapshots. Tracing and
     // PC probes always step the reference interpreter. Returns false, changing nothing, when
     // this host has no tier-1 backend.
     bool set_execution_engine(mips::ExecutionEngine engine) {
-        if (engine == mips::ExecutionEngine::tier1 && native_ == nullptr) {
-            native_ = mips::make_native_code(cpu_);
-            if (native_ == nullptr) {
-                return false;
+        for (Processor* p : processors_) {
+            if (p == nullptr) {
+                continue;
             }
+            if (engine == mips::ExecutionEngine::tier1 && p->native == nullptr) {
+                p->native = mips::make_native_code(p->cpu);
+                if (p->native == nullptr) {
+                    return false;
+                }
+            }
+            p->blocks.set_native_code(engine == mips::ExecutionEngine::tier1 ? p->native.get()
+                                                                             : nullptr);
         }
-        block_interpreter_.set_native_code(engine == mips::ExecutionEngine::tier1 ? native_.get()
-                                                                                  : nullptr);
         engine_ = engine;
         return true;
     }
     [[nodiscard]] mips::ExecutionEngine execution_engine() const {
         return engine_;
     }
+    // CPU A's engine statistics.
     [[nodiscard]] const mips::BlockStatistics& block_statistics() const {
-        return block_interpreter_.statistics();
+        return cpu_a_.blocks.statistics();
     }
-    // Tier 1's statistics, when it has been selected.
+    // Tier 1's statistics for CPU A, when it has been selected.
     [[nodiscard]] const mips::NativeCode* native_code() const {
-        return native_.get();
+        return cpu_a_.native.get();
     }
     // Tier 0's block cache size, a power of two (IR.adoc "Keeping blocks valid").
     void set_block_cache_entries(std::size_t entries) {
-        block_interpreter_.set_cache_entries(entries);
+        for (Processor* p : processors_) {
+            if (p != nullptr) {
+                p->blocks.set_cache_entries(entries);
+            }
+        }
     }
     // Tier 1's translation threshold (BlockInterpreter::set_native_threshold).
     void set_native_threshold(std::uint64_t hits) {
-        block_interpreter_.set_native_threshold(hits);
+        for (Processor* p : processors_) {
+            if (p != nullptr) {
+                p->blocks.set_native_threshold(hits);
+            }
+        }
     }
     // 4 KiB frames of memory and flash now marked as holding decoded code.
     [[nodiscard]] std::size_t marked_code_frames() const {
@@ -188,12 +212,15 @@ class Ip27Machine {
     // Ends the current run() at the next cycle boundary (for host backends, such as a console
     // script that has run out).
     void request_stop() {
-        run_end_cycle_ = cpu_.cycles();
+        run_end_cycle_ = processors_[running_]->cpu.cycles();
         stop_cycle_ = run_end_cycle_;
+        stop_requested_ = true;
     }
 
-    [[nodiscard]] mips::Cpu& cpu() {
-        return cpu_;
+    // CPU A, or the CPU in `slice` (which must be installed).
+    [[nodiscard]] mips::Cpu& cpu(unsigned slice = 0) {
+        invariant(slice < processors_.size() && processors_[slice] != nullptr, "no such CPU");
+        return processors_[slice]->cpu;
     }
     // The flash PROM's contents, for host persistence of the PROM log (IP27.adoc "Boot PROM").
     // load_flash replaces them before the machine runs.
@@ -267,11 +294,31 @@ class Ip27Machine {
         MmioTarget& target_;
     };
 
-    // Advances the scheduler to the CPU's completed cycles and recomputes when the next event
-    // is due.
+    // A CPU in a slice of the Hub, and its execution engines.
+    struct Processor {
+        Processor(AddressSpace& bus, Tracer& tracer, const mips::ProcessorModel& model,
+                  unsigned slice)
+            : cpu{bus, tracer, model, slice} {}
+        mips::Cpu cpu;
+        mips::Interpreter interpreter{cpu};
+        mips::BlockInterpreter blocks{cpu};
+        std::unique_ptr<mips::NativeCode> native;
+    };
+
+    // Advances the scheduler to virtual time, the time of the CPU furthest behind (SMP.adoc
+    // "Time and scheduling"), and recomputes when the next event is due.
     void synchronize_time();
     void update_next_event();
+    // Completed cycles of the CPU furthest behind: virtual time in CPU cycles.
+    [[nodiscard]] std::uint64_t lowest_cycles() const {
+        return cpu_b_ ? std::min(cpu_a_.cpu.cycles(), cpu_b_->cpu.cycles()) : cpu_a_.cpu.cycles();
+    }
+    // Runs processors_[running_] up to stop_cycle_.
+    void run_processor(bool observed);
+    void step(Processor& processor);
+    void run_two(std::uint64_t cycles);
     void map_system_windows();
+    void reset_cpus(ResetKind kind);
     void flash_mode_changed();
 
     // The Hub's flash PROM interface (IP27.adoc "Boot PROM").
@@ -330,13 +377,22 @@ class Ip27Machine {
              i2c_,
              directory_,
              bus_,
-             [this] { cpu_.reset(ResetKind::cold); }};
-    mips::Cpu cpu_;
-    mips::Interpreter interpreter_{cpu_};
-    mips::BlockInterpreter block_interpreter_{cpu_};
-    std::unique_ptr<mips::NativeCode> native_;
+             [this] { reset_cpus(ResetKind::cold); }};
+    Processor cpu_a_;
+    std::optional<Processor> cpu_b_;
+    // Slice-indexed; B is null with one CPU.
+    std::array<Processor*, 2> processors_{};
+    // LL/SC and host-page coherence between the two CPUs (unused with one).
+    mips::Coherence coherence_;
+    // The CPU run() is running.
+    unsigned running_{};
+    // request_stop() was called during this run.
+    bool stop_requested_{};
+    // Where the running CPU must yield to the other (cpu_slice ahead of it).
+    std::uint64_t slice_end_cycle_{std::numeric_limits<std::uint64_t>::max()};
     mips::ExecutionEngine engine_{mips::ExecutionEngine::tier0};
     SynchronizedTarget synchronized_hub_{*this, hub_.port(0)};
+    SynchronizedTarget synchronized_hub_b_{*this, hub_.port(1)};
     SynchronizedTarget synchronized_flash_{*this, flash_interface_};
     SynchronizedTarget synchronized_flash_commands_{*this, flash_commands_};
     // The module's crossbow and the Hub's crosstalk windows (IP27.adoc "Xtalk").

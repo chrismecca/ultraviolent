@@ -105,15 +105,14 @@ which CPU is in which slice; nothing in `arch/mips` learns about slices or Hubs.
 === Who is asking: the requester
 
 PI_CPU_NUM, and later every per-processor behavior of the PI, depend on which processor
-issued the access. Two ways to carry it:
+issued the access. Decided (ADR-023): structurally, a Hub port per slice, as on the hardware,
+where each processor has its own SysAD connection into the PI.
 
-* **(recommended) A Hub port per slice.** Each CPU gets its own `AddressSpace` view whose
-  Hub window maps to that slice's port onto the shared Hub, as on the hardware, where each
-  processor has its own SysAD connection into the PI. Everything else in the space (memory,
-  Xtalk) maps to the same objects. The requester is then structural, never mutable state,
-  which is also what host-parallel execution needs.
-* A "current requester" the machine sets before running a CPU. Simpler, but it is shared
-  mutable state that breaks as soon as two host threads run.
+Built (S1, S2): `Hub::port(slice)`; one shared `AddressSpace` whose Hub window is mapped
+per requester (`map_ports`), and each `Cpu` is built with its requester number (A 0, B 1).
+Everything else in the space (memory, flash, crosstalk) is the same mapping for both. One
+space rather than one per CPU, because the space also counts stores to code frames and
+mapping changes, which both CPUs must see.
 
 === Time and scheduling (the main decision)
 
@@ -122,52 +121,57 @@ single CPU has now. Devices and the scheduler see one virtual time. The rule tod
 (IP27.adoc "Machine loop and time") is that the scheduler is brought up to the accessing
 CPU's time immediately before a device access. With two CPUs whose times differ, a device
 access by the CPU that is behind would move the scheduler backwards, so a rule is needed.
-Both proposals are deterministic and leave the one-CPU machine bit-identical.
 
-* **(recommended) Quanta, lowest time first, accesses at the device clock.** The machine
-  runs the CPU with the lower virtual time (slice A on a tie) until it is a quantum `Q`
-  ahead of the other, or reaches the next event deadline, then switches. A device access is
-  performed at the later of the CPU's time and the scheduler's time; if the scheduler is
-  ahead, the access completes at the scheduler's time and the CPU stalls to it (its cycle
-  count advances, as an uncached read on the real machine takes about a microsecond anyway).
-  Skew between CPUs is bounded by `Q`; shared-memory accesses interleave at quantum
-  granularity. `Q` also bounds how far a CPU's own clock (Count) and the device clock can
-  disagree at an access. It is a constant chosen by measurement; first guess 1 µs (180
-  cycles at 180 MHz, about one 800 ns RTC tick, far below IRIX's 1 ms clock tick).
-* Exact global order for device accesses. A CPU that reaches a device access ahead of the
-  other gives up the CPU at that instruction (no side effect yet) and retries once the other
-  CPU has caught up. Device accesses are then in exact virtual-time order with no stalls,
-  but every engine needs a restartable access and tier 1 an exit before the access instead
-  of a barrier after it; firmware delay loops that poll the Hub switch CPUs at every read.
+Built (S2, `Ip27Machine::run_two`; ADR-023):
+
+* **Lowest time first, in slices.** The machine runs the CPU with fewer completed cycles
+  (slice A on a tie) until it is `cpu_slice` cycles ahead of the other, an event falls due,
+  or the run ends, then switches. The order depends only on cycle counts: deterministic.
+* **Virtual time is the CPU furthest behind.** The scheduler is brought up to it before
+  every device access and when an event is due. While the running CPU is ahead of the other,
+  virtual time is the other's, so an event later than that cannot fall due in the slice.
+  Virtual time never goes backwards, and no CPU's cycle count changes inside an instruction.
+* Skew between the CPUs, and between a CPU's own Count and device time, is at most one
+  slice. `--cpu-slice 1` alternates every cycle, the strict setting; the default is 180
+  cycles (1 µs at 180 MHz, about one 800 ns RTC tick, far below IRIX's 1 ms clock tick).
+* `--cycles N` runs until both CPUs have completed N more cycles.
 
 The guest cannot rely on finer ordering than the real machine guarantees: two CPUs on a Hub
 see each other's stores in an order MIPS IV only constrains with SYNC and LL/SC.
 
 === Memory, LL/SC, SYNC
 
-* Memory is shared; each CPU keeps its own host page caches. A store through one CPU must
-  invalidate any host page entries of the other that it would make stale (today flushes
-  happen when translation or mappings change, and the bus counts code-frame stores for
-  every master).
-* LL/SC: each CPU's reservation becomes a physical line (`ll_bit` plus address). A store by
-  another CPU (or DMA) to that line clears it. Proposed mechanism: when a CPU takes a
-  reservation, the other CPU's writable host page entry for that page is dropped, so its
-  stores to the page take the slow path, which checks reservations. No cost to stores while
-  no reservation is held on the page. ERET still clears the CPU's own bit (UM).
+Built (S2): `mips::Coherence`, shared by the CPUs of a machine with two; a one-CPU machine
+has none, and its CPU behaves exactly as before.
+
+* Memory is one shared array; each CPU keeps its own host page caches. Decoded blocks are
+  validated by per-frame generations held in the shared memory, so a store by either CPU to
+  code invalidates the other's blocks, provided the store reaches the bus: when a CPU claims
+  a frame for decoded code, the other CPU drops its writable host pages at its next engine
+  entry or bus access.
+* LL/SC: an LL reserves one 128-byte line (the secondary block size, `hypothesis`); a store
+  by the other CPU anywhere in the line breaks it, and SC succeeds only with LLbit set and
+  the reservation intact. Taking a reservation makes the other CPU drop its writable host
+  pages, and a CPU never caches a writable page for a frame where the other holds one, so
+  every such store goes through the slow path, where it is checked. ERET releases the
+  reservation with LLbit. `hypothesis`: DMA does not break reservations (unchanged from one
+  CPU; no observation needs it).
 * SYNC: a no-op in reference mode (one CPU runs at a time); a host fence in host-parallel
   mode.
-* Caches: the R10000's caches are coherent with each other on the Hub (the directory
-  protocol), so the model's cached memory stays one shared array. The instruction cache is
-  not coherent with stores (JIT.adoc): each CPU's decoded blocks are invalidated by stores
-  from either CPU through the existing code-frame accounting, seen at that CPU's next
-  engine entry, barrier, or interrupt.
+* Caches: refills are not modeled and memory stands for every line, as with one CPU, except
+  primary data lines software installs with Index Store Tag, which hold that CPU's private
+  data (MIPS.adoc "Lines software installs"). The PROM's first stack lives there on each CPU
+  at the same physical address.
+* The instruction cache is not coherent with stores (JIT.adoc): guest software synchronizes
+  explicitly before running modified code, and each CPU's decoded blocks follow the frame
+  generations above.
 
 === Interrupts
 
 IPIs need no new mechanism: a PI_INT_PEND_MOD write sets the level, and each slice's mask
 routes it (`Hub::update_interrupts` already does this for both slices). What is new is that
 slice B's outputs reach a CPU. The interrupt is seen by the target CPU at its next
-instruction boundary in its own time, within the quantum rule above.
+instruction boundary in its own time, within the slice rule above.
 
 === Reset
 
@@ -177,8 +181,9 @@ same reset vector at the same time as A.
 
 === Snapshots
 
-The snapshot gains the second CPU and the scheduling state (each CPU's cycles, the quantum
-position). One-CPU snapshots keep their format and still load.
+Built (S2): a two-CPU snapshot adds `machine.cpus`, CPU B's state under the prefix
+`slice_b.` (`Cpu::save_state` with a key prefix), and the reservations. A one-CPU snapshot
+keeps its format, and a snapshot loads only into a machine with the same number of CPUs.
 
 === Tracing
 
@@ -231,8 +236,7 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
 == Decisions (with the user, 2026-10-12)
 
 . **Scheduling: time slices of configurable length.** The CPU that is behind runs until it
-  is a slice ahead of the other, then they swap; a device access happens at the later of
-  the CPU's and the device clock, and the CPU waits to it. `--cpu-slice CYCLES` sets the
+  is a slice ahead of the other, then they swap. `--cpu-slice CYCLES` sets the
   length: 1 is the strict setting (the CPUs alternate every instruction; every
   interleaving is one the hardware could produce) used by tests and engine comparison; the
   default is about 1 µs (180 cycles at 180 MHz). Exact global order of device accesses was
@@ -243,6 +247,14 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
   view, as each processor has its own SysAD connection into the PI.
 . **`--cpus 1|2` per node; one CPU stays the default** until S3's gates pass.
 . **Review after S3**, before host-parallel CPUs (S4).
+
+Device time (refined in S2, 2026-10-12): devices and events see virtual time, the time of
+the CPU furthest behind. Only that CPU runs past the other, by at most a slice, so virtual
+time never goes backwards and a CPU never has to wait in the middle of an instruction; a CPU
+ahead of the other sees device time up to one slice behind its own Count. With one CPU this
+is exactly the earlier rule. The plan's first wording (the access at the later of the two
+clocks, the CPU stalling to it) would have needed every engine to add cycles inside an
+instruction.
 
 Asked by the user: why not model the real machine exactly? Its structure is modeled exactly
 (two processors, a port each into the Hub, coherent shared memory, IPIs through the Hub's

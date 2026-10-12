@@ -2,6 +2,7 @@
 
 #include <ultraviolent/core/address.hpp>
 #include <ultraviolent/core/address_space.hpp>
+#include <ultraviolent/core/state_image.hpp>
 
 #include <array>
 #include <cstdint>
@@ -26,15 +27,15 @@ class Coherence {
     // LL by `cpu`: a reservation on the line holding `address`. Other CPUs must stop storing
     // into its frame through their host pages, so they are told to drop them.
     void reserve(unsigned cpu, PhysicalAddress address) {
-        reservations_[cpu] = {.line = address.value / line_size, .held = true};
+        reservations_[cpu] = {.line = address.value / line_size, .held = 1};
         ++generation_;
     }
     // ERET clears LLbit (UM 14.30); the reservation goes with it.
     void release(unsigned cpu) {
-        reservations_[cpu].held = false;
+        reservations_[cpu].held = 0;
     }
     [[nodiscard]] bool held(unsigned cpu) const {
-        return reservations_[cpu].held;
+        return reservations_[cpu].held != 0;
     }
 
     // A store by `cpu` to [address, address + size) breaks every other CPU's reservation on
@@ -44,8 +45,8 @@ class Coherence {
         const std::uint64_t last = (address.value + size - 1) / line_size;
         for (unsigned other = 0; other < max_cpus; ++other) {
             Reservation& r = reservations_[other];
-            if (other != cpu && r.held && r.line >= first && r.line <= last) {
-                r.held = false;
+            if (other != cpu && r.held != 0 && r.line >= first && r.line <= last) {
+                r.held = 0;
             }
         }
     }
@@ -55,7 +56,7 @@ class Coherence {
     [[nodiscard]] bool watched(unsigned cpu, PhysicalAddress frame) const {
         for (unsigned other = 0; other < max_cpus; ++other) {
             const Reservation& r = reservations_[other];
-            if (other != cpu && r.held && r.line * line_size / frame_size == frame.value / frame_size) {
+            if (other != cpu && r.held != 0 && r.line * line_size / frame_size == frame.value / frame_size) {
                 return true;
             }
         }
@@ -72,10 +73,25 @@ class Coherence {
         return generation_;
     }
 
+    // Reset: no CPU holds a reservation.
+    void clear() {
+        reservations_ = {};
+        ++generation_;
+    }
+
+    void save_state(StateImage& image) const {
+        image.put("coherence.reservations", reservations_);
+    }
+    void load_state(const StateImage& image) {
+        image.get("coherence.reservations", reservations_);
+        ++generation_;
+    }
+
   private:
+    // No padding: snapshots save the array's bytes.
     struct Reservation {
         std::uint64_t line{};
-        bool held{};
+        std::uint64_t held{};
     };
     std::array<Reservation, max_cpus> reservations_{};
     std::uint64_t generation_{};

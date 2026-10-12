@@ -211,12 +211,21 @@ unsigned node_slot_id(unsigned slot) {
 Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> prom)
     : config_{config}, memory_{config.memory_bytes}, flash_{flash_size},
       directory_{tracer_, checked_bank_sizes(config), config.directory},
-      cpu_{bus_, tracer_, mips::r10000(cpu_config(config, prom))} {
+      cpu_a_{bus_, tracer_, mips::r10000(cpu_config(config, prom)), 0} {
+    processors_[0] = &cpu_a_;
+    hub_.connect_cpu(0, cpu_a_.cpu);
+    if (config.cpus == 2) {
+        // Slice B: the same processor on the Hub's second port, sharing memory with A
+        // (SMP.adoc).
+        processors_[1] = &cpu_b_.emplace(bus_, tracer_, mips::r10000(cpu_config(config, prom)), 1);
+        hub_.connect_cpu(1, cpu_b_->cpu);
+        cpu_a_.cpu.connect_coherence(coherence_);
+        cpu_b_->cpu.connect_coherence(coherence_);
+    }
     // The default engine: tier 1 where this host has a backend, tier 0 elsewhere (JIT.adoc).
     if (!set_execution_engine(mips::ExecutionEngine::tier1)) {
         set_execution_engine(mips::ExecutionEngine::tier0);
     }
-    hub_.connect_cpu(0, cpu_);
     invariant(validate(config, prom).has_value(),
               "Ip27Machine built from an invalid configuration");
     i2c_bus_.attach(controller_nvram_);
@@ -325,8 +334,10 @@ void Ip27Machine::map_system_windows() {
     // own NASID 0).
     const std::uint64_t hub_window =
         uncached_window(io_attribute) + (hub_widget << small_window_shift);
+    // Each CPU reaches the Hub through its own port (ADR-023).
     for (const std::uint64_t base : {hub_window, hub_window + Hub::window_size}) {
-        must_map(bus_.map_mmio({PhysicalAddress{base}, Hub::window_size}, synchronized_hub_),
+        must_map(bus_.map_ports({PhysicalAddress{base}, Hub::window_size},
+                                {&synchronized_hub_, &synchronized_hub_b_}),
                  "Hub window");
     }
     // IO: every other widget's small window is PIO over the Hub's crosstalk link.
@@ -443,8 +454,14 @@ StateImage Ip27Machine::save_state() {
     image.put("machine.cpu_clock", config_.cpu_clock.hertz);
     image.put("machine.flash_hash", flash_hash_);
     image.put("machine.baseio_port", std::uint64_t{baseio_port});
+    if (cpu_b_) {
+        // One-CPU snapshots have no such key and keep their format.
+        image.put("machine.cpus", std::uint64_t{2});
+        cpu_b_->cpu.save_state(image, "slice_b.");
+        coherence_.save_state(image);
+    }
     scheduler_.save_state(image);
-    cpu_.save_state(image);
+    cpu_a_.cpu.save_state(image);
     hub_.save_state(image);
     i2c_.save_state(image);
     elsc_.save_state(image);
@@ -489,14 +506,23 @@ std::expected<void, std::string> Ip27Machine::load_state(const StateImage& image
     if (snapshot_baseio_port != baseio_port) {
         return std::unexpected("snapshot was taken with the BaseIO on another Crossbow port");
     }
-    if (cpu_.cycles() != 0) {
+    std::uint64_t cpus = 1;
+    image.get("machine.cpus", cpus);
+    if (cpus != config_.cpus) {
+        return std::unexpected("snapshot was taken with a different number of CPUs");
+    }
+    if (cpu_a_.cpu.cycles() != 0 || (cpu_b_ && cpu_b_->cpu.cycles() != 0)) {
         return std::unexpected("snapshots load only into a machine that has not run");
     }
     if (!image.get_sparse("memory", memory_.bytes())) {
         return std::unexpected("snapshot memory is malformed");
     }
     scheduler_.load_state(image);
-    cpu_.load_state(image);
+    cpu_a_.cpu.load_state(image);
+    if (cpu_b_) {
+        cpu_b_->cpu.load_state(image, "slice_b.");
+        coherence_.load_state(image);
+    }
     hub_.load_state(image);
     i2c_.load_state(image);
     elsc_.load_state(image);
@@ -525,7 +551,18 @@ void Ip27Machine::reset(ResetKind kind) {
         xbow_.reset();
         baseio_bridge_.reset();
     }
-    cpu_.reset(kind);
+    reset_cpus(kind);
+}
+
+void Ip27Machine::reset_cpus(ResetKind kind) {
+    // hypothesis: a reset reaches both CPUs of the node together (IP27.adoc "Two CPUs on a
+    // Hub").
+    for (Processor* p : processors_) {
+        if (p != nullptr) {
+            p->cpu.reset(kind);
+        }
+    }
+    coherence_.clear();
 }
 
 void Ip27Machine::attach_disk(BlockStore& store) {
@@ -534,24 +571,30 @@ void Ip27Machine::attach_disk(BlockStore& store) {
 }
 
 void Ip27Machine::step() {
-    const mips::IntegerState& state = cpu_.state();
+    step(cpu_a_);
+}
+
+void Ip27Machine::step(Processor& processor) {
+    const mips::IntegerState& state = processor.cpu.state();
+    // With two CPUs, each line names the CPU's slice.
+    const std::string_view slice = !cpu_b_ ? "" : &processor == &cpu_a_ ? "A " : "B ";
     for (const std::uint64_t probe : pc_probes_) {
         if (probe == state.pc) {
             tracer_.log(TraceCategory::cpu,
-                        "probe {:#018x} a0 {:#x} a1 {:#x} a2 {:#x} a3 {:#x} ra {:#x} v0 {:#x}",
-                        state.pc, state.gpr[4], state.gpr[5], state.gpr[6], state.gpr[7],
+                        "{}probe {:#018x} a0 {:#x} a1 {:#x} a2 {:#x} a3 {:#x} ra {:#x} v0 {:#x}",
+                        slice, state.pc, state.gpr[4], state.gpr[5], state.gpr[6], state.gpr[7],
                         state.gpr[31], state.gpr[2]);
         }
     }
     if (tracer_.enabled(TraceCategory::cpu) && pc_probes_.empty()) {
-        tracer_.log(TraceCategory::cpu, "pc {:#018x}", state.pc);
+        tracer_.log(TraceCategory::cpu, "{}pc {:#018x}", slice, state.pc);
     }
     executing_ = true;
-    interpreter_.step();
+    processor.interpreter.step();
     executing_ = false;
     // Events fire at the first cycle boundary at or after their deadline. Between events,
     // time is brought up to date only when a device is accessed.
-    if (cpu_.cycles() >= next_event_cycle_) {
+    if (lowest_cycles() >= next_event_cycle_) {
         synchronize_time();
     }
 }
@@ -559,7 +602,7 @@ void Ip27Machine::step() {
 void Ip27Machine::synchronize_time() {
     invariant(!executing_ || synchronized_accesses_ != 0,
               "events run only between instructions or inside a synchronized access");
-    scheduler_.advance_to(cpu_time_.time_at(cpu_.cycles()));
+    scheduler_.advance_to(cpu_time_.time_at(lowest_cycles()));
     update_next_event();
 }
 
@@ -580,7 +623,16 @@ void Ip27Machine::update_next_event() {
         }
         next_event_cycle_ = converted_deadline_cycle_;
     }
-    stop_cycle_ = std::min(next_event_cycle_, run_end_cycle_);
+    // With two CPUs, virtual time is the other CPU's while the running one is ahead of it, so
+    // an event later than the other CPU cannot fall due in this slice.
+    std::uint64_t event_stop = next_event_cycle_;
+    if (cpu_b_ && next_event_cycle_ > processors_[1 - running_]->cpu.cycles()) {
+        event_stop = std::numeric_limits<std::uint64_t>::max();
+    }
+    // With two CPUs a run ends between slices (run_two), unless a stop was requested.
+    const std::uint64_t run_end =
+        cpu_b_ && !stop_requested_ ? std::numeric_limits<std::uint64_t>::max() : run_end_cycle_;
+    stop_cycle_ = std::min({event_stop, run_end, slice_end_cycle_});
 }
 
 std::expected<std::uint64_t, AccessFault>
@@ -605,28 +657,69 @@ std::expected<void, AccessFault> Ip27Machine::SynchronizedTarget::mmio_write(std
 }
 
 void Ip27Machine::run(std::uint64_t cycles) {
-    run_end_cycle_ = cpu_.cycles() + cycles;
+    if (cpu_b_) {
+        run_two(cycles);
+        return;
+    }
+    run_end_cycle_ = cpu_a_.cpu.cycles() + cycles;
     stop_cycle_ = std::min(next_event_cycle_, run_end_cycle_);
     // Probes and instruction tracing observe every cycle; otherwise the interpreter runs
     // uninterrupted to the next event, the same cycle-for-cycle sequence as step().
     const bool observed = !pc_probes_.empty() || tracer_.enabled(TraceCategory::cpu);
-    while (cpu_.cycles() < run_end_cycle_) {
+    while (cpu_a_.cpu.cycles() < run_end_cycle_) {
         if (observed) {
-            step();
+            step(cpu_a_);
             continue;
         }
-        executing_ = true;
-        if (engine_ != mips::ExecutionEngine::reference) {
-            block_interpreter_.run_until(stop_cycle_);
-        } else {
-            interpreter_.run_until(stop_cycle_);
-        }
-        executing_ = false;
-        if (cpu_.cycles() >= next_event_cycle_) {
+        run_processor(false);
+        if (cpu_a_.cpu.cycles() >= next_event_cycle_) {
             synchronize_time();
         }
     }
     run_end_cycle_ = 0;
+    synchronize_time();
+}
+
+void Ip27Machine::run_processor(bool observed) {
+    Processor& p = *processors_[running_];
+    if (observed) {
+        while (p.cpu.cycles() < stop_cycle_) {
+            step(p);
+        }
+        return;
+    }
+    executing_ = true;
+    if (engine_ != mips::ExecutionEngine::reference) {
+        p.blocks.run_until(stop_cycle_);
+    } else {
+        p.interpreter.run_until(stop_cycle_);
+    }
+    executing_ = false;
+}
+
+void Ip27Machine::run_two(std::uint64_t cycles) {
+    // Lowest time first (ADR-023): the CPU behind runs until it is cpu_slice ahead of the
+    // other or an event falls due; A goes first on a tie. The order depends only on the cycle
+    // counts, never on where a run ends: a run ends between slices once both CPUs have
+    // completed `cycles` more, so splitting a run, or resuming a snapshot, changes nothing.
+    run_end_cycle_ = lowest_cycles() + cycles;
+    stop_requested_ = false;
+    const bool observed = !pc_probes_.empty() || tracer_.enabled(TraceCategory::cpu);
+    while (lowest_cycles() < run_end_cycle_) {
+        const std::uint64_t a = cpu_a_.cpu.cycles();
+        const std::uint64_t b = cpu_b_->cpu.cycles();
+        running_ = b < a ? 1 : 0;
+        slice_end_cycle_ = std::max(a, b) + config_.cpu_slice;
+        update_next_event();
+        run_processor(observed);
+        if (lowest_cycles() >= next_event_cycle_) {
+            synchronize_time();
+        }
+    }
+    running_ = 0;
+    slice_end_cycle_ = std::numeric_limits<std::uint64_t>::max();
+    run_end_cycle_ = 0;
+    stop_requested_ = false;
     synchronize_time();
 }
 

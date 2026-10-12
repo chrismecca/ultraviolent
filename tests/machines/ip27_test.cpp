@@ -7,6 +7,7 @@
 #include <ultraviolent/machines/ip27/ip27_machine.hpp>
 #include <ultraviolent/machines/ip27/prom_image.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -449,6 +450,92 @@ const test::Registration crosstalk{
                           0xffff,
                       std::uint64_t{0xc101});
         t.check_equal(ip27::hub_xbow_port(2), 0xau);
+    }};
+
+Ip27Config two_cpu_config(std::uint64_t slice = 180) {
+    Ip27Config config = small_config();
+    config.cpus = 2;
+    config.cpu_slice = slice;
+    return config;
+}
+
+void kernel_64(Ip27Machine& machine) {
+    for (unsigned slice = 0; slice < 2; ++slice) {
+        machine.cpu(slice).mtc0(mips::cp0::status, mips::status::kx);
+    }
+}
+
+std::uint64_t memory_word(Ip27Machine& machine, std::uint64_t address) {
+    return machine.bus().read(PhysicalAddress{address}, AccessWidth::bits64).value_or(~0ull);
+}
+
+// Both CPUs run the same reset code; PI_CPU_NUM, read through each CPU's own Hub port,
+// tells them apart (IP27.adoc "Two CPUs on a Hub"). Each stores 0x10 + its slice at 0x100 +
+// 8 * slice.
+const test::Registration two_cpu_slices{
+    "ip27.two_cpus.pi_cpu_num_per_cpu", [](test::Context& t) {
+        const auto prom = program({lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100),
+                                   daddu(t0, t0, t2), ld(t1, 0x20, t0), lui(t3, 0xa800),
+                                   dsll32(t3, t3, 0), dsll(t4, t1, 3), daddu(t3, t3, t4),
+                                   addiu(t5, t1, 0x10), sd(t5, 0x100, t3), beq(zero, zero, -4),
+                                   nop()});
+        Ip27Machine machine{two_cpu_config(), prom};
+        kernel_64(machine);
+        machine.run(200);
+        t.check(machine.cpu(0).cycles() >= 200 && machine.cpu(1).cycles() >= 200,
+                "both CPUs ran the cycles");
+        t.check_equal(memory_word(machine, 0x100), std::uint64_t{0x10});
+        t.check_equal(memory_word(machine, 0x108), std::uint64_t{0x11});
+    }};
+
+// Both CPUs increment one counter with LL/SC and count their successes in t6: no update is
+// lost (each CPU may have stored without counting yet), at the strict slice (the CPUs
+// alternate every cycle) and others, and two runs agree exactly (ADR-023).
+const auto counter_prom = program({lui(t3, 0xa800), dsll32(t3, t3, 0), daddiu(t3, t3, 0x200),
+                                   ll(t1, 0, t3), addiu(t1, t1, 1), sc(t1, 0, t3),
+                                   beq(t1, zero, -16), nop(), daddiu(t6, t6, 1),
+                                   beq(zero, zero, -28), nop()});
+
+const test::Registration two_cpu_counter{
+    "ip27.two_cpus.ll_sc_counter", [](test::Context& t) {
+        for (const std::uint64_t slice : {std::uint64_t{1}, std::uint64_t{7}, std::uint64_t{180}}) {
+            Ip27Machine first{two_cpu_config(slice), counter_prom};
+            Ip27Machine second{two_cpu_config(slice), counter_prom};
+            for (Ip27Machine* machine : {&first, &second}) {
+                kernel_64(*machine);
+                machine->run(20000);
+            }
+            const std::uint64_t a = first.cpu(0).state().gpr[t6];
+            const std::uint64_t b = first.cpu(1).state().gpr[t6];
+            t.check(a > 0 && b > 0, "both CPUs make progress");
+            const std::uint64_t counter = memory_word(first, 0x200) >> 32;
+            t.check(counter >= a + b && counter <= a + b + 2, "no lost update");
+            t.check(first.cpu(0).capture() == second.cpu(0).capture() &&
+                        first.cpu(1).capture() == second.cpu(1).capture(),
+                    "two runs agree");
+        }
+    }};
+
+// A two-CPU snapshot resumes exactly where the run would have gone.
+const test::Registration two_cpu_snapshot{
+    "ip27.two_cpus.snapshot", [](test::Context& t) {
+        Ip27Machine straight{two_cpu_config(5), counter_prom};
+        Ip27Machine saved{two_cpu_config(5), counter_prom};
+        kernel_64(straight);
+        kernel_64(saved);
+        straight.run(6000);
+        saved.run(3001);
+        const StateImage image = saved.save_state();
+        Ip27Machine resumed{two_cpu_config(5), counter_prom};
+        if (!t.check(resumed.load_state(image).has_value(), "the snapshot loads")) {
+            return;
+        }
+        resumed.run(6000 - std::min(resumed.cpu(0).cycles(), resumed.cpu(1).cycles()));
+        t.check(straight.cpu(0).capture() == resumed.cpu(0).capture(), "CPU A");
+        t.check(straight.cpu(1).capture() == resumed.cpu(1).capture(), "CPU B");
+        t.check_equal(memory_word(straight, 0x200), memory_word(resumed, 0x200));
+        Ip27Machine one{small_config(), counter_prom};
+        t.check(!one.load_state(image).has_value(), "a one-CPU machine refuses it");
     }};
 
 } // namespace
