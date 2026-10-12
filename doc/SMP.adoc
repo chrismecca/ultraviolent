@@ -1,0 +1,238 @@
+= Multiprocessor IP27
+
+Status: proposed, for review (2026-10-12). Nothing here is built yet.
+
+This is the plan for ADR-021's target, one deskside module with two IP27 nodes of two CPUs
+each, starting with the smallest new piece: a second CPU on one node's Hub. It follows the
+shape of `IR.adoc` and `JIT.adoc`: what is known, what must be observed before modeling, the
+design, and stages with acceptance gates. The review questions are at the end.
+
+== Goal and scope
+
+The user's goal (2026-10-10): each guest CPU at its nominal clock in virtual time, and
+host-parallel in fast mode (VISION "Fast mode", JIT.adoc "Toward host-parallel vCPUs").
+Reference mode stays single-threaded and deterministic, and remains the oracle.
+
+In scope, in order: two CPUs on one Hub (slices A and B) in reference mode; the same on the
+fast engines on one host thread; host-parallel CPUs; then the second node. The second node,
+the module's interconnect, and the IP31 / R12000 variant each get their own plan once the
+evidence for them is read from `slate` (ADR-021 "Not decided here").
+
+Out of scope: more than two nodes, routers, partitioning, graphics (ADR-012).
+
+The single-CPU configuration stays the default until the two-CPU one passes its gates, and its
+benchmark digests and same-cycle snapshots must not change.
+
+== What is known
+
+=== The PROM is written for both slices
+
+`observed` (IMAGE, disassembly of the reset vector at `0x1fc00800`): the first thing the
+PROM does after setting Status is read PI_CPU_NUM (HSPEC IO `0x9200000001000020`), scale
+it by 8 to select its slice's LED register, and write LED `0x5e`. A little later it reads
+PI_CPU_NUM again and, if it is nonzero, spins 128 iterations before continuing, which staggers
+CPU B behind CPU A. Both CPUs therefore run the same reset code from the same vector, and
+the Hub's answer to PI_CPU_NUM is what tells them apart.
+
+`inferred` (LINUX `asm/sn/launch.h`, IRIX-derived, "Copyright (C) 1992 - 1997, 2000 Silicon
+Graphics"): after reset one CPU per node becomes the master and the others wait in a PROM
+"slave loop". Each node's memory holds an array of launch structures, one per CPU, at a
+fixed place: magic `0xaddbead2addbead3`, busy, the call address and its ones' complement, one
+parameter, stack and gp, and three BEV exception handler addresses (`0x100` bytes each). The
+master fills a slave's structure and then sends that slave an interrupt; the slave checks
+the complement, clears it, calls the routine, and returns to the loop. One interrupt level
+is used per local CPU. The PROM exports `LAUNCH_SLAVE`, `WAIT`, `POLL`, and `LOOP` entry
+points to the kernel.
+
+=== The Hub already has per-slice state
+
+The model (`hub.cpp`) already keeps per-slice INT_MASK0/1, RT compare, RT and profiling
+pending and enable bits, CPU enable, PI_ERR_STACK_ADDR, and LEDs, and wires each slice's
+interrupt outputs with `Hub::connect_cpu(slice, ...)`. What is single-CPU today:
+PI_CPU_NUM always answers slice A (`requesting_slice = 0`), and PI_CPU_PRESENT_B reads 0
+(`cpu_present = {1, 0}`, labeled `hypothesis`).
+
+=== IRIX's view
+
+`inferred` (LINUX `asm/sn/intr.h`): Hub interrupt levels 10 and 11 are CPU_ACTION_A and
+CPU_ACTION_B, the inter-processor "action" interrupts; levels 45-52 are IP27_INTR_0-7, the
+low ones reserved for the PROM. An IPI is therefore an ordinary PI_INT_PEND_MOD write of a
+level that only the target slice's INT_MASK enables, which the Hub model already routes.
+`observed` (symbol names in slate's `/unix`): `sendintr`, `cpuaction`, `bootstrap`, `cboot`,
+`allowboot`, `cpu_enabled`, `cpu_unenable`, the NMI save routines, `slave_ksa`.
+
+=== slate
+
+Two nodes of IP31 / R12000 at 400 MHz (OBS-SLATE-0001, -0004); the PROM there is 6.156,
+the same version as the user's image. Its console capture of a healthy cold boot
+(OBS-SLATE-0003) is the reference for what the PROMs print with four CPUs.
+
+== Observe first (stage S0)
+
+Each item ends as a recorded fact with a source class and confidence label in `IP27.adoc`
+(or `SOURCES.adoc` for slate), before the model depends on it.
+
+. **The PROM's two-CPU reset path**, by disassembly and by running it: how the node's
+  master is chosen (a Hub register both CPUs race for, PI_CPU_NUM order, or a memory
+  location); the barriers between CPUs (the PROM's level 113 barrier at LED `0x28` already
+  seen on one CPU); what the slave loop polls or waits on; where the launch structures are;
+  which interrupt level wakes a slave; what the PROM does with PI_CPU_PRESENT_B and
+  PI_CPU_ENABLE_B; what it reports when a slice is present but never answers.
+. **The kernel's start of a second CPU**, by disassembly of `bootstrap`, `cboot`, and the
+  caller of the PROM's launch entry in slate's `/unix`, and by probes on the emulated
+  machine: the call, the interrupt, and what the slave runs first.
+. **IPIs**: `sendintr` and `cpuaction`, the levels they set, and the mask the kernel gives
+  each slice.
+. **LL/SC and SYNC use**: the kernel's lock primitives, to size the reservation model.
+. **slate**: the console capture (OBS-SLATE-0003) for the four-CPU PROM output; `hinv`,
+  `mpadmin -s`, and `sysconf` read-only (local/tools/slate-tn.py) for the kernel's view of
+  each CPU. POD register reads of PI_CPU_PRESENT, PI_CPU_ENABLE, and PI_CPU_NUM on slate
+  need the user at the console, and are asked for only if the image leaves a question open.
+
+Acceptance: a short "Two CPUs on a Hub" section in `IP27.adoc` with each fact labeled, and a
+list of what the model must provide.
+
+== Design
+
+=== Machine and configuration
+
+`Ip27Machine` owns its CPUs (two `mips::Cpu`, slice-indexed, with their engines and code
+memory per CPU). A configuration value, `--cpus 1|2` (per node), selects one or two; the
+Hub's PI_CPU_PRESENT bits follow the configuration rather than a constant. The machine owns
+which CPU is in which slice; nothing in `arch/mips` learns about slices or Hubs.
+
+=== Who is asking: the requester
+
+PI_CPU_NUM, and later every per-processor behavior of the PI, depend on which processor
+issued the access. Two ways to carry it:
+
+* **(recommended) A Hub port per slice.** Each CPU gets its own `AddressSpace` view whose
+  Hub window maps to that slice's port onto the shared Hub, as on the hardware, where each
+  processor has its own SysAD connection into the PI. Everything else in the space (memory,
+  Xtalk) maps to the same objects. The requester is then structural, never mutable state,
+  which is also what host-parallel execution needs.
+* A "current requester" the machine sets before running a CPU. Simpler, but it is shared
+  mutable state that breaks as soon as two host threads run.
+
+=== Time and scheduling (the main decision)
+
+Each CPU has its own cycle count and its own virtual time, `time_at(cycles, clock)`, as the
+single CPU has now. Devices and the scheduler see one virtual time. The rule today
+(IP27.adoc "Machine loop and time") is that the scheduler is brought up to the accessing
+CPU's time immediately before a device access. With two CPUs whose times differ, a device
+access by the CPU that is behind would move the scheduler backwards, so a rule is needed.
+Both proposals are deterministic and leave the one-CPU machine bit-identical.
+
+* **(recommended) Quanta, lowest time first, accesses at the device clock.** The machine
+  runs the CPU with the lower virtual time (slice A on a tie) until it is a quantum `Q`
+  ahead of the other, or reaches the next event deadline, then switches. A device access is
+  performed at the later of the CPU's time and the scheduler's time; if the scheduler is
+  ahead, the access completes at the scheduler's time and the CPU stalls to it (its cycle
+  count advances, as an uncached read on the real machine takes about a microsecond anyway).
+  Skew between CPUs is bounded by `Q`; shared-memory accesses interleave at quantum
+  granularity. `Q` also bounds how far a CPU's own clock (Count) and the device clock can
+  disagree at an access. It is a constant chosen by measurement; first guess 1 µs (180
+  cycles at 180 MHz, about one 800 ns RTC tick, far below IRIX's 1 ms clock tick).
+* Exact global order for device accesses. A CPU that reaches a device access ahead of the
+  other gives up the CPU at that instruction (no side effect yet) and retries once the other
+  CPU has caught up. Device accesses are then in exact virtual-time order with no stalls,
+  but every engine needs a restartable access and tier 1 an exit before the access instead
+  of a barrier after it; firmware delay loops that poll the Hub switch CPUs at every read.
+
+The guest cannot rely on finer ordering than the real machine guarantees: two CPUs on a Hub
+see each other's stores in an order MIPS IV only constrains with SYNC and LL/SC.
+
+=== Memory, LL/SC, SYNC
+
+* Memory is shared; each CPU keeps its own host page caches. A store through one CPU must
+  invalidate any host page entries of the other that it would make stale (today flushes
+  happen when translation or mappings change, and the bus counts code-frame stores for
+  every master).
+* LL/SC: each CPU's reservation becomes a physical line (`ll_bit` plus address). A store by
+  another CPU (or DMA) to that line clears it. Proposed mechanism: when a CPU takes a
+  reservation, the other CPU's writable host page entry for that page is dropped, so its
+  stores to the page take the slow path, which checks reservations. No cost to stores while
+  no reservation is held on the page. ERET still clears the CPU's own bit (UM).
+* SYNC: a no-op in reference mode (one CPU runs at a time); a host fence in host-parallel
+  mode.
+* Caches: the R10000's caches are coherent with each other on the Hub (the directory
+  protocol), so the model's cached memory stays one shared array. The instruction cache is
+  not coherent with stores (JIT.adoc): each CPU's decoded blocks are invalidated by stores
+  from either CPU through the existing code-frame accounting, seen at that CPU's next
+  engine entry, barrier, or interrupt.
+
+=== Interrupts
+
+IPIs need no new mechanism: a PI_INT_PEND_MOD write sets the level, and each slice's mask
+routes it (`Hub::update_interrupts` already does this for both slices). What is new is that
+slice B's outputs reach a CPU. The interrupt is seen by the target CPU at its next
+instruction boundary in its own time, within the quantum rule above.
+
+=== Reset
+
+Power-on and Hub local reset (NI_PORT_RESET LOCALRESET, IP27.adoc "Hub local reset") reset
+both CPUs; warm reset is per the existing model. `hypothesis` until S0: CPU B starts at the
+same reset vector at the same time as A.
+
+=== Snapshots
+
+The snapshot gains the second CPU and the scheduling state (each CPU's cycles, the quantum
+position). One-CPU snapshots keep their format and still load.
+
+=== Tracing
+
+Every CPU-scoped trace record and `--probe` hit names its slice. The flight recorder keeps
+per-CPU PCs.
+
+=== Host-parallel (later stage, sketched)
+
+One host thread per CPU, each running its engine up to a shared deadline (the quantum end),
+then a barrier where device events run and time advances. Device accesses take a lock (or
+are sent to the device thread) and use the same "access at the device clock" rule. LL/SC
+reservations become an atomic per-line table checked by SC; the rest follows JIT.adoc
+"Toward host-parallel vCPUs". This mode is not deterministic run to run, and is only
+accepted against reference-mode results on the same workloads (same final outputs, not the
+same cycles).
+
+== Stages
+
+S0. **Observe** (above). Gate: the facts recorded; the review of this plan with the user.
+
+S1. **Requester and presence.** Per-slice Hub ports; PI_CPU_NUM by requester;
+PI_CPU_PRESENT from the configuration. One CPU still runs. Gates: Hub unit tests (PI_CPU_NUM
+from each port, presence by configuration); all presets; all four benchmark digests and
+same-cycle snapshots unchanged.
+
+S2. **Two CPUs in reference mode.** Two `Cpu` objects, the scheduling rule, LL/SC
+reservations across CPUs, per-CPU tracing, snapshots. Gates: unit tests for scheduling
+determinism (two runs, identical cycles and state), an LL/SC contention test with two CPUs
+on one counter, an IPI test through PI_INT_PEND_MOD; the PROM reaches its menu with two
+CPUs and its inventory shows both (compared with slate's capture); the one-CPU gates of S1.
+
+S3. **IRIX on two CPUs, reference and tier 0/1 on one host thread.** Each engine per CPU.
+Gates: IRIX boots to `login:` with `hinv` reporting two 180 MHz processors and `mpadmin -s`
+both CPUs; a two-CPU workload (two parallel `cpu` benchmarks, `@stop` when both finish) with
+identical digests and same-cycle snapshots on all three engines; the existing benchmarks.
+
+S4. **Host-parallel CPUs (fast mode).** Gates: the S3 workloads reach the same outputs;
+host-parallel speedup measured on the two-CPU workload; reference mode unchanged.
+
+S5. **Second node** (own plan, from slate's topology).
+
+S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
+
+== Evidence needed from the user
+
+* slate's cold-boot console capture (OBS-SLATE-0003) and the PROM Technical Reference Manual
+  (PRM, 108-0170-001): both were outside the repository and are not on the rebuilt host.
+* Later, POD reads on slate if S0 leaves a register reset value open.
+
+== Review questions
+
+. Scheduling: quanta with device accesses at the device clock (and a CPU stall), or exact
+  global order with restartable accesses?
+. The requester as a per-slice Hub port (an `AddressSpace` per CPU), or a machine-set
+  current requester?
+. `--cpus 1|2` stays a per-node option and one CPU stays the default until S3's gates pass:
+  agreed?
+. Stop after S3 for review before host-parallel threads (S4)?

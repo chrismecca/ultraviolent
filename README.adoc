@@ -83,6 +83,7 @@ Start here, in order:
 . `doc/MIPS.adoc`
 . `doc/IR.adoc`
 . `doc/JIT.adoc`
+. `doc/SMP.adoc`
 . `doc/IP27.adoc`
 . `doc/IP27-TARGET.adoc`
 . `doc/ROADMAP.adoc`

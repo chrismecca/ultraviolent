@@ -399,6 +399,11 @@ Housekeeping:
   directory (gone); rebuild a baseline with `git worktree add` and its own
   `scripts/build-pgo.sh`.
 
+* The host was rebuilt on 2026-10-12 and the repository moved to `~/src/ultraviolent`
+  (`/n/mec/src/ultraviolent`). Build trees made before then must be deleted and
+  reconfigured (CMake refuses a cache from another source path); `build/pgo` was rebuilt
+  with `scripts/build-pgo.sh`. `local/` (on `/srv/ultraviolent`) is unchanged.
+
 * `src/core/virtual_time.cpp` (empty translation unit) and `tests/core/core_test.cpp` (the
   original single-assertion test, CTest `core_test`) are superseded bootstrap placeholders.
   They still build and pass. Delete them and their `CMakeLists.txt` entries.
@@ -416,7 +421,11 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   host-parallel vCPUs"). First step, within one node: the second CPU on the Hub (slice B), its
   interrupts and IPIs, the PROM's CPU discovery and slave launch, deterministic reference
   scheduling of two CPUs; then fast mode on host threads. Read what `slate`'s PROM and IRIX
-  do with two CPUs per node before modeling (ADR-021). Performance work left, by size:
+  do with two CPUs per node before modeling (ADR-021). **The plan is `doc/SMP.adoc`
+  (proposed 2026-10-12), awaiting the user's answers to its review questions; then stage S0,
+  observe.** Already seen: the PROM reads PI_CPU_NUM at its reset vector to pick its LED and
+  staggers CPU B. slate's console capture and the PRM are not on the rebuilt host (asked).
+  Performance work left, by size:
   device accesses in `boot` (about 140 host cycles each, spread over four layers); tier 0
   and translation for lukewarm code (`boot` 13% in the engine loop); then dispatch and
   direct links (J6).
