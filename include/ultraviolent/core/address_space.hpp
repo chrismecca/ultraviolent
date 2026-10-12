@@ -4,6 +4,7 @@
 #include <ultraviolent/core/byte_order.hpp>
 #include <ultraviolent/core/memory_block.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -84,6 +85,11 @@ enum class MapError : std::uint8_t {
 class AddressSpace {
   public:
     static constexpr std::uint64_t mapping_alignment = 8;
+    // Requesters: the bus masters whose accesses a register window may tell apart, such as
+    // the two processors on an IP27 Hub, each with its own connection (ADR-023). Requester 0
+    // is the default for masters that are not told apart.
+    static constexpr unsigned max_requesters = 2;
+    using Ports = std::array<MmioTarget*, max_requesters>;
 
     explicit AddressSpace(ByteOrder byte_order) : byte_order_{byte_order} {}
     AddressSpace(const AddressSpace&) = delete;
@@ -102,6 +108,8 @@ class AddressSpace {
 
     // Maps `range` onto a register window. The target must outlive the space.
     std::expected<void, MapError> map_mmio(PhysicalRange range, MmioTarget& target);
+    // Maps `range` onto one register window per requester: `ports[r]` serves requester r.
+    std::expected<void, MapError> map_ports(PhysicalRange range, const Ports& ports);
 
     // Replace the mapping of exactly `range` (a mapping made earlier with the same range).
     std::expected<void, MapError> remap_memory(PhysicalRange range, MemoryBlock& block,
@@ -109,7 +117,8 @@ class AddressSpace {
                                                MmioTarget* write_target = nullptr);
     std::expected<void, MapError> remap_mmio(PhysicalRange range, MmioTarget& target);
 
-    std::expected<std::uint64_t, AccessFault> read(PhysicalAddress address, AccessWidth width);
+    std::expected<std::uint64_t, AccessFault> read(PhysicalAddress address, AccessWidth width,
+                                                   unsigned requester = 0);
 
     // The host bytes behind [address, address + size) when one memory mapping covers the
     // whole range, for execution-engine fast paths. Empty for MMIO and unmapped ranges.
@@ -139,8 +148,8 @@ class AddressSpace {
         MmioTarget* target;
         std::uint64_t offset;
     };
-    [[nodiscard]] std::optional<MmioRange> mmio_range(PhysicalAddress address,
-                                                     std::uint64_t size) const;
+    [[nodiscard]] std::optional<MmioRange> mmio_range(PhysicalAddress address, std::uint64_t size,
+                                                     unsigned requester = 0) const;
     // Writes through this space that touched a frame holding decoded code (write and
     // writable_memory_bytes).
     [[nodiscard]] std::uint64_t code_writes() const {
@@ -151,7 +160,7 @@ class AddressSpace {
         return generation_;
     }
     std::expected<void, AccessFault> write(PhysicalAddress address, AccessWidth width,
-                                           std::uint64_t value);
+                                           std::uint64_t value, unsigned requester = 0);
 
   private:
     struct MemoryMapping {
@@ -164,7 +173,7 @@ class AddressSpace {
 
     struct Mapping {
         PhysicalRange range;
-        std::variant<MemoryMapping, MmioTarget*> target;
+        std::variant<MemoryMapping, Ports> target;
     };
 
     [[nodiscard]] const Mapping* find(PhysicalAddress address) const;

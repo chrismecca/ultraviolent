@@ -64,8 +64,9 @@ constexpr bool is_tlb_exception(ExceptionCode code) {
 
 } // namespace
 
-Cpu::Cpu(AddressSpace& bus, Tracer& tracer, const ProcessorModel& model)
-    : bus_{bus}, tracer_{tracer}, model_{model} {
+Cpu::Cpu(AddressSpace& bus, Tracer& tracer, const ProcessorModel& model, unsigned requester)
+    : bus_{bus}, requester_{requester}, tracer_{tracer}, model_{model} {
+    invariant(requester < AddressSpace::max_requesters, "no such bus requester");
     invariant(((model.identity().config & config_big_endian) != 0) ==
                   (bus.byte_order() == ByteOrder::big),
               "Config.BE must match the system bus byte order");
@@ -387,7 +388,7 @@ std::expected<std::uint64_t, Exception> Cpu::read(const Translation& translation
     const PhysicalAddress address = bus_address(translation, width);
     left_host_path_ = true;
     last_bus_access_ = classify_bus_access(address, width, translation.uncached);
-    auto value = bus_.read(address, width);
+    auto value = bus_.read(address, width, requester_);
     check_host_pages();
     if (!value) {
         // A read that receives an error response takes a bus error (UM 17 "Bus Error").
@@ -409,7 +410,10 @@ std::expected<void, Exception> Cpu::write(const Translation& translation, Access
     left_host_path_ = true;
     last_bus_access_ = classify_bus_access(address, width, translation.uncached);
     const std::uint64_t code_writes = bus_.code_writes();
-    auto result = bus_.write(address, width, value);
+    auto result = bus_.write(address, width, value, requester_);
+    if (coherence_ != nullptr && result) {
+        coherence_->store(requester_, address, byte_count(width));
+    }
     if (bus_.code_writes() != code_writes) {
         last_bus_access_ = BusAccess::code_store;
         ++code_frame_stores_;
@@ -499,7 +503,7 @@ void Cpu::remember_device_page(std::uint64_t address, const Translation& transla
     }
     const std::uint64_t page = address & ~page_offset_mask;
     const PhysicalAddress frame{translation.address.value & ~page_offset_mask};
-    const auto range = bus_.mmio_range(frame, page_offset_mask + 1);
+    const auto range = bus_.mmio_range(frame, page_offset_mask + 1, requester_);
     if (!range) {
         return;
     }
@@ -566,11 +570,38 @@ std::optional<Cpu::CodePage> Cpu::code_page(std::uint64_t address) {
 
 void Cpu::claim_code_frame(const CodePage& page) {
     page.block->mark_code(page.frame);
+    // Other CPUs may hold the frame as a writable host page; their stores must reach the bus
+    // from now on.
+    if (coherence_ != nullptr) {
+        coherence_->drop_writable_pages();
+        seen_coherence_ = coherence_->generation();
+    }
     if (page.tlb_index >= 0) {
         tlb_code_entries_ |= std::uint64_t{1} << page.tlb_index;
     }
     for (HostPage& entry : data_pages_) {
         if (entry.writable_bytes == page.bytes) {
+            entry = {};
+        }
+    }
+}
+
+void Cpu::note_load_linked(std::uint64_t address) {
+    if (coherence_ == nullptr) {
+        return;
+    }
+    // The load has just translated `address`, so this cannot fault.
+    if (const auto translation = translate(address, AccessKind::load)) {
+        coherence_->reserve(requester_, translation->address);
+        // Our own reservation leaves our pages alone.
+        seen_coherence_ = coherence_->generation();
+    }
+}
+
+void Cpu::drop_writable_pages() {
+    seen_coherence_ = coherence_->generation();
+    for (HostPage& entry : data_pages_) {
+        if (entry.writable_bytes != nullptr) {
             entry = {};
         }
     }
@@ -629,6 +660,10 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
         // A frame holding decoded code is never writable through the host page cache: its
         // stores must reach the bus to advance its generation.
         if (memory->block->holds_code(memory->offset)) {
+            return;
+        }
+        // Nor is a frame where another CPU holds a reservation: the stores must break it.
+        if (coherence_ != nullptr && coherence_->watched(requester_, frame)) {
             return;
         }
         const auto bytes = bus_.writable_memory_bytes(frame, page_size);
@@ -921,6 +956,9 @@ std::uint64_t Cpu::exception_return() {
     }
     update_derived_state();
     state_.ll_bit = false;
+    if (coherence_ != nullptr) {
+        coherence_->release(requester_);
+    }
     return target;
 }
 

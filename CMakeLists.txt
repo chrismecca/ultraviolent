@@ -171,6 +171,7 @@ if(BUILD_TESTING)
         tests/arch/mips/processor_model_test.cpp
         tests/arch/mips/tier1_test.cpp
         tests/arch/mips/host_page_test.cpp
+        tests/arch/mips/multiprocessor_test.cpp
         tests/arch/mips/exception_test.cpp
         tests/arch/mips/fpu_test.cpp
         tests/arch/mips/tlb_test.cpp

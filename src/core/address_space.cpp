@@ -38,7 +38,9 @@ std::expected<void, MapError> AddressSpace::remap_memory(PhysicalRange range, Me
 }
 
 std::expected<void, MapError> AddressSpace::remap_mmio(PhysicalRange range, MmioTarget& target) {
-    return replace({range, &target});
+    Ports ports;
+    ports.fill(&target);
+    return replace({range, ports});
 }
 
 std::expected<void, MapError> AddressSpace::replace(Mapping mapping) {
@@ -54,11 +56,20 @@ std::expected<void, MapError> AddressSpace::replace(Mapping mapping) {
 }
 
 std::expected<void, MapError> AddressSpace::map_mmio(PhysicalRange range, MmioTarget& target) {
-    return insert({range, &target});
+    Ports ports;
+    ports.fill(&target);
+    return insert({range, ports});
+}
+
+std::expected<void, MapError> AddressSpace::map_ports(PhysicalRange range, const Ports& ports) {
+    invariant(std::ranges::none_of(ports, [](const MmioTarget* t) { return t == nullptr; }),
+              "every requester needs a port");
+    return insert({range, ports});
 }
 
 std::expected<std::uint64_t, AccessFault> AddressSpace::read(PhysicalAddress address,
-                                                             AccessWidth width) {
+                                                             AccessWidth width,
+                                                             unsigned requester) {
     const std::uint64_t size = byte_count(width);
     if (address.value % size != 0) {
         return std::unexpected(AccessFault::misaligned);
@@ -71,13 +82,13 @@ std::expected<std::uint64_t, AccessFault> AddressSpace::read(PhysicalAddress add
     if (const auto* memory = std::get_if<MemoryMapping>(&mapping->target)) {
         return load_unsigned(memory->bytes.subspan(offset, size), byte_order_);
     }
-    auto value = std::get<MmioTarget*>(mapping->target)->mmio_read(offset, width);
+    auto value = std::get<Ports>(mapping->target)[requester]->mmio_read(offset, width);
     invariant(!value || fits_width(*value, width), "MMIO read value wider than the access");
     return value;
 }
 
 std::expected<void, AccessFault> AddressSpace::write(PhysicalAddress address, AccessWidth width,
-                                                     std::uint64_t value) {
+                                                     std::uint64_t value, unsigned requester) {
     invariant(fits_width(value, width), "write value wider than the access");
     const std::uint64_t size = byte_count(width);
     if (address.value % size != 0) {
@@ -101,7 +112,7 @@ std::expected<void, AccessFault> AddressSpace::write(PhysicalAddress address, Ac
         store_unsigned(memory->bytes.subspan(offset, size), value, byte_order_);
         return {};
     }
-    return std::get<MmioTarget*>(mapping->target)->mmio_write(offset, width, value);
+    return std::get<Ports>(mapping->target)[requester]->mmio_write(offset, width, value);
 }
 
 std::span<const std::byte> AddressSpace::memory_bytes(PhysicalAddress address,
@@ -146,17 +157,17 @@ std::optional<AddressSpace::MemoryFrame> AddressSpace::memory_frame(PhysicalAddr
     return MemoryFrame{memory->block, memory->block_offset + (address - mapping->range.base)};
 }
 
-std::optional<AddressSpace::MmioRange> AddressSpace::mmio_range(PhysicalAddress address,
-                                                                std::uint64_t size) const {
+std::optional<AddressSpace::MmioRange>
+AddressSpace::mmio_range(PhysicalAddress address, std::uint64_t size, unsigned requester) const {
     const Mapping* mapping = find(address);
     if (mapping == nullptr || size == 0 || !mapping->range.contains(address + (size - 1))) {
         return std::nullopt;
     }
-    auto* const* target = std::get_if<MmioTarget*>(&mapping->target);
-    if (target == nullptr) {
+    const auto* ports = std::get_if<Ports>(&mapping->target);
+    if (ports == nullptr) {
         return std::nullopt;
     }
-    return MmioRange{*target, address - mapping->range.base};
+    return MmioRange{(*ports)[requester], address - mapping->range.base};
 }
 
 const AddressSpace::Mapping* AddressSpace::find(PhysicalAddress address) const {

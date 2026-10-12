@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ultraviolent/arch/mips/coherence.hpp>
 #include <ultraviolent/arch/mips/cache_arrays.hpp>
 #include <ultraviolent/arch/mips/cp0.hpp>
 #include <ultraviolent/arch/mips/processor_model.hpp>
@@ -126,9 +127,25 @@ class Cpu final : public InterruptSink {
     // External interrupt inputs 0-4 set Cause.IP[2]-IP[6].
     static constexpr std::uint32_t external_interrupt_count = 5;
 
-    Cpu(AddressSpace& bus, Tracer& tracer, const ProcessorModel& model);
+    // `requester` is the CPU's connection to the bus (AddressSpace "Requesters"): which port
+    // of a per-requester register window its accesses reach.
+    Cpu(AddressSpace& bus, Tracer& tracer, const ProcessorModel& model, unsigned requester = 0);
     Cpu(const Cpu&) = delete;
     Cpu& operator=(const Cpu&) = delete;
+
+    // Shares memory with other CPUs through `coherence` (SMP.adoc): LL/SC reservations and
+    // writable host pages follow their stores. Call before running. Without it the CPU is
+    // the bus's only processor.
+    void connect_coherence(Coherence& coherence) {
+        coherence_ = &coherence;
+        seen_coherence_ = coherence.generation();
+    }
+    // LL at `address` succeeded: with other CPUs, reserve its line.
+    void note_load_linked(std::uint64_t address);
+    // Whether no other CPU has broken this CPU's reservation since its LL.
+    [[nodiscard]] bool reservation_intact() const {
+        return coherence_ == nullptr || coherence_->held(requester_);
+    }
 
     // power_on and cold take the Cold Reset exception; warm takes the Soft Reset exception.
     void reset(ResetKind kind);
@@ -603,6 +620,9 @@ class Cpu final : public InterruptSink {
     // The bus changes only between runs or during a bus access, so this runs at the start of
     // a run (synchronize_host_pages) and after every bus access (read, write).
     void check_host_pages() {
+        if (coherence_ != nullptr && coherence_->generation() != seen_coherence_) [[unlikely]] {
+            drop_writable_pages();
+        }
         if (!host_pages_current()) {
             ++code_epoch_;
             ++code_changes_;
@@ -638,7 +658,13 @@ class Cpu final : public InterruptSink {
                                               AccessWidth width) const;
     void enter_reset_vector();
 
+    // Another CPU claimed a code frame or took a reservation (Coherence).
+    void drop_writable_pages();
+
     AddressSpace& bus_;
+    unsigned requester_;
+    Coherence* coherence_{};
+    std::uint64_t seen_coherence_{};
     Tracer& tracer_;
     ProcessorModel model_;
     IntegerState state_;

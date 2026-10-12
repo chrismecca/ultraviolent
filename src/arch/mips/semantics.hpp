@@ -413,6 +413,8 @@ class Executor {
 }
 
 [[gnu::always_inline]] inline Result Executor::load_linked(AccessWidth width) {
+    // Before the load, which may overwrite the base register.
+    const std::uint64_t address_value = address();
     auto b = direct();
     auto result = width == AccessWidth::bits32 ? operations::lw(b, i_) : operations::ld(b, i_);
     if (result.flow == Flow::exception) {
@@ -420,6 +422,7 @@ class Executor {
     }
     // LLAddr is a scratch register on the R10000 and is not written (UM 14.15).
     s_.ll_bit = true;
+    cpu_.note_load_linked(address_value);
     return sequential();
 }
 
@@ -433,13 +436,14 @@ class Executor {
     if (!translation) {
         return fail(translation.error());
     }
-    if (s_.ll_bit) {
+    const bool success = s_.ll_bit && cpu_.reservation_intact();
+    if (success) {
         const std::uint64_t value = width == AccessWidth::bits64 ? rt() : rt() & 0xffff'ffff;
         if (auto result = cpu_.write(*translation, width, value); !result) {
             return fail(result.error());
         }
     }
-    cpu_.set_gpr(i_.rt(), s_.ll_bit ? 1 : 0);
+    cpu_.set_gpr(i_.rt(), success ? 1 : 0);
     return sequential();
 }
 
