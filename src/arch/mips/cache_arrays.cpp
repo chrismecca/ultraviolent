@@ -200,7 +200,8 @@ void CacheArrays::write_data(std::uint64_t va, unsigned way, unsigned bytes,
         // hypothesis: even parity per byte, byte 0 (bits 31:24) in ECC bit 3.
         std::uint8_t parity = 0;
         for (unsigned b = 0; b < 4; ++b) {
-            parity = static_cast<std::uint8_t>(parity << 1 | even_parity(v >> (24 - 8 * b) & 0xff));
+            const std::uint32_t byte = v >> (24 - 8 * b) & 0xffu;
+            parity = static_cast<std::uint8_t>((std::uint32_t{parity} << 1) | even_parity(byte));
         }
         data_parity_[w] = parity;
     };
