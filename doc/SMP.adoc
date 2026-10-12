@@ -1,6 +1,7 @@
 = Multiprocessor IP27
 
-Status: proposed, for review (2026-10-12). Nothing here is built yet.
+Status: accepted with the user (2026-10-12; ADR-023). Stages S0-S3 proceed without further
+review; the user reviews before S4.
 
 This is the plan for ADR-021's target, one deskside module with two IP27 nodes of two CPUs
 each, starting with the smallest new piece: a second CPU on one node's Hub. It follows the
@@ -227,12 +228,26 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
   (PRM, 108-0170-001): both were outside the repository and are not on the rebuilt host.
 * Later, POD reads on slate if S0 leaves a register reset value open.
 
-== Review questions
+== Decisions (with the user, 2026-10-12)
 
-. Scheduling: quanta with device accesses at the device clock (and a CPU stall), or exact
-  global order with restartable accesses?
-. The requester as a per-slice Hub port (an `AddressSpace` per CPU), or a machine-set
-  current requester?
-. `--cpus 1|2` stays a per-node option and one CPU stays the default until S3's gates pass:
-  agreed?
-. Stop after S3 for review before host-parallel threads (S4)?
+. **Scheduling: time slices of configurable length.** The CPU that is behind runs until it
+  is a slice ahead of the other, then they swap; a device access happens at the later of
+  the CPU's and the device clock, and the CPU waits to it. `--cpu-slice CYCLES` sets the
+  length: 1 is the strict setting (the CPUs alternate every instruction; every
+  interleaving is one the hardware could produce) used by tests and engine comparison; the
+  default is about 1 µs (180 cycles at 180 MHz). Exact global order of device accesses was
+  not chosen: it makes device accesses more precise but does nothing for memory
+  interleaving, where the real machine is itself not repeatable, and needs restartable
+  accesses in every engine.
+. **The requester is structural: a Hub port per CPU**, each CPU with its own address-space
+  view, as each processor has its own SysAD connection into the PI.
+. **`--cpus 1|2` per node; one CPU stays the default** until S3's gates pass.
+. **Review after S3**, before host-parallel CPUs (S4).
+
+Asked by the user: why not model the real machine exactly? Its structure is modeled exactly
+(two processors, a port each into the Hub, coherent shared memory, IPIs through the Hub's
+registers). Its cycle timing is not: the order in which two R10000s reach memory depends on
+out-of-order pipelines, cache misses, and Hub queues that no public document specifies, a
+cycle-accurate model would be orders of magnitude slower, and real hardware does not
+repeat it either. PROM and IRIX are correct under any interleaving the hardware permits, so
+the contract is to produce one such interleaving, deterministically in reference mode.

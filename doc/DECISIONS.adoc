@@ -287,3 +287,24 @@ implemented (JIT.adoc "The processor personality today").
 
 Revisit only with a concrete case where an engine cannot avoid a processor fact other than
 through identity.
+
+== ADR-023: Two CPUs on a Hub run in time slices, each through its own Hub port
+
+Status: accepted (with the user, 2026-10-12)
+
+In reference mode the two CPUs of a node run one at a time: the one behind in virtual time
+runs until it is one slice ahead, with the slice length configurable down to one cycle
+(the strict setting). A device access happens at the later of the accessing CPU's time and
+the device clock, and the CPU waits to it. Each CPU reaches the Hub through its own port,
+so the requester (PI_CPU_NUM and the per-processor PI registers) follows from the
+connection, never from mutable "current CPU" state.
+
+Reasons: the guest-visible contract is the hardware's structure and its memory-ordering
+rules, not one particular interleaving, which the real machine does not repeat either
+(SMP.adoc "Decisions"); slices are deterministic, leave the one-CPU machine bit-identical,
+and with a one-cycle slice produce only interleavings the hardware permits. Ports per CPU
+mirror the hardware's separate SysAD connections and carry over to host-parallel CPUs.
+
+Revisit if guest software is found to depend on cross-CPU timing finer than the default
+slice, or when host-parallel execution (SMP.adoc S4) is designed.
+

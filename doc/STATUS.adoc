@@ -421,10 +421,11 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   host-parallel vCPUs"). First step, within one node: the second CPU on the Hub (slice B), its
   interrupts and IPIs, the PROM's CPU discovery and slave launch, deterministic reference
   scheduling of two CPUs; then fast mode on host threads. Read what `slate`'s PROM and IRIX
-  do with two CPUs per node before modeling (ADR-021). **The plan is `doc/SMP.adoc`
-  (proposed 2026-10-12), awaiting the user's answers to its review questions; then stage S0,
-  observe.** Already seen: the PROM reads PI_CPU_NUM at its reset vector to pick its LED and
-  staggers CPU B. slate's console capture and the PRM are not on the rebuilt host (asked).
+  do with two CPUs per node before modeling (ADR-021). **The plan is `doc/SMP.adoc`,
+  accepted 2026-10-12 (ADR-023): time slices of configurable length (1 cycle strict), a Hub
+  port per CPU, `--cpus 1|2` with one the default, stages S0-S3 without further review, the
+  user reviews before S4.** Already seen: the PROM reads PI_CPU_NUM at its reset vector to pick its LED and
+  staggers CPU B. slate's console capture is in `~/src/bench/docs`; the PRM is not on the host.
   Performance work left, by size:
   device accesses in `boot` (about 140 host cycles each, spread over four layers); tier 0
   and translation for lukewarm code (`boot` 13% in the engine loop); then dispatch and
