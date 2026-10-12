@@ -10,7 +10,8 @@ Debian versions will evolve; avoid depending on an exact compiler minor version 
 real compiler bug requires it.
 
 The reference machine since 2026-10-07 is `uv-dev01`: AMD Ryzen 5 3600 (six cores, SMT off,
-boost off), 16 GB, Debian 13. The repository is on NFS (`/n/store01/home/mec`); private
+boost off), 16 GB, Debian 13. The repository is on NFS at `~/src/ultraviolent`
+(`/n/mec/src/ultraviolent`, since 2026-10-12); private
 runtime state is on a local XFS volume on its own disk, `/srv/ultraviolent` (`local/` is a
 symlink to `/srv/ultraviolent/local`, excluded in `.git/info/exclude`; the NFS copy it was
 made from is kept as `local.nfs-backup/`), and the benchmark fixture is in
