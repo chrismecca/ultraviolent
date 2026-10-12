@@ -268,8 +268,9 @@ ErrorEPC.
 
 == Caches
 
-Caching is not modeled: memory is always coherent, so cached and uncached references reach
-the same data, and loads, stores, and fetches never fill or consult a cache.
+Refills are not modeled: memory stands for every line, so cached and uncached references
+reach the same data, and loads, stores, and fetches never fill a cache. The exception is a
+primary data line software makes valid itself (below).
 
 The cache arrays are modeled as CACHE operations see them (UM chapter 10), because firmware
 diagnostics test them: the IP27 PROM's secondary cache test writes a pattern to each way's
@@ -288,8 +289,36 @@ operations select the entry from VA 13:5 or 13:6 (primary) or PA (secondary) and
 bit 0. Hit operations compare stored tags with the PA. Invalidation follows UM 10.2-10.4 and
 10.11-10.16: state fields cleared, D StateMod set to Normal, secondary tag and PIdx rewritten
 from the PA and VA 13:12, the MRU bit pointed at the other way, primary subsets invalidated,
-Status.CH set on a secondary hit and cleared on a miss. Write-backs write nothing, because
-memory is always current.
+Status.CH set on a secondary hit and cleared on a miss.
+
+=== Lines software installs
+
+A primary data line made valid by Index Store Tag (D) holds data only that processor's cache
+has: on the hardware, hits make no system-interface request, so nothing else sees them. The
+IP27 PROM builds each CPU's first stack this way, 32 KB at the same physical address on both
+CPUs, before memory is initialized (`observed`, IP27.adoc "Two CPUs on a Hub"). With one CPU
+memory could stand in for it; with two it cannot (the CPUs overwrote each other's stack), so
+the model is (UM 10.3, 10.12, 14.20; tests `mips.smp.cache_lines_installed_by_software_are_
+private`, `mips.cache.held_data_lines_replaced_least_recently_used`):
+
+* While any primary data line is valid (a nonzero PState, StateMod not Refill), every cached
+  data load and store looks it up by VA 13:5 and the physical tag. A hit reads or writes the
+  data array; a write makes the line DirtyExclusive with StateMod Inconsistent and updates the
+  byte parity. Host data pages are not used meanwhile, so every engine takes this path.
+* A miss replaces the least recently used way of the set, as a refill would: a valid line
+  there leaves, written back when Inconsistent, and the other way becomes least recently
+  used. `hypothesis`: the refill itself is not modeled (the way is left invalid and memory
+  stands for the new line).
+* Index WriteBack Invalidate (D), Hit WriteBack Invalidate (D), and secondary writeback
+  operations that invalidate primary subsets write an Inconsistent line back; Hit Invalidate
+  discards it. `hypothesis`: with no secondary line modeled for it, the 32 bytes go to memory
+  directly, as the secondary cache's own writeback would deliver them.
+* Lines made valid in the secondary cache by Index Store Tag (S) are not consulted (none
+  observed: no secondary line stays valid through the PROM or an IRIX boot).
+
+`observed`: in a one-CPU boot all 1,024 primary data lines stay valid through the whole
+PROM in the arrays and none after IRIX starts; every benchmark digest is unchanged by this
+model.
 
 `hypothesis`: the secondary tag ECC that invalidation "generates" is written as zero (the
 algorithm is not documented). `hypothesis`: for secondary caches larger than 1 MB, the

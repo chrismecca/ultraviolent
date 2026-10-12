@@ -4,6 +4,7 @@
 
 #include <bit>
 #include <cstddef>
+#include <string>
 #include <utility>
 
 // Section references are to the MIPS R10000 Microprocessor User's Manual, Version 2.0 (UM).
@@ -187,7 +188,8 @@ void Cpu::schedule_timer() {
     }
 }
 
-std::expected<Translation, Exception> Cpu::translate(std::uint64_t address, AccessKind kind) {
+std::expected<Translation, Exception> Cpu::translate_address(std::uint64_t address,
+                                                            AccessKind kind) {
     const auto address_error = [&] {
         return std::unexpected(Exception{.code = kind == AccessKind::store
                                                      ? ExceptionCode::address_error_store
@@ -386,6 +388,12 @@ std::expected<std::uint64_t, Exception> Cpu::read(const Translation& translation
         return std::unexpected(watch.error());
     }
     const PhysicalAddress address = bus_address(translation, width);
+    if (kind != AccessKind::fetch && !translation.uncached && caches_.holds_data_lines()) {
+        if (const auto way = cached_line(translation, address)) {
+            return caches_.read_data(primary_index(translation, address), *way,
+                                     static_cast<unsigned>(byte_count(width)));
+        }
+    }
     left_host_path_ = true;
     last_bus_access_ = classify_bus_access(address, width, translation.uncached);
     auto value = bus_.read(address, width, requester_);
@@ -407,6 +415,13 @@ std::expected<void, Exception> Cpu::write(const Translation& translation, Access
         return watch;
     }
     const PhysicalAddress address = bus_address(translation, width);
+    if (!translation.uncached && caches_.holds_data_lines()) {
+        if (const auto way = cached_line(translation, address)) {
+            caches_.write_data(primary_index(translation, address), *way,
+                               static_cast<unsigned>(byte_count(width)), value);
+            return {};
+        }
+    }
     left_host_path_ = true;
     last_bus_access_ = classify_bus_access(address, width, translation.uncached);
     const std::uint64_t code_writes = bus_.code_writes();
@@ -427,6 +442,35 @@ std::expected<void, Exception> Cpu::write(const Translation& translation, Access
                     address.value, byte_count(width), value, std::to_underlying(result.error()));
     }
     return {};
+}
+
+std::optional<unsigned> Cpu::cached_line(const Translation& translation,
+                                         PhysicalAddress address) {
+    // The arrays hold big-endian words; the IP27 is big-endian throughout.
+    if (!big_endian() || bus_.byte_order() != ByteOrder::big) {
+        return std::nullopt;
+    }
+    std::optional<CacheArrays::Writeback> replaced;
+    const auto way = caches_.data_reference(primary_index(translation, address),
+                                            address.value & cache_physical_bits, replaced);
+    if (replaced) {
+        write_back(*replaced);
+    }
+    return way;
+}
+
+void Cpu::write_back(const CacheArrays::Writeback& line) {
+    // hypothesis: with no secondary line modeled for it, the data goes to memory as the
+    // secondary cache's writeback would (UM 10.3, 10.4).
+    for (std::size_t i = 0; i < line.words.size(); i += 2) {
+        const PhysicalAddress at{line.address + 4 * i};
+        const std::uint64_t value = (std::uint64_t{line.words[i]} << 32) | line.words[i + 1];
+        const auto result = bus_.write(at, AccessWidth::bits64, value, requester_);
+        if (coherence_ != nullptr && result) {
+            coherence_->store(requester_, at, 8);
+        }
+    }
+    synchronize_code();
 }
 
 std::expected<std::uint64_t, Exception> Cpu::load_slow(std::uint64_t address, AccessWidth width) {
@@ -654,6 +698,11 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
     const PhysicalAddress frame{translation.address.value & ~page_offset_mask};
     const auto memory = bus_.memory_frame(frame);
     if (!memory) {
+        return;
+    }
+    // While the primary data cache holds lines, cached data references go through read and
+    // write, which consult it.
+    if (kind != AccessKind::fetch && !translation.uncached && caches_.holds_data_lines()) {
         return;
     }
     if (kind == AccessKind::store) {
@@ -1030,8 +1079,18 @@ std::expected<void, Exception> Cpu::cache(unsigned operation, std::uint64_t addr
     }
     constexpr std::uint64_t physical_bits = (std::uint64_t{1} << 40) - 1;
     CacheRegisters registers{cp0_.tag_lo, cp0_.tag_hi, cp0_.ecc};
+    const bool held = caches_.holds_data_lines();
     const auto ch =
         caches_.execute(operation, address, translation->address.value & physical_bits, registers);
+    for (const CacheArrays::Writeback& line : caches_.take_writebacks()) {
+        write_back(line);
+    }
+    if (caches_.holds_data_lines() && !held) {
+        // Cached data references must now consult the primary data cache, not host pages.
+        for (HostPage& entry : data_pages_) {
+            entry = {};
+        }
+    }
     cp0_.tag_lo = registers.tag_lo;
     cp0_.tag_hi = registers.tag_hi;
     cp0_.ecc = registers.ecc;
@@ -1056,33 +1115,35 @@ Cpu::State Cpu::capture() const {
     return state;
 }
 
-void Cpu::save_state(StateImage& image) const {
-    image.put("cpu.integer", state_);
-    image.put("cpu.fpu", fpu_);
+void Cpu::save_state(StateImage& image, std::string_view prefix) const {
+    const auto key = [prefix](std::string_view name) { return std::string{prefix}.append(name); };
+    image.put(key("cpu.integer"), state_);
+    image.put(key("cpu.fpu"), fpu_);
     Cp0Registers cp0 = cp0_;
     cp0.random = random();
-    image.put("cpu.cp0", cp0);
-    image.put("cpu.tlb", tlb_.entries());
-    image.put("cpu.cycles", cycles_);
-    image.put("cpu.external_interrupts", external_interrupts_);
-    image.put("cpu.timer_interrupt", timer_interrupt_);
-    image.put("cpu.watch_pending", watch_pending_);
-    caches_.save_state(image);
+    image.put(key("cpu.cp0"), cp0);
+    image.put(key("cpu.tlb"), tlb_.entries());
+    image.put(key("cpu.cycles"), cycles_);
+    image.put(key("cpu.external_interrupts"), external_interrupts_);
+    image.put(key("cpu.timer_interrupt"), timer_interrupt_);
+    image.put(key("cpu.watch_pending"), watch_pending_);
+    caches_.save_state(image, prefix);
 }
 
-void Cpu::load_state(const StateImage& image) {
-    image.get("cpu.integer", state_);
-    image.get("cpu.fpu", fpu_);
-    image.get("cpu.cp0", cp0_);
+void Cpu::load_state(const StateImage& image, std::string_view prefix) {
+    const auto key = [prefix](std::string_view name) { return std::string{prefix}.append(name); };
+    image.get(key("cpu.integer"), state_);
+    image.get(key("cpu.fpu"), fpu_);
+    image.get(key("cpu.cp0"), cp0_);
     std::array<TlbEntry, Tlb::entry_count> entries{};
-    if (image.get("cpu.tlb", entries)) {
+    if (image.get(key("cpu.tlb"), entries)) {
         tlb_.restore(entries);
     }
-    image.get("cpu.cycles", cycles_);
-    image.get("cpu.external_interrupts", external_interrupts_);
-    image.get("cpu.timer_interrupt", timer_interrupt_);
-    image.get("cpu.watch_pending", watch_pending_);
-    caches_.load_state(image);
+    image.get(key("cpu.cycles"), cycles_);
+    image.get(key("cpu.external_interrupts"), external_interrupts_);
+    image.get(key("cpu.timer_interrupt"), timer_interrupt_);
+    image.get(key("cpu.watch_pending"), watch_pending_);
+    caches_.load_state(image, prefix);
     invalidate_host_pages();
     set_random(cp0_.random);
     schedule_timer();

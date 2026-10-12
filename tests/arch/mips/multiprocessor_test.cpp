@@ -110,4 +110,37 @@ const test::Registration code_changed_by_other_cpu{
         t.check_equal(p.s.gpr(v0), std::uint64_t{2});
     }};
 
+// A primary data line made valid by Index Store Tag holds data only that CPU's cache has
+// (UM chapter 10; the IP27 PROM's first stack, IP27.adoc "Two CPUs on a Hub"): two CPUs see
+// their own data at one physical address, and memory gets a line only when it is written
+// back.
+const test::Registration private_cache_lines{
+    "mips.smp.cache_lines_installed_by_software_are_private", [](test::Context& t) {
+        Pair p;
+        // Way 0 of the set for `data`: tag PA 39:12, DirtyExclusive; StateMod Normal.
+        constexpr std::uint32_t tag_lo = (data >> 12) << 8 | 3u << 6;
+        constexpr std::uint32_t tag_hi = 1u << 29;
+        for (Cpu* cpu : {&p.s.cpu, &p.b}) {
+            cpu->mtc0(cp0::tag_lo, tag_lo);
+            cpu->mtc0(cp0::tag_hi, tag_hi);
+        }
+        p.s.set(t1, 0x1111);
+        p.b.set_gpr(t1, 0x2222);
+        const auto program = {cache(0x9, 0, a0), sw(t1, 0, a0), lw(t2, 0, a0), cache(0x1, 0, a0),
+                              lw(t3, 0, a0)};
+        p.load(program, program);
+        p.s.interpreter.run(3);
+        p.interpreter_b.run(3);
+        t.check_equal(p.s.gpr(t2), std::uint64_t{0x1111});
+        t.check_equal(p.b.state().gpr[t2], std::uint64_t{0x2222});
+        t.check_equal(p.s.peek(data, AccessWidth::bits32), std::uint64_t{0});
+        // A's Index WriteBack Invalidate sends its line to memory; B's stays in B's cache.
+        p.s.interpreter.run(2);
+        t.check_equal(p.s.peek(data, AccessWidth::bits32), std::uint64_t{0x1111});
+        t.check_equal(p.s.gpr(t3), std::uint64_t{0x1111});
+        p.interpreter_b.run(2);
+        t.check_equal(p.s.peek(data, AccessWidth::bits32), std::uint64_t{0x2222});
+        t.check_equal(p.b.state().gpr[t3], std::uint64_t{0x2222});
+    }};
+
 } // namespace

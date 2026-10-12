@@ -164,4 +164,43 @@ const test::Registration instruction{
         t.check_equal(s.exception_code(), static_cast<std::uint32_t>(ExceptionCode::tlb_load));
     }};
 
+// Primary data lines software made valid hold their own data; a miss in a full set replaces
+// the least recently used way, writing back a line stores changed (UM 10.3; MIPS.adoc
+// "Caches").
+const test::Registration replacement{
+    "mips.cache.held_data_lines_replaced_least_recently_used", [](test::Context& t) {
+        System s;
+        // 0x8000, 0xc000, and 0x10000 share primary data set 0.
+        constexpr std::uint64_t first = 0x8000;
+        constexpr std::uint64_t second = 0xc000;
+        constexpr std::uint64_t third = 0x1'0000;
+        s.poke(third, AccessWidth::bits32, 0x3333);
+        s.set(a0, kseg0(first));
+        s.set(a1, kseg0(second) + 1); // VA bit 0 selects way 1 for Index Store Tag
+        s.set(a2, kseg0(third));
+        s.set(t1, 0x1111);
+        s.set(t2, 0x2222);
+        // Each line DirtyExclusive with StateMod Normal: the tag for the address in TagLo
+        // 31:8, TagHi 31:29 = 001.
+        s.cpu.mtc0(cp0::tag_hi, 1u << 29);
+        s.load(System::code,
+               {cache(index_store_tag_d, 0, a0), mtc0(t3, cp0::tag_lo), cache(index_store_tag_d, 0, a1),
+                sw(t1, 0, a0), sw(t2, -1, a1), lw(v0, 0, a2), lw(v1, -1, a1)});
+        s.cpu.mtc0(cp0::tag_lo, (first >> 12) << 8 | 3u << 6);
+        s.set(t3, (second >> 12) << 8 | 3u << 6);
+        s.start_kernel();
+        s.interpreter.run(5);
+        // Both lines hold the stores; memory does not.
+        t.check_equal(s.peek(first, AccessWidth::bits32), std::uint64_t{0});
+        t.check_equal(s.peek(second, AccessWidth::bits32), std::uint64_t{0});
+        // A miss: way 0 (first) is least recently used and is written back.
+        s.interpreter.run(1);
+        t.check_equal(s.gpr(v0), std::uint64_t{0x3333});
+        t.check_equal(s.peek(first, AccessWidth::bits32), std::uint64_t{0x1111});
+        t.check_equal(s.peek(second, AccessWidth::bits32), std::uint64_t{0});
+        // Way 1 still holds its line.
+        s.interpreter.run(1);
+        t.check_equal(s.gpr(v1), std::uint64_t{0x2222});
+    }};
+
 } // namespace

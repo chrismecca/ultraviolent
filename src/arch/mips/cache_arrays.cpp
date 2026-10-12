@@ -1,6 +1,7 @@
 #include <ultraviolent/arch/mips/cache_arrays.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <span>
 #include <string>
 
@@ -40,6 +41,14 @@ constexpr std::uint32_t instruction_state = (1u << 6) | (1u << 2);      // state
 constexpr std::uint32_t data_state = (3u << 6) | (1u << 2) | (1u << 1); // + SCWay
 constexpr std::uint32_t statemod_mask = 7u << 29;
 constexpr std::uint32_t statemod_normal = 1u << 29;
+// StateMod Inconsistent: stores changed the primary line, which must be written back when it
+// leaves (UM 10.3). StateMod Refill: the line is being refilled, not valid data.
+constexpr std::uint32_t statemod_inconsistent = 2u << 29;
+constexpr std::uint32_t statemod_refill = 4u << 29;
+constexpr std::uint32_t data_pstate = 3u << 6;
+constexpr std::uint32_t data_dirty_exclusive = 3u << 6;
+constexpr std::uint32_t data_state_parity = 1u << 2;
+constexpr std::uint32_t data_scway = 1u << 1;
 constexpr std::uint32_t secondary_state = 3u << 10;
 // The secondary way prediction table has 8K entries (UM 5.x).
 constexpr std::size_t mru_entries = 8192;
@@ -102,9 +111,116 @@ void CacheArrays::invalidate_primary_instruction(std::size_t index) {
 
 void CacheArrays::invalidate_primary_data(std::size_t index) {
     // State 00, SCWay 0, StateMod 001 (Normal), state parity 0 (UM 10.3, 10.12).
-    Tag& tag = data_tags_[index];
+    Tag tag = data_tags_[index];
     tag.lo &= ~data_state;
     tag.hi = (tag.hi & ~statemod_mask) | statemod_normal;
+    set_data_tag(index, tag);
+}
+
+namespace {
+
+// A primary data tag holds a line: a valid state that is not being refilled.
+bool holds_line(std::uint32_t lo, std::uint32_t hi) {
+    return (lo & data_pstate) != 0 && (hi & statemod_refill) == 0;
+}
+
+// Even parity over the bits of `value`: the bit that makes the count of ones even.
+std::uint32_t even_parity(std::uint32_t value) {
+    return static_cast<std::uint32_t>(std::popcount(value) & 1);
+}
+
+} // namespace
+
+void CacheArrays::set_data_tag(std::size_t index, Tag tag) {
+    const bool before = holds_line(data_tags_[index].lo, data_tags_[index].hi);
+    const bool after = holds_line(tag.lo, tag.hi);
+    data_tags_[index] = tag;
+    valid_data_lines_ = valid_data_lines_ + (after ? 1 : 0) - (before ? 1 : 0);
+}
+
+std::optional<CacheArrays::Writeback> CacheArrays::data_writeback(std::size_t index) const {
+    const Tag& tag = data_tags_[index];
+    if (!holds_line(tag.lo, tag.hi) || (tag.hi & statemod_mask) != statemod_inconsistent) {
+        return std::nullopt;
+    }
+    // The tag gives physical bits 39:12; the set gives 11:5 (VA 11:5 equals PA 11:5).
+    const std::size_t set = index / ways;
+    const unsigned way = index % ways;
+    Writeback line{.address = primary_tag(tag.lo, tag.hi) | ((set << 5) & 0xfff), .words = {}};
+    const std::size_t first = way * primary_words + set * 8;
+    std::copy_n(data_words_.begin() + static_cast<std::ptrdiff_t>(first), 8, line.words.begin());
+    return line;
+}
+
+void CacheArrays::write_back_data(std::size_t index) {
+    if (auto line = data_writeback(index)) {
+        writebacks_.push_back(*line);
+    }
+}
+
+std::optional<unsigned> CacheArrays::data_reference(std::uint64_t va, std::uint64_t pa,
+                                                    std::optional<Writeback>& replaced) {
+    const std::size_t set = va >> 5 & (data_sets - 1);
+    for (unsigned w = 0; w < ways; ++w) {
+        const Tag& tag = data_tags_[set * ways + w];
+        if (holds_line(tag.lo, tag.hi) && primary_tag(tag.lo, tag.hi) == (pa & page_mask)) {
+            data_lru_[set] = static_cast<std::uint8_t>(w ^ 1);
+            return w;
+        }
+    }
+    // A miss refills the least recently used way (UM 4.x): its line leaves, written back when
+    // stores changed it. hypothesis: the refill itself is not modeled; the way is left invalid
+    // and memory stands for the new line, which becomes the most recently used.
+    const unsigned victim = data_lru_[set];
+    const std::size_t index = set * ways + victim;
+    if (holds_line(data_tags_[index].lo, data_tags_[index].hi)) {
+        replaced = data_writeback(index);
+        invalidate_primary_data(index);
+    }
+    data_lru_[set] = static_cast<std::uint8_t>(victim ^ 1);
+    return std::nullopt;
+}
+
+std::uint64_t CacheArrays::read_data(std::uint64_t va, unsigned way, unsigned bytes) const {
+    const std::size_t word = way * primary_words + (va >> 2 & (primary_words - 1));
+    if (bytes == 8) {
+        return (std::uint64_t{data_words_[word]} << 32) | data_words_[word + 1];
+    }
+    const unsigned shift = 8 * (4 - bytes - (va & 3));
+    const std::uint64_t mask = (std::uint64_t{1} << (8 * bytes)) - 1;
+    return (data_words_[word] >> shift) & mask;
+}
+
+void CacheArrays::write_data(std::uint64_t va, unsigned way, unsigned bytes,
+                             std::uint64_t value) {
+    const std::size_t set = va >> 5 & (data_sets - 1);
+    const std::size_t word = way * primary_words + (va >> 2 & (primary_words - 1));
+    const auto store_word = [this](std::size_t w, std::uint32_t v) {
+        data_words_[w] = v;
+        // hypothesis: even parity per byte, byte 0 (bits 31:24) in ECC bit 3.
+        std::uint8_t parity = 0;
+        for (unsigned b = 0; b < 4; ++b) {
+            parity = static_cast<std::uint8_t>(parity << 1 | even_parity(v >> (24 - 8 * b) & 0xff));
+        }
+        data_parity_[w] = parity;
+    };
+    if (bytes == 8) {
+        store_word(word, static_cast<std::uint32_t>(value >> 32));
+        store_word(word + 1, static_cast<std::uint32_t>(value));
+    } else {
+        const unsigned shift = 8 * (4 - bytes - (va & 3));
+        const std::uint32_t mask = static_cast<std::uint32_t>(((std::uint64_t{1} << (8 * bytes)) - 1)
+                                                              << shift);
+        store_word(word, (data_words_[word] & ~mask) |
+                             (static_cast<std::uint32_t>(value << shift) & mask));
+    }
+    // The line is now DirtyExclusive and newer than the secondary cache: Inconsistent. The
+    // state parity covers PState and SCWay (UM 14.20).
+    Tag tag = data_tags_[set * ways + way];
+    tag.lo = (tag.lo & ~(data_pstate | data_state_parity)) | data_dirty_exclusive;
+    tag.lo |= even_parity(tag.lo & (data_pstate | data_scway)) != 0 ? data_state_parity : 0;
+    tag.hi = (tag.hi & ~statemod_mask) | statemod_inconsistent;
+    set_data_tag(set * ways + way, tag);
 }
 
 void CacheArrays::primary_instruction(unsigned operation, std::uint64_t va, std::uint64_t pa,
@@ -158,7 +274,8 @@ void CacheArrays::primary_data(unsigned operation, std::uint64_t va, std::uint64
     const std::size_t word = way * primary_words + (va >> 2 & (primary_words - 1));
     switch (operation) {
     case index_invalidate:
-        // Index WriteBack Invalidate (D): memory is always current, so nothing is written.
+        // Index WriteBack Invalidate (D): a line stores changed is written back (UM 10.3).
+        write_back_data(index);
         invalidate_primary_data(index);
         return;
     case index_load_tag:
@@ -166,7 +283,7 @@ void CacheArrays::primary_data(unsigned operation, std::uint64_t va, std::uint64
         registers.tag_hi = data_tags_[index].hi;
         return;
     case index_store_tag:
-        data_tags_[index] = {registers.tag_lo & data_lo_fields, registers.tag_hi & data_hi_fields};
+        set_data_tag(index, {registers.tag_lo & data_lo_fields, registers.tag_hi & data_hi_fields});
         data_lru_[set] = static_cast<std::uint8_t>((registers.tag_lo & lru_bit) != 0);
         return;
     case hit_invalidate:
@@ -174,6 +291,9 @@ void CacheArrays::primary_data(unsigned operation, std::uint64_t va, std::uint64
         for (unsigned w = 0; w < ways; ++w) {
             const Tag& tag = data_tags_[set * ways + w];
             if ((tag.lo & (3u << 6)) != 0 && primary_tag(tag.lo, tag.hi) == (pa & page_mask)) {
+                if (operation == hit_writeback_invalidate) {
+                    write_back_data(set * ways + w);
+                }
                 invalidate_primary_data(set * ways + w);
             }
         }
@@ -203,7 +323,7 @@ std::size_t CacheArrays::secondary_mru_index(std::size_t set) const {
     return set % secondary_mru_.size();
 }
 
-void CacheArrays::invalidate_subsets(std::uint64_t block, unsigned pidx) {
+void CacheArrays::invalidate_subsets(std::uint64_t block, unsigned pidx, bool write_back) {
     // Primary blocks are indexed by virtual address: VA 13:12 is the secondary entry's PIdx
     // and VA 11:0 equals PA 11:0.
     const std::uint64_t size = std::uint64_t{1} << secondary_block_shift_;
@@ -218,6 +338,9 @@ void CacheArrays::invalidate_subsets(std::uint64_t block, unsigned pidx) {
             }
             const Tag& dtag = data_tags_[dset * ways + w];
             if ((dtag.lo & (3u << 6)) != 0 && primary_tag(dtag.lo, dtag.hi) == (pa & page_mask)) {
+                if (write_back) {
+                    write_back_data(dset * ways + w);
+                }
                 invalidate_primary_data(dset * ways + w);
             }
         }
@@ -225,12 +348,12 @@ void CacheArrays::invalidate_subsets(std::uint64_t block, unsigned pidx) {
 }
 
 void CacheArrays::invalidate_secondary(std::size_t set, unsigned way, std::uint64_t va,
-                                       std::uint64_t pa) {
+                                       std::uint64_t pa, bool write_back) {
     Tag& tag = secondary_tags_[set * ways + way];
     const std::uint64_t block =
         secondary_tag(tag.lo, tag.hi) | (static_cast<std::uint64_t>(set) << secondary_block_shift_);
     invalidate_subsets(block & ~((std::uint64_t{1} << secondary_block_shift_) - 1),
-                       tag.lo >> 7 & 3);
+                       tag.lo >> 7 & 3, write_back);
     // All tag bits are written at once: State 00, the tag and PIdx from the CACHE
     // instruction's PA and VA 13:12. hypothesis: the generated tag ECC is not modeled and
     // reads as zero. Nothing is written back: memory is always current.
@@ -253,7 +376,7 @@ std::optional<bool> CacheArrays::secondary(unsigned operation, std::uint64_t va,
     case index_invalidate:
         // Index WriteBack Invalidate (S): nothing happens to an invalid entry (UM 10.4).
         if ((secondary_tags_[index].lo & secondary_state) != 0) {
-            invalidate_secondary(set, way, va, pa);
+            invalidate_secondary(set, way, va, pa, true);
         }
         return std::nullopt;
     case index_load_tag:
@@ -274,7 +397,7 @@ std::optional<bool> CacheArrays::secondary(unsigned operation, std::uint64_t va,
         for (unsigned w = 0; w < ways; ++w) {
             const Tag& tag = secondary_tags_[set * ways + w];
             if ((tag.lo & secondary_state) != 0 && secondary_tag(tag.lo, tag.hi) == tag_bits) {
-                invalidate_secondary(set, w, va, pa);
+                invalidate_secondary(set, w, va, pa, operation == hit_writeback_invalidate);
                 return true;
             }
         }
@@ -298,32 +421,36 @@ std::optional<bool> CacheArrays::secondary(unsigned operation, std::uint64_t va,
     }
 }
 
-void CacheArrays::save_state(StateImage& image) const {
-    put_vector(image, "cache.instruction_tags", instruction_tags_);
-    put_vector(image, "cache.instruction_lru", instruction_lru_);
-    put_vector(image, "cache.instruction_data", instruction_data_);
-    put_vector(image, "cache.data_tags", data_tags_);
-    put_vector(image, "cache.data_lru", data_lru_);
-    put_vector(image, "cache.data_words", data_words_);
-    put_vector(image, "cache.data_parity", data_parity_);
-    put_vector(image, "cache.secondary_tags", secondary_tags_);
-    put_vector(image, "cache.secondary_mru", secondary_mru_);
-    put_vector(image, "cache.secondary_data", secondary_data_);
-    put_vector(image, "cache.secondary_check", secondary_check_);
+void CacheArrays::save_state(StateImage& image, std::string_view prefix) const {
+    const auto key = [prefix](std::string_view name) { return std::string{prefix}.append(name); };
+    put_vector(image, key("cache.instruction_tags"), instruction_tags_);
+    put_vector(image, key("cache.instruction_lru"), instruction_lru_);
+    put_vector(image, key("cache.instruction_data"), instruction_data_);
+    put_vector(image, key("cache.data_tags"), data_tags_);
+    put_vector(image, key("cache.data_lru"), data_lru_);
+    put_vector(image, key("cache.data_words"), data_words_);
+    put_vector(image, key("cache.data_parity"), data_parity_);
+    put_vector(image, key("cache.secondary_tags"), secondary_tags_);
+    put_vector(image, key("cache.secondary_mru"), secondary_mru_);
+    put_vector(image, key("cache.secondary_data"), secondary_data_);
+    put_vector(image, key("cache.secondary_check"), secondary_check_);
 }
 
-void CacheArrays::load_state(const StateImage& image) {
-    get_vector(image, "cache.instruction_tags", instruction_tags_);
-    get_vector(image, "cache.instruction_lru", instruction_lru_);
-    get_vector(image, "cache.instruction_data", instruction_data_);
-    get_vector(image, "cache.data_tags", data_tags_);
-    get_vector(image, "cache.data_lru", data_lru_);
-    get_vector(image, "cache.data_words", data_words_);
-    get_vector(image, "cache.data_parity", data_parity_);
-    get_vector(image, "cache.secondary_tags", secondary_tags_);
-    get_vector(image, "cache.secondary_mru", secondary_mru_);
-    get_vector(image, "cache.secondary_data", secondary_data_);
-    get_vector(image, "cache.secondary_check", secondary_check_);
+void CacheArrays::load_state(const StateImage& image, std::string_view prefix) {
+    const auto key = [prefix](std::string_view name) { return std::string{prefix}.append(name); };
+    get_vector(image, key("cache.instruction_tags"), instruction_tags_);
+    get_vector(image, key("cache.instruction_lru"), instruction_lru_);
+    get_vector(image, key("cache.instruction_data"), instruction_data_);
+    get_vector(image, key("cache.data_tags"), data_tags_);
+    get_vector(image, key("cache.data_lru"), data_lru_);
+    get_vector(image, key("cache.data_words"), data_words_);
+    get_vector(image, key("cache.data_parity"), data_parity_);
+    get_vector(image, key("cache.secondary_tags"), secondary_tags_);
+    get_vector(image, key("cache.secondary_mru"), secondary_mru_);
+    get_vector(image, key("cache.secondary_data"), secondary_data_);
+    get_vector(image, key("cache.secondary_check"), secondary_check_);
+    valid_data_lines_ = static_cast<std::size_t>(std::ranges::count_if(
+        data_tags_, [](const Tag& tag) { return holds_line(tag.lo, tag.hi); }));
 }
 
 } // namespace ultraviolent::mips

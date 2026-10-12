@@ -16,6 +16,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <expected>
 #include <optional>
 #include <span>
@@ -86,6 +87,8 @@ struct Translation {
     bool uncached{};
     // The TLB entry that mapped the address, or -1 for an unmapped segment.
     std::int8_t tlb_index{-1};
+    // Virtual address bits 13:12, which with the page offset index the primary caches.
+    std::uint8_t virtual_index{};
 };
 
 // Integer architectural state that execution engines read and write directly.
@@ -236,7 +239,13 @@ class Cpu final : public InterruptSink {
 
     // Memory references. Alignment is the caller's concern for translate/read/write; load,
     // store, and fetch check natural alignment first.
-    std::expected<Translation, Exception> translate(std::uint64_t address, AccessKind kind);
+    std::expected<Translation, Exception> translate(std::uint64_t address, AccessKind kind) {
+        auto translation = translate_address(address, kind);
+        if (translation) {
+            translation->virtual_index = static_cast<std::uint8_t>(address >> 12 & 3);
+        }
+        return translation;
+    }
     std::expected<std::uint64_t, Exception> read(const Translation& translation, AccessWidth width,
                                                  AccessKind kind);
     std::expected<void, Exception> write(const Translation& translation, AccessWidth width,
@@ -481,8 +490,9 @@ class Cpu final : public InterruptSink {
     [[nodiscard]] NativeLayout native_layout() const;
 
     // Snapshot support (StateImage).
-    void save_state(StateImage& image) const;
-    void load_state(const StateImage& image);
+    // Keys start with `prefix` (empty for the first CPU), so one image can hold several CPUs.
+    void save_state(StateImage& image, std::string_view prefix = {}) const;
+    void load_state(const StateImage& image, std::string_view prefix = {});
 
   private:
     struct Cp0Registers {
@@ -656,6 +666,19 @@ class Cpu final : public InterruptSink {
     std::expected<void, Exception> check_watch(const Translation& translation, AccessKind kind);
     [[nodiscard]] PhysicalAddress bus_address(const Translation& translation,
                                               AccessWidth width) const;
+    std::expected<Translation, Exception> translate_address(std::uint64_t address,
+                                                            AccessKind kind);
+    // A cached data reference while the primary data cache holds lines (CacheArrays): the
+    // way that holds it, after writing back any line the reference replaced.
+    std::optional<unsigned> cached_line(const Translation& translation, PhysicalAddress address);
+    void write_back(const CacheArrays::Writeback& line);
+    // Physical address bits the caches see.
+    static constexpr std::uint64_t cache_physical_bits = (std::uint64_t{1} << 40) - 1;
+    // The primary caches' virtual index: VA 13:12 and the page offset.
+    [[nodiscard]] static std::uint64_t primary_index(const Translation& translation,
+                                                     PhysicalAddress address) {
+        return (std::uint64_t{translation.virtual_index} << 12) | (address.value & 0xfff);
+    }
     void enter_reset_vector();
 
     // Another CPU claimed a code frame or took a reservation (Coherence).
