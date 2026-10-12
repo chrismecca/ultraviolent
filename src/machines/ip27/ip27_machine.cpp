@@ -94,6 +94,9 @@ std::expected<void, std::string> validate(const Ip27Config& config,
     if (config.node_slot < 1 || config.node_slot > 4) {
         return std::unexpected("node slot must be n1 to n4");
     }
+    if (config.cpus < 1 || config.cpus > 2) {
+        return std::unexpected("a node holds one or two CPUs");
+    }
     if (config.cpu_clock.hertz == 0 || config.cpu_clock.hertz > maximum_frequency_hertz) {
         return std::unexpected("processor clock out of range");
     }

@@ -27,7 +27,7 @@ class Lines final : public TraceSink {
 
 // A Hub with its own clock, scheduler, and a counter of node resets.
 struct Bench {
-    Bench() {
+    explicit Bench(unsigned cpus = 1) : cpu_count{cpus} {
         tracer.set_sink(&sink);
         tracer.enable(TraceCategory::firmware);
         tracer.enable(TraceCategory::hub);
@@ -36,11 +36,12 @@ struct Bench {
                 .has_value();
     }
 
-    std::uint64_t read(std::uint64_t offset) {
-        return hub.mmio_read(offset, AccessWidth::bits64).value_or(0xdead);
+    // An access from the CPU in `slice`.
+    std::uint64_t read(std::uint64_t offset, unsigned slice = 0) {
+        return hub.port(slice).mmio_read(offset, AccessWidth::bits64).value_or(0xdead);
     }
-    bool write(std::uint64_t offset, std::uint64_t value) {
-        return hub.mmio_write(offset, AccessWidth::bits64, value).has_value();
+    bool write(std::uint64_t offset, std::uint64_t value, unsigned slice = 0) {
+        return hub.port(slice).mmio_write(offset, AccessWidth::bits64, value).has_value();
     }
 
     VirtualClock clock;
@@ -56,8 +57,9 @@ struct Bench {
     AddressSpace bus{ByteOrder::big};
     MemoryBlock memory{1u << 20};
     bool mapped = false;
+    unsigned cpu_count;
     // Slot ID 7: node slot n1.
-    Hub hub{scheduler, tracer, Hub::default_revision,    7, i2c,
+    Hub hub{scheduler, tracer, Hub::default_revision, 7, cpu_count, i2c,
             directory, bus,    [this] { ++node_resets; }};
 };
 
@@ -67,7 +69,27 @@ const test::Registration cpu_number{"ip27.hub.pi_cpu_num", [](test::Context& t) 
                                         t.check(b.write(0x20, 0x1234), "writes are accepted");
                                         t.check_equal(b.read(0x20),
                                                       std::uint64_t{0}); // and have no effect
+                                        // The answer depends on the port asking (ADR-023).
+                                        t.check_equal(b.read(0x20, 1), std::uint64_t{1});
                                     }};
+
+// PI_CPU_PRESENT_A/B (0x40, 0x48) follow the installed CPUs, and present CPUs start enabled
+// (PI_CPU_ENABLE_A/B, 0x50, 0x58), which the PROM clears for a CPU that does not answer
+// (IP27.adoc "Two CPUs on a Hub").
+const test::Registration cpu_presence{
+    "ip27.hub.cpu_present", [](test::Context& t) {
+        Bench one;
+        t.check_equal(one.read(0x40), std::uint64_t{1});
+        t.check_equal(one.read(0x48), std::uint64_t{0});
+        t.check_equal(one.read(0x50), std::uint64_t{1});
+        t.check_equal(one.read(0x58), std::uint64_t{0});
+        Bench two{2};
+        t.check_equal(two.read(0x48), std::uint64_t{1});
+        t.check_equal(two.read(0x58, 1), std::uint64_t{1});
+        t.check(two.write(0x58, 0), "the master disables B");
+        t.check_equal(two.read(0x58, 1), std::uint64_t{0});
+        t.check_equal(two.read(0x48, 1), std::uint64_t{1}); // still present
+    }};
 
 const test::Registration real_time_counter{"ip27.hub.pi_rt_count", [](test::Context& t) {
                                                Bench b;
@@ -190,9 +212,9 @@ const test::Registration slot_status{
 const test::Registration unmodeled{
     "ip27.hub.unmodeled_accesses_fault", [](test::Context& t) {
         Bench b;
-        const auto read = b.hub.mmio_read(0x2000b0, AccessWidth::bits64);
+        const auto read = b.hub.port(0).mmio_read(0x2000b0, AccessWidth::bits64);
         t.check(!read && read.error() == AccessFault::unsupported);
-        const auto narrow = b.hub.mmio_read(0x20, AccessWidth::bits32);
+        const auto narrow = b.hub.port(0).mmio_read(0x20, AccessWidth::bits32);
         t.check(!narrow, "only doubleword accesses are modeled");
         t.check(!b.sink.lines.empty() && b.sink.lines.back().starts_with("unmodeled read"),
                 "traced");

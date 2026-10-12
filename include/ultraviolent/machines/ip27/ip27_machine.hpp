@@ -64,6 +64,8 @@ struct Ip27Config {
     // The node board's module slot, n1-n4 (IP27.adoc "Machine type"); n1 like slate's first
     // node board.
     unsigned node_slot{1};
+    // CPUs on the node board, from slice A: 1 or 2 (SMP.adoc; slate's node boards hold two).
+    unsigned cpus{1};
     // The module number in the system controller's NVRAM (1-255; 0 means unassigned). slate
     // is module 1.
     std::uint8_t module_number{1};
@@ -324,6 +326,7 @@ class Ip27Machine {
              tracer_,
              config_.hub_revision,
              node_slot_id(config_.node_slot),
+             config_.cpus,
              i2c_,
              directory_,
              bus_,
@@ -333,7 +336,7 @@ class Ip27Machine {
     mips::BlockInterpreter block_interpreter_{cpu_};
     std::unique_ptr<mips::NativeCode> native_;
     mips::ExecutionEngine engine_{mips::ExecutionEngine::tier0};
-    SynchronizedTarget synchronized_hub_{*this, hub_};
+    SynchronizedTarget synchronized_hub_{*this, hub_.port(0)};
     SynchronizedTarget synchronized_flash_{*this, flash_interface_};
     SynchronizedTarget synchronized_flash_commands_{*this, flash_commands_};
     // The module's crossbow and the Hub's crosstalk windows (IP27.adoc "Xtalk").

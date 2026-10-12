@@ -272,10 +272,9 @@ constexpr std::size_t find_stored(std::uint64_t offset) {
                                                                      : Hub::stored_register_count;
 }
 
-// The CPU slice of the requester. The target has one CPU, in slice A.
-constexpr std::uint64_t requesting_slice = 0;
-// hypothesis: slice A holds the only CPU; slice B is empty (IP27-TARGET.adoc).
-constexpr std::uint64_t cpu_present[2] = {1, 0};
+// Requests that do not come from a CPU (crosstalk and the BTEs' ITTE lookups) reach only
+// registers that do not depend on the requester; they are answered as for slice A.
+constexpr unsigned not_a_cpu = 0;
 
 // IIO_ILCSR fields (hubii_ilcsr_t): max_burst 41:32, max_retry 25:16, lnk_stat 13:12, bm8 11,
 // llp_en 10, wrm_reset 8, null_to 5:0.
@@ -379,10 +378,11 @@ constexpr std::uint64_t rt_count_mask = (std::uint64_t{1} << 52) - 1;
 } // namespace
 
 Hub::Hub(Scheduler& scheduler, Tracer& tracer, unsigned revision, unsigned slot_id,
-         devices::Pcf8584& i2c, DirectoryMemory& directory, AddressSpace& memory,
-         std::function<void()> reset_node)
+         unsigned cpu_count, devices::Pcf8584& i2c, DirectoryMemory& directory,
+         AddressSpace& memory, std::function<void()> reset_node)
     : scheduler_{scheduler}, tracer_{tracer}, revision_{revision}, slot_id_{slot_id & 7}, i2c_{i2c},
       directory_{directory}, memory_{memory}, reset_node_{std::move(reset_node)},
+      cpu_present_{1, cpu_count > 1 ? 1u : 0u},
       local_reset_event_{scheduler.add_event("hub.local_reset", [this] { local_reset(); })},
       comparator_events_{
           scheduler.add_event("hub.rt_compare_a", [this] { comparator_matched(0); }),
@@ -397,6 +397,10 @@ Hub::Hub(Scheduler& scheduler, Tracer& tracer, unsigned revision, unsigned slot_
         big_windows_[i].index = i + 1;
     }
     widget_.hub = this;
+    for (unsigned slice = 0; slice < ports_.size(); ++slice) {
+        ports_[slice].hub = this;
+        ports_[slice].slice = slice;
+    }
     reset(ResetKind::power_on);
     // Nothing survives power-on.
     err_stack_addr_ = {};
@@ -544,7 +548,7 @@ std::pair<unsigned, std::uint64_t> Hub::BigWindow::translate(std::uint64_t offse
     constexpr std::uint64_t first_itte = 0x40'0160;
     constexpr unsigned window_shift = 29;
     const std::uint64_t itte =
-        hub->mmio_read(first_itte + std::uint64_t{8} * (index - 1), AccessWidth::bits64)
+        hub->read(not_a_cpu, first_itte + std::uint64_t{8} * (index - 1), AccessWidth::bits64)
             .value_or(0);
     const auto widget = static_cast<unsigned>((itte >> 8) & 0xf);
     return {widget, ((itte & 0x1f) << window_shift) + offset};
@@ -596,10 +600,10 @@ std::expected<std::uint64_t, AccessFault> Hub::Widget::mmio_read(std::uint64_t o
                                                                  AccessWidth width) {
     constexpr std::uint64_t ii_base = 0x40'0000;
     if (width == AccessWidth::bits64 && offset % 8 == 0) {
-        return hub->mmio_read(ii_base + offset, width);
+        return hub->read(not_a_cpu, ii_base + offset, width);
     }
     if (width == AccessWidth::bits32 && offset % 8 == 4) {
-        const auto value = hub->mmio_read(ii_base + offset - 4, AccessWidth::bits64);
+        const auto value = hub->read(not_a_cpu, ii_base + offset - 4, AccessWidth::bits64);
         if (!value) {
             return value;
         }
@@ -612,14 +616,14 @@ std::expected<void, AccessFault> Hub::Widget::mmio_write(std::uint64_t offset, A
                                                          std::uint64_t value) {
     constexpr std::uint64_t ii_base = 0x40'0000;
     if (width == AccessWidth::bits64 && offset % 8 == 0) {
-        return hub->mmio_write(ii_base + offset, width, value);
+        return hub->write(ii_base + offset, width, value);
     }
     if (width == AccessWidth::bits32 && offset % 8 == 4) {
-        const auto old = hub->mmio_read(ii_base + offset - 4, AccessWidth::bits64);
+        const auto old = hub->read(not_a_cpu, ii_base + offset - 4, AccessWidth::bits64);
         if (!old) {
             return std::unexpected(old.error());
         }
-        return hub->mmio_write(ii_base + offset - 4, AccessWidth::bits64,
+        return hub->write(ii_base + offset - 4, AccessWidth::bits64,
                                (*old & ~std::uint64_t{0xffff'ffff}) | (value & 0xffff'ffff));
     }
     return std::unexpected(AccessFault::unsupported);
@@ -773,11 +777,24 @@ void Hub::reset(ResetKind kind) {
     pending_ = {};
     interrupt_mask_ = {};
     update_interrupts();
-    cpu_enable_ = {cpu_present[0], cpu_present[1]};
+    cpu_enable_ = cpu_present_;
     set_rt_count(0);
 }
 
-std::expected<std::uint64_t, AccessFault> Hub::mmio_read(std::uint64_t offset, AccessWidth width) {
+std::expected<std::uint64_t, AccessFault> Hub::Port::mmio_read(std::uint64_t offset,
+                                                               AccessWidth width) {
+    return hub->read(slice, offset, width);
+}
+
+std::expected<void, AccessFault> Hub::Port::mmio_write(std::uint64_t offset, AccessWidth width,
+                                                       std::uint64_t value) {
+    // inferred: no register written by the PROM or IRIX depends on the writer's slice; each
+    // CPU's registers have their own addresses (_A and _B).
+    return hub->write(offset, width, value);
+}
+
+std::expected<std::uint64_t, AccessFault> Hub::read(unsigned slice, std::uint64_t offset,
+                                                    AccessWidth width) {
     if (width == AccessWidth::bits64) {
         if (const std::size_t slot = find_stored(offset); slot < stored_register_count) {
             return stored_[slot];
@@ -787,11 +804,13 @@ std::expected<std::uint64_t, AccessFault> Hub::mmio_read(std::uint64_t offset, A
         }
         switch (offset) {
         case pi_cpu_num:
-            return requesting_slice;
+            // observed: each CPU reads it at the reset vector to find its slice (IP27.adoc "Two
+            // CPUs on a Hub").
+            return slice;
         case pi_cpu_present_a:
-            return cpu_present[0];
+            return cpu_present_[0];
         case pi_cpu_present_b:
-            return cpu_present[1];
+            return cpu_present_[1];
         case pi_int_pend0:
             return pending_[0];
         case pi_int_pend1:
@@ -877,8 +896,8 @@ std::expected<std::uint64_t, AccessFault> Hub::mmio_read(std::uint64_t offset, A
     return std::unexpected(AccessFault::unsupported);
 }
 
-std::expected<void, AccessFault> Hub::mmio_write(std::uint64_t offset, AccessWidth width,
-                                                 std::uint64_t value) {
+std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth width,
+                                            std::uint64_t value) {
     if (width == AccessWidth::bits64) {
         if (const std::size_t slot = find_stored(offset); slot < stored_register_count) {
             stored_[slot] = value & stored_registers[slot].mask;

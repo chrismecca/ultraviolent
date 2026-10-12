@@ -25,7 +25,11 @@ namespace ultraviolent::ip27 {
 // Registers are modeled one at a time, each when the PROM is observed to depend on it and
 // with a recorded source. Accesses to anything else are refused and traced under `hub`, so
 // an observation run names the next register the PROM needs.
-class Hub final : public MmioTarget {
+//
+// Each CPU reaches the registers through its own port, as each processor has its own SysAD
+// connection into the processor interface (PI): the port is how the Hub knows which CPU is
+// asking (PI_CPU_NUM; ADR-023).
+class Hub final {
   public:
     // IALIAS: 8 MB at the start of widget 1's I/O window.
     static constexpr std::uint64_t window_size = 0x80'0000;
@@ -45,9 +49,10 @@ class Hub final : public MmioTarget {
     // node's directory memory, whose entry format MD_MEMORY_CONFIG selects. `memory` is the
     // node's physical address space, which the block-transfer engines read and write.
     // `slot_id` is the backplane slot ID the node board reads in MD_SLOTID_USTAT bits 2:0.
+    // `cpu_count` CPUs (1 or 2) are installed, from slice A: PI_CPU_PRESENT_A and _B.
     Hub(Scheduler& scheduler, Tracer& tracer, unsigned revision, unsigned slot_id,
-        devices::Pcf8584& i2c, DirectoryMemory& directory, AddressSpace& memory,
-        std::function<void()> reset_node);
+        unsigned cpu_count, devices::Pcf8584& i2c, DirectoryMemory& directory,
+        AddressSpace& memory, std::function<void()> reset_node);
 
     void reset(ResetKind kind);
 
@@ -78,12 +83,21 @@ class Hub final : public MmioTarget {
     void save_state(StateImage& image) const;
     void load_state(const StateImage& image);
 
-    std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
-                                                        AccessWidth width) override;
-    std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth width,
-                                                std::uint64_t value) override;
+    // The register window as CPU `slice` (0 for A, 1 for B) sees it.
+    [[nodiscard]] MmioTarget& port(unsigned slice) {
+        return ports_.at(slice);
+    }
 
   private:
+    class Port final : public MmioTarget {
+      public:
+        std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
+                                                            AccessWidth width) override;
+        std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth width,
+                                                    std::uint64_t value) override;
+        Hub* hub{};
+        unsigned slice{};
+    };
     class IoWindow final : public MmioTarget {
       public:
         std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
@@ -117,6 +131,10 @@ class Hub final : public MmioTarget {
         Hub* hub{};
     };
 
+    std::expected<std::uint64_t, AccessFault> read(unsigned slice, std::uint64_t offset,
+                                                   AccessWidth width);
+    std::expected<void, AccessFault> write(std::uint64_t offset, AccessWidth width,
+                                           std::uint64_t value);
     [[nodiscard]] std::uint64_t rt_count() const;
     void set_rt_count(std::uint64_t value);
     void set_led(unsigned slice, std::uint64_t value);
@@ -138,6 +156,8 @@ class Hub final : public MmioTarget {
     AddressSpace& memory_;
     std::function<void()> reset_node_;
     xtalk::Link* xtalk_{};
+    std::array<std::uint64_t, 2> cpu_present_{};
+    std::array<Port, 2> ports_{};
     std::array<IoWindow, xtalk::widget_count> io_windows_{};
     std::array<BigWindow, 7> big_windows_{};
     Widget widget_{};
