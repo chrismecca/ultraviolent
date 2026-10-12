@@ -1,6 +1,7 @@
 #include <ultraviolent/core/state_image.hpp>
 
 #include <ultraviolent/core/byte_order.hpp>
+#include <ultraviolent/core/invariant.hpp>
 
 #include <algorithm>
 #include <cstring>
@@ -25,7 +26,11 @@ void append_integer(std::vector<std::byte>& out, std::uint64_t value, std::size_
 } // namespace
 
 void StateImage::put_bytes(std::string key, std::span<const std::byte> bytes) {
-    fields_.insert_or_assign(std::move(key), std::vector<std::byte>(bytes.begin(), bytes.end()));
+    // Two components saving under one key would lose one silently.
+    const bool inserted =
+        fields_.try_emplace(std::move(key), std::vector<std::byte>(bytes.begin(), bytes.end()))
+            .second;
+    invariant(inserted, "a snapshot key was saved twice");
 }
 
 std::optional<std::span<const std::byte>> StateImage::get_bytes(std::string_view key) const {
@@ -127,6 +132,9 @@ std::optional<StateImage> StateImage::deserialize(std::span<const std::byte> dat
         offset += 8;
         if (data.size() - offset < value_size) {
             return std::nullopt;
+        }
+        if (image.fields_.contains(key)) {
+            return std::nullopt; // malformed: a key twice
         }
         image.put_bytes(std::move(key), data.subspan(offset, value_size));
         offset += value_size;
