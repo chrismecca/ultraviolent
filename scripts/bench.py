@@ -16,7 +16,9 @@ behavior.
     scripts/bench.py run --engine reference     # the reference interpreter
 
 The fixture holds copies of the user's private disk and firmware state; keep it out of Git
-(the default is on local disk, off the network file system that holds the repository).
+(the default is on local disk, off the network file system that holds the repository). Each
+run works on copies in memory (--scratch, default /dev/shm), so `boot` and `fs` time the
+emulator rather than the host disk.
 
 Workloads:
   prom   power-on to the PROM menu, no disk: memory tests, discovery, diagnostics
@@ -81,6 +83,15 @@ def copy(source, destination):
     subprocess.run(["cp", "--sparse=always", "--reflink=auto", source, destination], check=True)
 
 
+def default_scratch():
+    # In memory: on a reflink-capable file system (XFS) a copy shares the fixture's blocks
+    # but not its page cache, so every run would read the guest disk cold from the host disk
+    # (DEVELOPMENT "Benchmarks").
+    if os.path.isdir("/dev/shm"):
+        return "/dev/shm/ultraviolent-bench-scratch"
+    return None
+
+
 def base_command(args, scratch):
     return [args.binary, "--machine", "ip27", "--prom", args.prom, "--io6prom", args.io6prom,
             "--flash", os.path.join(scratch, "flash.bin"),
@@ -124,7 +135,7 @@ def make_fixture(args):
 def run_once(args, name, workload):
     paths = fixture_paths(args.work)
     fixture = os.path.dirname(paths["disk.img"])
-    scratch = os.path.join(args.work, "scratch")
+    scratch = args.scratch or os.path.join(args.work, "scratch")
     shutil.rmtree(scratch, ignore_errors=True)
     os.makedirs(scratch)
     prefix = "shell-" if workload.get("snapshot") else ""
@@ -255,6 +266,8 @@ def run(args):
         with open(args.save, "w") as f:
             json.dump({"host": host, "workloads": results}, f, indent=2)
             f.write("\n")
+    if args.scratch:
+        shutil.rmtree(args.scratch, ignore_errors=True)  # gives the memory back
     return 1 if failed else 0
 
 
@@ -274,7 +287,9 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--work", default="/var/tmp/ultraviolent-bench",
-                        help="fixture and scratch directory (local disk)")
+                        help="fixture directory (local disk)")
+    common.add_argument("--scratch", default=default_scratch(),
+                        help="each run's copies (default in memory, /dev/shm)")
     common.add_argument("--binary", default="build/pgo/ultraviolent")
     common.add_argument("--prom", default=os.path.join(FIRMWARE, "ip27prom.img"))
     common.add_argument("--io6prom", default=os.path.join(FIRMWARE, "io6prom.img"))

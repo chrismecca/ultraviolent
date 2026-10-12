@@ -206,17 +206,13 @@ interpreter, and the digests of all must be equal. `--statistics DIR` keeps each
 digest that differs from any of them fails the run. Keep the pre-stage-B reference results
 (`local/bench/step2.json`) as the performance baseline.
 
-Time runs with the work directory in memory, so `fs` and `boot` measure the emulator and not
-the host disk: copy the fixture to tmpfs and pass `--work`. On a reflink-capable file system
-(XFS) the fixture copies share blocks with the fixture but not its page cache, so every run
-reads the guest disk cold; measured on the XFS hard disk of the reference machine, `fs` was
-63.4 M cycles/s there and 81.2 in tmpfs, with the same digest.
-
-[source,shell]
-----
-mkdir -p /dev/shm/uvbench && cp -r --sparse=always /var/tmp/ultraviolent-bench/fixture /dev/shm/uvbench/
-scripts/bench.py run --work /dev/shm/uvbench --compare local/bench/r3600/h-final-tier0.json
-----
+Runs work on copies in memory (`--scratch`, default `/dev/shm/ultraviolent-bench-scratch`,
+removed at the end), so `fs` and `boot` measure the emulator and not the host disk. On a
+reflink-capable file system (XFS) a copy shares blocks with the fixture but not its page
+cache, so every run would read the guest disk cold: on the reference machine's XFS hard disk
+`fs` read 225 MB per run and measured 133 M cycles/s, against 275 in memory, with the same
+digest (2026-10-12). Before that date the fixture was copied to tmpfs by hand and passed
+with `--work`, which a host reboot silently undid.
 
 The reported time is the best of `--repeat` runs, including process start and, for the
 shell workloads, loading the 560 MB snapshot (under a second). Frequency scaling and other

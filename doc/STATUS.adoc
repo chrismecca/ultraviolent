@@ -406,13 +406,14 @@ Housekeeping:
   directory (gone); rebuild a baseline with `git worktree add` and its own
   `scripts/build-pgo.sh`.
 
-* **Benchmarks are slower since the host rebuild (2026-10-12), on the same commit.**
-  `198e85a`, PGO, best of 3, `performance` governor (the rebuild left `schedutil`; set it
-  again before measuring): prom 300.9, boot 206.6, cpu 275.9, fs 150.1 M cycles/s, against
-  300.8, 215.9, 302.8, 289.8 recorded on 2026-10-10 (`k-tier1.json`). Digests identical; same
-  kernel, CPU, and compiler. Not investigated: the environment changed, not the code (the
-  current tree measures 0.98-1.00x of `198e85a` under identical conditions). `fs` (disk
-  reads) lost most; look at the fixture's storage and host I/O first.
+* **The benchmark slowdown after the host rebuild (2026-10-12) was the harness, not the
+  code.** The fixture copies had been timed in tmpfs by hand (DEVELOPMENT "Benchmarks"); the
+  reboot removed that copy, and on XFS each run then read the guest disk cold from the hard
+  disk (`fs`: 225 MB, 6.9 s of disk time, 133 M cycles/s). `bench.py` now puts each run's
+  copies in `/dev/shm` itself. Re-recorded at `2b32bd2` (`local/bench/r3600/l-tier1.json`,
+  best of 3): prom 297.6, boot 212.9, cpu 308.7, fs 291.3 M cycles/s, 0.99-1.02x of
+  `k-tier1.json`, digests identical. Set the `performance` governor before measuring (not
+  persistent).
 
 * The host was rebuilt on 2026-10-12 and the repository moved to `~/src/ultraviolent`
   (`/n/mec/src/ultraviolent`). Build trees made before then must be deleted and
