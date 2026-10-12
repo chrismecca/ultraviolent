@@ -1,7 +1,7 @@
 = Multiprocessor IP27
 
-Status: accepted with the user (2026-10-12; ADR-023). Stages S0-S3 proceed without further
-review; the user reviews before S4.
+Status: accepted with the user (2026-10-12; ADR-023). S0-S3 are done (2026-10-12; see
+"Progress"); the user reviews before S4.
 
 This is the plan for ADR-021's target, one deskside module with two IP27 nodes of two CPUs
 each, starting with the smallest new piece: a second CPU on one node's Hub. It follows the
@@ -227,11 +227,45 @@ S5. **Second node** (own plan, from slate's topology).
 
 S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
 
-== Evidence needed from the user
+== Progress
 
-* slate's cold-boot console capture (OBS-SLATE-0003) and the PROM Technical Reference Manual
-  (PRM, 108-0170-001): both were outside the repository and are not on the rebuilt host.
-* Later, POD reads on slate if S0 leaves a register reset value open.
+* **S0 (2026-10-12):** IP27.adoc "Two CPUs on a Hub": both CPUs run the reset code and tell
+  themselves apart by PI_CPU_NUM; they meet through a per-CPU table in memory; a CPU that
+  does not answer is disabled through PI_CPU_ENABLE. slate's capture: `~/src/bench/docs`.
+* **S1:** `Hub::port(slice)`, PI_CPU_NUM by port, PI_CPU_PRESENT from `Ip27Config::cpus`.
+* **S2:** requesters in `AddressSpace`, `mips::Coherence` (LL/SC, writable host pages),
+  CPU B in slice B, slices lowest time first, two-CPU snapshots. Found on the way: the PROM's
+  first stack is in each CPU's primary data cache (MIPS.adoc "Lines software installs");
+  without modeling that, the CPUs overwrote each other's stack. The BASEIO PROM reports "2
+  CPUs on 1 nodes found". Tests: `mips.smp.*`, `mips.cache.held_data_lines_*`,
+  `ip27.two_cpus.*` (PI_CPU_NUM per CPU, an LL/SC counter at slices 1, 7, 180, snapshot
+  resumption, an IPI through PI_INT_PEND_MOD).
+* **S3:** IRIX boots to `login:` with two CPUs (`hinv`: "2 180 MHZ IP27 Processors";
+  `mpadmin -s`: processors 0 1). Workload: cold boot, log in, two `cpu`-benchmark awk loops
+  in parallel (`sh -c "AWK & AWK & wait"`), stop at the next prompt; both print 749961.
+  The reference interpreter, tier 0, and tier 1 give the same console digest
+  (`f880beadf760ebac`), the same end (20,978,861,022 cycles), and byte-identical snapshots.
+  The two loops take 3.2 G guest cycles per CPU together, against 2.86 G for one loop on one
+  CPU. On one host thread, tier 1 runs the two-CPU boot at about 175 M guest cycles per
+  second in all (0.49 times real time per CPU at 180 MHz).
+* One-CPU configurations are unchanged: all benchmark digests match.
+
+Reproduce (the cold boot to a two-CPU root shell; copy the disk and state first as in
+STATUS "How to reproduce"):
+
+[source,shell]
+----
+build/pgo/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img --cpus 2 \
+    --flash local/state/flash-cold.bin --nvram local/state/nvram.bin \
+    --disk local/disks/irix.img --console '@expect login:' --console root \
+    --console vt100 --console 'mpadmin -s' --stop-at-prompt --cycles 150000000000
+----
+
+== Evidence
+
+* slate's cold-boot console capture (OBS-SLATE-0003) is in `~/src/bench/docs`. The PROM
+  Technical Reference Manual (PRM, 108-0170-001) is not on the rebuilt host.
+* Later, POD reads on slate if a register reset value is needed.
 
 == Decisions (with the user, 2026-10-12)
 

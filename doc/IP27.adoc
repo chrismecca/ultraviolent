@@ -433,8 +433,23 @@ What the model must provide for S1 and S2: PI_CPU_NUM answered by the requesting
 port; PI_CPU_PRESENT from the configuration; both CPUs released from reset together;
 coherent shared memory between them; per-slice interrupt outputs (already modeled).
 
-`hypothesis` until a two-CPU run shows otherwise: both CPUs leave power-on reset at the same
-virtual time; Hub local reset (below) resets both.
+`hypothesis`: both CPUs leave power-on reset at the same virtual time; Hub local reset
+(below) resets both. A two-CPU run is consistent with this.
+
+Observed with two CPUs modeled (SMP.adoc S2, 2026-10-12):
+
+* Before memory is initialized each CPU builds a 32 KB stack in its own primary data cache
+  with Index Store Tag and Index Store Data (routine at `0x1fc03b10`, called with physical
+  `0x100000` and 32 KB; `sp` = cached `0x104000` on both CPUs). The stacks are private only
+  because each lives in its own cache (MIPS.adoc "Lines software installs"); with memory
+  standing in for the cache, B returned through a return address A had stored and ran off
+  the end of the PROM.
+* Both CPUs then pass the `0x24` rendezvous and the level-113 barrier; A becomes the node's
+  master. The BASEIO PROM reports "2 CPUs on 1 nodes found" (slate: "4 CPUs on 2 nodes
+  found"), and the one-CPU message "update_klcfg_cpuinfo: Couldn't find my structure" no
+  longer appears.
+* IRIX boots to `login:`; `hinv -c processor` prints "2 180 MHZ IP27 Processors" and
+  `mpadmin -s` lists processors 0 and 1, both unrestricted and preemptive.
 
 === Hub local reset
 

@@ -4,7 +4,14 @@ Update this file at the end of every significant development session.
 
 == Current milestone
 
-Performance baseline (ROADMAP "After RC-IP27"; started 2026-09-28). The repository is public
+**SMP IP27 (ROADMAP "SMP IP27"; ADR-021, ADR-023; plan doc/SMP.adoc), started 2026-10-12.
+S0-S3 are done: `--cpus 2` puts a second R10000 in the node's slice B; the PROM finds both
+("2 CPUs on 1 nodes found"), IRIX boots with two processors, and a two-process workload
+gives identical output and byte-identical snapshots on the reference interpreter, tier 0,
+and tier 1. One CPU stays the default, with every benchmark digest unchanged. The user
+reviews before S4 (host-parallel CPUs).** Next: see Next task.
+
+Before it, the performance baseline (ROADMAP "After RC-IP27"; started 2026-09-28). The repository is public
 at RC-IP27 (the user chose no tag or release). Tier 0 stages A-H are done (2026-10-08): tier
 0 is the default engine, and stage H ended at its stop rule. The user agreed to proceed to
 tier 1 and reframed it as a framework engine (2026-10-09): ADR-022 and doc/JIT.adoc, accepted
@@ -399,6 +406,14 @@ Housekeeping:
   directory (gone); rebuild a baseline with `git worktree add` and its own
   `scripts/build-pgo.sh`.
 
+* **Benchmarks are slower since the host rebuild (2026-10-12), on the same commit.**
+  `198e85a`, PGO, best of 3, `performance` governor (the rebuild left `schedutil`; set it
+  again before measuring): prom 300.9, boot 206.6, cpu 275.9, fs 150.1 M cycles/s, against
+  300.8, 215.9, 302.8, 289.8 recorded on 2026-10-10 (`k-tier1.json`). Digests identical; same
+  kernel, CPU, and compiler. Not investigated: the environment changed, not the code (the
+  current tree measures 0.98-1.00x of `198e85a` under identical conditions). `fs` (disk
+  reads) lost most; look at the fixture's storage and host I/O first.
+
 * The host was rebuilt on 2026-10-12 and the repository moved to `~/src/ultraviolent`
   (`/n/mec/src/ultraviolent`). Build trees made before then must be deleted and
   reconfigured (CMake refuses a cache from another source path); `build/pgo` was rebuilt
@@ -413,7 +428,16 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **The multiprocessor (with the user, 2026-10-10): review the plan first.** One CPU now
+. **SMP S4, after the user's review (SMP.adoc "Stages", "Host-parallel").** S0-S3 are done
+  (SMP.adoc "Progress"). Review with the user: S3's results, the S2 refinement of device
+  time (ADR-023 note), the cache model for lines software installs (MIPS.adoc), and the S4
+  design: one host thread per CPU running to a shared slice deadline, device accesses
+  serialized, LL/SC reservations as an atomic table, not deterministic run to run, accepted
+  against reference-mode outputs. Measure first: on one host thread two CPUs run at about
+  0.49 times real time each (tier 1); where the time goes (slice switches, the writable
+  page drops Coherence causes) decides what S4 needs beyond threads. Then S5 (the second
+  node, its own plan from slate).
+. **Done: the multiprocessor plan and S0-S3 (2026-10-12).** The history of this item: One CPU now
   runs above real time on every workload at 180 MHz (1.20-1.68x) and at 200 MHz
   (1.08-1.51x); at 250 MHz `boot` is at 0.86x (device-access-bound firmware delay loops),
   the others 1.16-1.21x. The user's next goal is ADR-021's multiprocessor, each CPU at its
@@ -1285,4 +1309,34 @@ Unknowns: what slate's PROM and IRIX do with two CPUs per node; how the four-CPU
   keeps virtual time in step across host threads.
 Best checkpoint: unchanged (rc_alpha.remote_login); network not yet set up on uv-dev01.
 Next step: review the multiprocessor plan with the user.
+----
+
+----
+Date: 2026-10-12
+Milestone: SMP IP27, S0-S3 (SMP.adoc; ADR-021, ADR-023)
+Hypothesis: a second R10000 on the Hub needs only per-CPU Hub ports, shared memory with
+  LL/SC across CPUs, and deterministic interleaving; the PROM and IRIX do the rest.
+Evidence: the PROM's reset path (disassembly, Hub access logs in a scratch build); LINUX
+  launch.h, kldir.h, intr.h; slate's cold-boot capture (~/src/bench/docs); slate's /unix
+  symbols.
+Changed: SMP.adoc (plan, decisions with the user, progress); ADR-023; Hub ports and
+  PI_CPU_NUM by port; AddressSpace requesters (map_ports); mips::Coherence; CPU B and
+  lowest-time-first slices (--cpus, --cpu-slice); two-CPU snapshots (slice_b.); primary
+  data lines installed by Index Store Tag hold private data (MIPS.adoc); StateImage refuses
+  a key saved twice; DEVELOPMENT.adoc repository path.
+Tests: mips.smp.* (reservations, writable pages, code rewritten by the other CPU, private
+  cache lines), mips.cache.held_data_lines_replaced_least_recently_used, ip27.hub.cpu_present,
+  ip27.two_cpus.* (PI_CPU_NUM, LL/SC counter at slices 1/7/180, snapshot resumption, IPI);
+  all presets green.
+Newly proven: the PROM tells the CPUs apart by PI_CPU_NUM and meets in memory; its first
+  stack is in each CPU's primary data cache (Index Store Tag/Data, 32 KB at physical
+  0x100000 on both); IRIX 6.5 boots and schedules on two emulated CPUs; the three engines
+  agree exactly on a two-CPU boot and workload.
+Disproven: "memory is always coherent, so the cache arrays hold only what CACHE operations
+  put there" (MIPS.adoc) as a complete model: lines software installs hold data memory
+  does not. Also: one address space per CPU, which would have split the code-write count.
+Unknowns: whether DMA should break LL/SC reservations; secondary lines installed by
+  software (none observed); the second node's link (S5, from slate).
+Best checkpoint: the two-CPU cold boot in SMP.adoc "Progress"; one-CPU checkpoints unchanged.
+Next step: the user's review, then S4 (host-parallel CPUs), measured first.
 ----
