@@ -402,6 +402,40 @@ From the IRIX-derived `asm/sn/intr.h` (`inferred`):
 The PROM sets level 113 (`IP27_INTR_4`, "reserved for PROM use") during its first barrier
 (LED `0x28`) and reads it back from INT_PEND1 (`observed`).
 
+=== Two CPUs on a Hub
+
+Stage S0 of `SMP.adoc`. Observed on the user's image (IMAGE) by disassembly and by logging
+the Hub accesses of a run in which PI_CPU_PRESENT_B reads 1 but no second CPU executes:
+
+* Both CPUs run the same reset code from the reset vector. The first Hub access after
+  setting Status reads PI_CPU_NUM (`0x1fc0082c`) and indexes the LED registers by it; a
+  second read (`0x1fc008a8`) spins 128 iterations when it is nonzero, so CPU B trails A.
+  The PROM reads PI_CPU_NUM about a hundred more times in its LED macro. `observed`.
+* The two CPUs meet in memory, not in the Hub (routine at `0x1fc58788`): each records
+  progress code `0x24` in its own slot of a per-CPU table, reads PI_CPU_PRESENT_A and _B,
+  and, when both are 1, polls the other CPU's slot for `0x24` up to 200,000 iterations.
+  On a timeout it writes 0 to the other slice's PI_CPU_ENABLE (A writes ENABLE_B at
+  `0x1fc58850`) and records the loss in a PROM variable; when either PRESENT bit is 0 it
+  takes the same path at once. `observed`. No Hub register is read during the poll.
+* Next both CPUs pass the level-113 barrier (PI_INT_PEND_MOD `0x171`, poll INT_PEND1, then
+  `0x71`), the barrier seen on one CPU at LED `0x28`. `observed`.
+* With PRESENT_B set and no CPU B, the PROM disables B and continues as on one CPU; the
+  console differs only in PROM log messages. `observed`.
+* `inferred` (LINUX `asm/sn/launch.h`, `kldir.h`): afterwards the slave waits in the PROM's
+  launch loop; its launch structure is at node memory offset `0x2400` + slice × `0x200`
+  (magic `0xaddbead2addbead3`); the master starts it by filling the structure and sending an
+  interrupt (Hub levels 10 and 11 are CPU_ACTION_A and _B).
+* slate (OBS-SLATE-0003): with two nodes of two CPUs the PROM prints "Found 2 objects (2
+  hubs, 0 routers)", "Global master is /hw/module/1/slot/n2", and the BASEIO PROM "4 CPUs on
+  2 nodes found"; per-CPU messages carry a node-slot-and-slice prefix such as `1A 000:`.
+
+What the model must provide for S1 and S2: PI_CPU_NUM answered by the requesting CPU's own
+port; PI_CPU_PRESENT from the configuration; both CPUs released from reset together;
+coherent shared memory between them; per-slice interrupt outputs (already modeled).
+
+`hypothesis` until a two-CPU run shows otherwise: both CPUs leave power-on reset at the same
+virtual time; Hub local reset (below) resets both.
+
 === Hub local reset
 
 The PROM reads PI_ERR_STACK_ADDR_B early in its reset path and compares it with
