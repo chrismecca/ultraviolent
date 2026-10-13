@@ -310,6 +310,27 @@ build/pgo/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img --cpus
     --console vt100 --console 'mpadmin -s' --stop-at-prompt --cycles 150000000000
 ----
 
+== Toward the second node (S5): first observations
+
+Not a plan yet (S5 gets its own, from slate's topology). Recorded 2026-10-13 so the plan
+starts from evidence:
+
+* slate (OBS-SLATE-0003): "Found 2 objects (2 hubs, 0 routers) in 10464 usec", "Global
+  master is /hw/module/1/slot/n2", "4 CPUs on 2 nodes found": the two node boards are
+  linked without a router. slate did not answer on the network on 2026-10-13.
+* The PROM's link test (`0x1fc2df18`, disassembly): NI_STATUS_REV_ID bit 29, the link-up
+  bit. On one node it polls it about 6.4 million times (Hub access log of a PROM run, scratch
+  build) before "Local hub NUMAlink is down". `observed`.
+* With the link up, the discovery code that follows (`0x1fc2df2c`) starts a vector operation
+  on NI offset `0x600000` (`0x1fc53954`), `inferred`: reading the neighbor Hub's
+  NI_STATUS_REV_ID through the link (the vector registers NI_VECTOR_PARMS/VECTOR/
+  VECTOR_DATA/VECTOR_STATUS, now storage only, IP27.adoc "Storage-only registers").
+* What a second node will need, from the above and IP27.adoc's address map: a second Hub
+  with its own NASID (physical address bits 39:32), memory, and two CPUs; the NI link
+  between the Hubs with link status and vector PIO; remote memory and Hub register access by
+  NASID; interrupts between nodes. Which node owns the BaseIO and how the link is cabled come
+  from slate.
+
 == Evidence
 
 * slate's cold-boot console capture (OBS-SLATE-0003) is in `~/src/bench/docs`. The PROM
