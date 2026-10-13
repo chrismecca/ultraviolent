@@ -868,6 +868,17 @@ RISC firmware.
   later and reset the chip. With one CPU it also happens (a completion inside the handler,
   which then waited for the next interrupt): the `fs` benchmark keeps its output and cycle
   count, and ends at another PC.
++
+Evidence sought for the clear rule (2026-10-13). No public document defines it: bitsavers'
+QLogic directory holds the ISP1020B/1040B and ISP1040B data sheets (83140-580-01B,
+-01C), four pages each with no firmware interface. Public drivers order the handler
+differently: OpenBSD `qlw.c` (1.48) clears the interrupt, then reads the in-pointer, which
+needs no rule because a later response raises a new interrupt; Linux `qlogicisp.c` reads the
+in-pointer, then clears, and IRIX clears last, both of which lose a response posted between
+the read and the clear unless the chip keeps the interrupt (this rule) or the firmware does
+not post while the interrupt is pending (the alternative, which would show as mailbox 5 not
+advancing while PCI_INTF_STS bit 2 is set). Only the chip running IRIX's firmware can decide
+between them; the experiment is in SMP.adoc "Open questions for slate".
 * Not modeled: a full response queue, asynchronous events, transfer time.
 
 === SCSI

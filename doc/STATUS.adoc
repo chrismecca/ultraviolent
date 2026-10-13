@@ -12,7 +12,8 @@ and tier 1. One CPU stays the default. After the assessment with the user (2026-
 two-CPU reference was hardened (2026-10-13): two-CPU benchmark workloads (`boot2`, `cpu2`,
 `mix2`, `reboot2`) agree on all three engines, and three defects were fixed (tracing changed
 the schedule; the CPUs left a local reset out of phase; the ISP1020 lost a completion).
-Proposed next: S5, the second node, before S4.** Next: see Next task.
+Next, chosen with the user (2026-10-13): S5, the second node, before S4.** Next: see Next
+task.
 
 Before it, the performance baseline (ROADMAP "After RC-IP27"; started 2026-09-28). The repository is public
 at RC-IP27 (the user chose no tag or release). Tier 0 stages A-H are done (2026-10-08): tier
@@ -437,16 +438,16 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **Review with the user, then S5: the second node (SMP.adoc).** Assessment with the user
-  (2026-10-12): fix the benchmark harness, harden the two-CPU reference, then the second node
-  on one host thread, then host-parallel CPUs (S4) designed once for four CPUs; the user
-  agreed to the first two, which are done (SMP.adoc "Progress", "Hardening the reference").
-  For the review: the S4-before-S5 order; the default slice (180 cycles; 1,000 would make
-  compute-heavy two-CPU work about 23% faster and stay inside the PROM's 2,000-cycle bound);
-  the ISP1020 interrupt hypothesis (IP27.adoc "ISP1020"), which changed one-CPU `fs`'s digest
-  (same output and cycles). S5 starts with its own plan from slate's topology: slate's
-  capture shows "Found 2 objects (2 hubs, 0 routers)", so the two nodes are linked without a
-  router; slate did not answer on the network on 2026-10-13, so further reads wait for it.
+. **S5: the second node (SMP.adoc "S5: the second node (plan)").** Reviewed with the
+  user 2026-10-13: S5 before S4; the default slice stays 180 cycles (SMP.adoc "Decisions
+  after the hardening"); the ISP1020 interrupt rule stays a hypothesis until the experiment
+  in SMP.adoc "Open questions for slate" runs on slate (needs the user's agreement; no
+  public document defines it, IP27.adoc "ISP1020"). Next: S5.0, observing the PROM's
+  discovery, node-ID assignment, and global-master choice; then S5.1 (nodes and routing,
+  link down, no guest-visible change with one node). The plan is reviewed with the user
+  before S5.2. slate's target is the Origin 2000 deskside module (ADR-021): an Onyx2
+  deskside is that module with graphics; the PROM's other personality, SN00 (Origin 200),
+  is not a target (IP27.adoc "Machine type").
 . **Done: the multiprocessor plan and S0-S3 (2026-10-12).** The history of this item: One CPU now
   runs above real time on every workload at 180 MHz (1.20-1.68x) and at 200 MHz
   (1.08-1.51x); at 250 MHz `boot` is at 0.86x (device-access-bound firmware delay loops),

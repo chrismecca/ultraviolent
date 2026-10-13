@@ -1,9 +1,9 @@
 = Multiprocessor IP27
 
 Status: accepted with the user (2026-10-12; ADR-023). S0-S3 are done (2026-10-12), and the
-two-CPU reference was then hardened (2026-10-13; "Progress"). Proposed next, from the
-assessment with the user (2026-10-12): S5, the second node, still on one host thread, before
-S4 (host-parallel); the order is confirmed at the next review.
+two-CPU reference was then hardened (2026-10-13; "Progress"). Next, chosen by the user
+(2026-10-13): S5, the second node, still on one host thread, before S4 (host-parallel); its
+plan is "S5: the second node (plan)".
 
 This is the plan for ADR-021's target, one deskside module with two IP27 nodes of two CPUs
 each, starting with the smallest new piece: a second CPU on one node's Hub. It follows the
@@ -17,7 +17,9 @@ host-parallel in fast mode (VISION "Fast mode", JIT.adoc "Toward host-parallel v
 Reference mode stays single-threaded and deterministic, and remains the oracle.
 
 In scope, in order: two CPUs on one Hub (slices A and B) in reference mode; the same on the
-fast engines on one host thread; host-parallel CPUs; then the second node. The second node,
+fast engines on one host thread; the second node on one host thread; then host-parallel CPUs
+(the order changed with the user, 2026-10-13; first it put host-parallel CPUs before the
+second node). The second node,
 the module's interconnect, and the IP31 / R12000 variant each get their own plan once the
 evidence for them is read from `slate` (ADR-021 "Not decided here").
 
@@ -251,7 +253,7 @@ identical digests and same-cycle snapshots on all three engines; the existing be
 S4. **Host-parallel CPUs (fast mode).** Gates: the S3 workloads reach the same outputs;
 host-parallel speedup measured on the two-CPU workload; reference mode unchanged.
 
-S5. **Second node** (own plan, from slate's topology).
+S5. **Second node** (its plan: "S5: the second node (plan)"; before S4, the user, 2026-10-13).
 
 S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
 
@@ -310,26 +312,118 @@ build/pgo/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img --cpus
     --console vt100 --console 'mpadmin -s' --stop-at-prompt --cycles 150000000000
 ----
 
-== Toward the second node (S5): first observations
+== S5: the second node (plan)
 
-Not a plan yet (S5 gets its own, from slate's topology). Recorded 2026-10-13 so the plan
-starts from evidence:
+Status: proposed to the user 2026-10-13, after the user chose S5 before S4 (2026-10-13).
+S5.0 and S5.1 change nothing the guest sees with one node and proceed without further
+review; the plan is reviewed with the user before S5.2.
 
-* slate (OBS-SLATE-0003): "Found 2 objects (2 hubs, 0 routers) in 10464 usec", "Global
-  master is /hw/module/1/slot/n2", "4 CPUs on 2 nodes found": the two node boards are
-  linked without a router. slate did not answer on the network on 2026-10-13.
+=== Target
+
+slate's topology without graphics (ADR-021): one deskside module with node boards n1 and n2,
+each a Hub with two CPUs and its own memory, the two Hubs linked by NUMAlink with no router,
+and both Hubs' crosstalk links on the module's one Crossbow, which carries the BaseIO.
+
+=== What is known
+
+* slate (OBS-SLATE-0003): "Found 2 objects (2 hubs, 0 routers) in 10464 usec", "Waiting
+  for peers to complete discovery", "Global master is /hw/module/1/slot/n2", "4 CPUs on 2
+  nodes found", "No. of RTRs enabled = 0": the two Hubs are linked without a router chip.
+  Lines prefixed "1A 000:" come before the global master's banner, so more than one CPU prints
+  during discovery.
+* slate (OBS-SLATE-0004, `local/slate/hinv-mvv.txt`): CPUs 0 and 1 are n2's slices A and B,
+  CPUs 2 and 3 n1's; each node has 1024 MB ("Slot 82", "Slot 81"); the module's MODULEID and
+  midplane (4P1G5_MPLN) NICs are on n1's MicroLAN; the BaseIO is io1, two QL1040B
+  controllers.
+* Crossbow ports (IP27.adoc "Crossbow", deskside): n1 is port `0xa`, n2 port 9, the BaseIO 15
+  (io1). Both Hubs reach the Crossbow directly.
 * The PROM's link test (`0x1fc2df18`, disassembly): NI_STATUS_REV_ID bit 29, the link-up
-  bit. On one node it polls it about 6.4 million times (Hub access log of a PROM run, scratch
-  build) before "Local hub NUMAlink is down". `observed`.
+  bit (LINUX `hubni.h` NSRI_LINKUP). On one node it polls it about 6.4 million times (Hub
+  access log of a PROM run) before "Local hub NUMAlink is down". `observed`.
 * With the link up, the discovery code that follows (`0x1fc2df2c`) starts a vector operation
   on NI offset `0x600000` (`0x1fc53954`), `inferred`: reading the neighbor Hub's
-  NI_STATUS_REV_ID through the link (the vector registers NI_VECTOR_PARMS/VECTOR/
-  VECTOR_DATA/VECTOR_STATUS, now storage only, IP27.adoc "Storage-only registers").
-* What a second node will need, from the above and IP27.adoc's address map: a second Hub
-  with its own NASID (physical address bits 39:32), memory, and two CPUs; the NI link
-  between the Hubs with link status and vector PIO; remote memory and Hub register access by
-  NASID; interrupts between nodes. Which node owns the BaseIO and how the link is cabled come
-  from slate.
+  NI_STATUS_REV_ID through the link. Vector PIO is the network's route-addressed access,
+  used before node IDs are assigned: NI_VECTOR_PARMS (type read, write, exchange),
+  NI_VECTOR, NI_VECTOR_DATA, and the results in NI_VECTOR_STATUS, NI_RETURN_VECTOR,
+  NI_VECTOR_READ_DATA (LINUX `hubni.h`; storage only today, IP27.adoc "Storage-only
+  registers").
+* NI_STATUS_REV_ID holds the Hub's node ID in bits 16:8 (LINUX NSRI_NODEID; the PROM reads it
+  with mask `0x1ff00`, `observed`); physical address bits 39:32 select the node (PRM §1.2.1);
+  before node IDs are assigned they are all zero (PRM §1.2.3).
+
+=== Design
+
+* **The node is the unit.** `Ip27Machine` owns one or two nodes; a node owns its Hub, its
+  memory, and its CPUs (the slices). A configuration value `--nodes 1|2` selects them,
+  `--cpus` stays per node, and one node stays the default. Node slots follow slate (n1, n2).
+* **Requests are routed by node ID.** A request whose node ID (address bits 39:32) is not
+  the requester's own goes to the other node's Hub: its memory, its Hub registers (the
+  remote-Hub alias), and its PI_INT_PEND_MOD, which is how a CPU interrupts a CPU on the
+  other node. Remote memory takes the same virtual time as local memory: no Hub, link, or
+  directory latency is modeled, as no cache or memory latency is modeled today.
+* **The link is a pair of NI ports.** One link object joins the two Hubs' NIs: link-up
+  status in NI_STATUS_REV_ID, and vector PIO along a route (with no router, the empty route
+  reaches the neighbor Hub). Its errors, retries, and LLP timing are not modeled until the
+  guest is observed to depend on them.
+* **One Crossbow, two Hubs.** Each Hub's II is a crosstalk port of the module's Crossbow
+  (n1 `0xa`, n2 9); a widget's interrupt goes to the Hub its INTDEST address names.
+* **Scheduling generalizes from two CPUs to N.** The CPU with the fewest completed cycles
+  runs (the lowest index on a tie) until it is a slice ahead of the next lowest; device time
+  is the lowest. With two CPUs this is the current rule, so the two-CPU digests stay the
+  same.
+* **Snapshots** hold each node's Hub, memory, and CPUs; the one-node format is unchanged.
+
+=== Stages
+
+S5.0. **Observe.** From the PROM's code and Hub access logs: what discovery does over the
+link, who assigns node IDs and how, how the global master is chosen, what the second node's
+PROM does while it waits, and which NI and Crossbow registers each step depends on. slate
+reads (below) when it is on. Gate: the facts recorded in this file and IP27.adoc.
+
+S5.1. **Nodes and routing, link down.** The machine as nodes; node-ID routing of memory,
+Hub registers, and interrupts; N-CPU scheduling. Gates: unit tests for routing (a store to
+the other node's memory, its Hub registers, and its PI_INT_PEND_MOD) and for scheduling with
+four CPUs; all presets; every one- and two-CPU benchmark digest and same-cycle snapshot
+unchanged.
+
+S5.2. **The link and discovery.** Link up, vector PIO, whatever S5.0 found the PROM needs.
+Gates: the PROM prints "Found 2 objects (2 hubs, 0 routers)", elects a global master,
+reports "4 CPUs on 2 nodes found", and reaches its menu with both nodes in its
+configuration summary (compared with slate's capture).
+
+S5.3. **IRIX on two nodes.** Gates: IRIX boots to `login:`; `hinv` shows four processors
+and both nodes' memory; `mpadmin -s` lists four CPUs; four-CPU workloads (`boot4`, `cpu4`
+with four awk loops, `reboot4`) give identical digests and same-cycle snapshots on all
+three engines; the one- and two-CPU workloads unchanged.
+
+=== Open questions for slate
+
+Read-only, when slate is on (local/tools/slate-tn.py):
+
+* Each node's node ID: `ls -l /hw/nodenum` (IRIX's links from node number to board).
+* `hinv -vm` already gives the boards; `sn0msc` and `/hw/module/1/slot/n*` listings as for
+  OBS-SLATE-0001.
+
+POD reads, at the console during a boot (the user drives; nothing is written):
+
+* On each node: NI_STATUS_REV_ID (link up, node ID, revision), NI_PORT_PARMS, IIO_ILCSR;
+  the Crossbow's link status for ports 9 and `0xa`.
+
+Not read-only, so only with the user's agreement: the ISP1020 interrupt experiment
+(IP27.adoc "ISP1020"). A standalone program, booted from the PROM monitor so IRIX does not
+own the controller and writing nothing to any disk, run first on the emulator and then on
+slate's QL1040B with the firmware IRIX loads:
+
+. Queue two TEST UNIT READY commands to the CD-ROM with interrupts masked at the CPU, and
+  wait until both have had time to complete.
+. Read PCI_INTF_STS and mailbox 5. If the in-pointer advanced by two while bit 2 was set,
+  the firmware posts while the interrupt is pending (the alternative hypothesis is false).
+. Take one response (out-pointer + 1 to mailbox 5), write HCCR `0x7000`, and read
+  PCI_INTF_STS: bit 2 set again confirms the model's rule; clear disproves it.
+. Take the second, clear, and read again: bit 2 clear confirms the rule ends with the queue.
+
+The same program's output from the emulator and from slate is the comparison, and stays a
+test of the model.
 
 == Evidence
 
@@ -351,6 +445,18 @@ starts from evidence:
   view, as each processor has its own SysAD connection into the PI.
 . **`--cpus 1|2` per node; one CPU stays the default** until S3's gates pass.
 . **Review after S3**, before host-parallel CPUs (S4).
+
+Decisions after the hardening (2026-10-13):
+
+. **S5 before S4** (the user): the second node on one host thread first, so host-parallel
+  CPUs are designed once, for four CPUs.
+. **The default slice stays 180 cycles** (the user left it to the agent). 1,000 cycles would
+  make compute-heavy two-CPU work about 23% faster, but it is half the PROM's bound
+  (2,000), and S5 will run guest code not yet seen with several CPUs (discovery across the
+  link, the second node's PROM waiting on the first), which may bound the skew more
+  tightly; 180 is eleven times inside the known bound. Speed comes from S4, whose quantum
+  is designed against the bounds S5 measures; the slice is revisited then. Runs that want
+  the speed now pass `--cpu-slice 1000`.
 
 Device time (refined in S2, 2026-10-12): devices and events see virtual time, the time of
 the CPU furthest behind. Only that CPU runs past the other, by at most a slice, so virtual
