@@ -443,6 +443,20 @@ class Cpu final : public InterruptSink {
             reach_internal_event();
         }
     }
+    // The processor makes no progress until cycles() reaches `cycle` (held, for example in
+    // reset, while another processor catches up): the cycles pass without retiring anything,
+    // and Count/Compare matches in them are taken as end_cycle would. Called between
+    // instructions.
+    void hold_until(std::uint64_t cycle) {
+        while (cycles_ < cycle) {
+            const std::uint64_t next = timer_cycle_ > cycles_ ? std::min(cycle, timer_cycle_) : cycle;
+            unretired_cycles_ += next - cycles_;
+            cycles_ = next;
+            if (cycles_ == timer_cycle_) {
+                reach_internal_event();
+            }
+        }
+    }
     // The earliest cycle count at which something inside the processor becomes observable
     // (today the Count/Compare match). An engine that accounts cycles itself calls
     // reach_internal_event when cycles() becomes equal to it, as end_cycle does; it need not

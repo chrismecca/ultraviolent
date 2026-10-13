@@ -451,6 +451,26 @@ Observed with two CPUs modeled (SMP.adoc S2, 2026-10-12):
 * IRIX boots to `login:`; `hinv -c processor` prints "2 180 MHZ IP27 Processors" and
   `mpadmin -s` lists processors 0 and 1, both unrestricted and preemptive.
 
+Observed on the two-CPU model (2026-10-13; `--cpu-slice` from 1 to 100,000, SMP.adoc
+"Hardening the reference"):
+
+* After the Hub local reset the PROM checks, on each CPU, that the real-time counter runs
+  (routine around `0x1fc58d04`): it reads PI_RT_COUNT as microseconds (`0x1fc5ad4c`, count ×
+  8 / 10), counts down 500 iterations of a two-instruction loop (`0x1fc045bc`, about 1,000
+  cycles), and reads it again. If the counter has not advanced it takes a failure path
+  (`0x1fc59ecc`, LED `0xa1`), the CPU stays out of the rendezvous, and the master later
+  reports "peer_pled failed: Other CPU on this node died" (diag_rc 30). `observed`
+  (disassembly; instruction traces of passing and failing runs).
+* In the model a CPU that is ahead of the other sees device time, and so PI_RT_COUNT, held at
+  the other's time for up to one slice (ADR-023). With slices up to 1,900 cycles the check
+  passes on both CPUs; from 2,000 cycles it fails on B, every time. The default slice (180)
+  is far inside this. `observed`. This bounds how far one CPU may run ahead of device time,
+  in reference mode and in any host-parallel quantum (SMP.adoc S4).
+* `hypothesis` (as before, now made exact): a local reset releases both CPUs at the same
+  instant. The model resets them at one cycle count: the CPU behind is held until the other's
+  cycle, as if in reset, then both reset (`Ip27Machine::reset_cpus`, `Cpu::hold_until`).
+  Without this, their phase after the PROM's early local reset depended on the slice length.
+
 === Hub local reset
 
 The PROM reads PI_ERR_STACK_ADDR_B early in its reset path and compares it with

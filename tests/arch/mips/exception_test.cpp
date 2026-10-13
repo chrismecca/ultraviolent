@@ -302,6 +302,31 @@ const test::Registration timer_wraps{
         t.check((s.cpu.mfc0(cp0::cause) & (0x80u << cause::ip_shift)) == 0, "IP7 stays clear");
     }};
 
+// A held processor's cycles pass without retiring anything; Count advances with them and a
+// Count/Compare match in them sets IP7, as if the cycles had run.
+const test::Registration hold{
+    "mips.hold_until", [](test::Context& t) {
+        System s;
+        s.load(System::code, {beq(zero, zero, -4), nop()});
+        s.start_kernel(kseg0(System::code), status::kx);
+        s.cpu.mtc0(cp0::count, 0);
+        s.cpu.mtc0(cp0::compare, 100);
+        const std::uint64_t start = s.cpu.cycles();
+        // Random counts down per retired instruction (UM 14.2): unchanged while held.
+        const std::uint64_t random = s.cpu.mfc0(cp0::random);
+        const std::uint64_t pc = s.pc();
+        s.cpu.hold_until(start + 150);
+        t.check_equal(s.cpu.cycles(), start + 150);
+        t.check_equal(s.cpu.mfc0(cp0::count), std::uint64_t{75});
+        t.check_equal(s.cpu.mfc0(cp0::random), random);
+        t.check_equal(s.pc(), pc);
+        t.check((s.cpu.mfc0(cp0::cause) & (0x80u << cause::ip_shift)) == 0, "no match yet");
+        s.cpu.hold_until(start + 250); // Count passes 100 at cycle start + 200
+        t.check((s.cpu.mfc0(cp0::cause) & (0x80u << cause::ip_shift)) != 0, "IP7 set");
+        s.cpu.hold_until(start + 10); // already past: nothing changes
+        t.check_equal(s.cpu.cycles(), start + 250);
+    }};
+
 const test::Registration watch{"mips.watch_exception", [](test::Context& t) {
                                    System s;
                                    s.cpu.mtc0(cp0::watch_lo, System::data | 1); // trap on stores

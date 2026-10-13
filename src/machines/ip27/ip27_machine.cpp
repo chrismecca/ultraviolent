@@ -555,10 +555,19 @@ void Ip27Machine::reset(ResetKind kind) {
 }
 
 void Ip27Machine::reset_cpus(ResetKind kind) {
-    // hypothesis: a reset reaches both CPUs of the node together (IP27.adoc "Two CPUs on a
-    // Hub").
+    // hypothesis: a reset reaches both CPUs of the node together and releases them together
+    // (IP27.adoc "Two CPUs on a Hub"). The CPUs' own times differ by up to a slice here, so
+    // the one behind is held until the other's cycle, as if in reset, and both leave reset at
+    // the same cycle; otherwise their phase after a reset would depend on the slice length.
+    std::uint64_t release = 0;
+    for (const Processor* p : processors_) {
+        if (p != nullptr) {
+            release = std::max(release, p->cpu.cycles());
+        }
+    }
     for (Processor* p : processors_) {
         if (p != nullptr) {
+            p->cpu.hold_until(release);
             p->cpu.reset(kind);
         }
     }

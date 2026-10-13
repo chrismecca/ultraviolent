@@ -569,6 +569,26 @@ const test::Registration two_cpu_observed{
         }
     }};
 
+// A Hub local reset releases both CPUs together (IP27.adoc "Two CPUs on a Hub"): A requests it
+// while B is behind, and afterwards both Count registers started from 0 at the same cycle,
+// whatever the slice.
+const test::Registration two_cpu_local_reset{
+    "ip27.two_cpus.leave_local_reset_together", [](test::Context& t) {
+        for (const std::uint64_t slice : {std::uint64_t{1}, std::uint64_t{50}, std::uint64_t{2000}}) {
+            Ip27Machine machine{two_cpu_config(slice), local_reset_prom};
+            machine.run(6000);
+            t.check_equal(memory_word(machine, 0x400), std::uint64_t{1});
+            // The cycle at which each CPU's Count was 0 (Count runs at half the cycle rate).
+            const auto released = [](mips::Cpu& cpu) {
+                return static_cast<std::uint32_t>(cpu.cycles() >> 1) -
+                       static_cast<std::uint32_t>(cpu.mfc0(mips::cp0::count));
+            };
+            t.check_equal(released(machine.cpu(0)), released(machine.cpu(1)));
+            t.check(machine.cpu(0).state().gpr[t6] > 0 && machine.cpu(1).state().gpr[t6] > 0,
+                    "both CPUs run after the reset");
+        }
+    }};
+
 // An inter-processor interrupt is an ordinary Hub interrupt level (IP27.adoc "Hub
 // interrupts"; LINUX intr.h CPU_ACTION_B = 11): B unmasks level 11 in INT_MASK0_B and enables
 // IP2; A sets the level through PI_INT_PEND_MOD; B takes the interrupt at its BEV general
