@@ -426,7 +426,14 @@ void Isp1020::host_command(std::uint16_t command) {
         scheduler_.cancel(command_done_);
         return;
     case hccr_clear_risc_intr:
-        risc_interrupt_ = false;
+        // hypothesis: the firmware keeps the RISC interrupt while the response queue holds
+        // entries the host has not taken (its out-pointer in mailbox 5 differs from the
+        // in-pointer). IRIX's handler writes its out-pointer, clears, and reads PCI_INTF_STS
+        // again for more; a response posted after it read the in-pointer is then still seen
+        // (observed with two CPUs, where another CPU's command can complete inside the
+        // handler).
+        risc_interrupt_ = firmware_running_ && responses_.length != 0 &&
+                          mailbox_in_[5] != responses_.pointer;
         return;
     default:
         // NOP, single step, breakpoint enable, BIOS disable, test mode: no modeled effect.

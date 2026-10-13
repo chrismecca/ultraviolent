@@ -237,6 +237,44 @@ const test::Registration queues{
         t.check_equal(byte(b.memory, 0x1240 + 13), 0x01u); // state: got bus only
     }};
 
+// IRIX's interrupt handler (observed, two-CPU boot): read the response in-pointer (mailbox
+// 5), take the responses, write its out-pointer to mailbox 5, clear the RISC interrupt, and
+// read PCI_INTF_STS again for more. A response posted after its read of mailbox 5 is still
+// unread at the clear; the interrupt stays so the handler sees it (hypothesis: the firmware
+// keeps the interrupt while the queue holds entries the host has not taken).
+const test::Registration unread{
+    "isp1020.unread_responses_keep_the_interrupt", [](test::Context& t) {
+        Bench b;
+        Target target;
+        b.bus.attach(2, target);
+        const char banner[] = "  Version 02.55  ";
+        for (std::uint32_t i = 0; i + 1 < sizeof banner; i += 2) {
+            b.command({0x0004, 0x1000 + i / 2,
+                       static_cast<std::uint32_t>(banner[i]) << 8 |
+                           static_cast<std::uint8_t>(banner[i + 1])});
+        }
+        b.command({0x0002, 0x1000});
+        b.command({0x0053, 4, 0, 0x1200, 0, 0, 0, 0});
+        b.command({0x0052, 4, 0, 0x1100, 0, 0, 0, 0});
+        const auto inquiry = [&](std::uint64_t entry, std::uint32_t in_pointer) {
+            put(b.memory, entry, {1, 1, 0, 0, 0, 0, 0, 0, 0, 2, 6, 0});
+            put(b.memory, entry + 18, {1, 0, 0x12, 0, 0, 0, 16, 0});
+            put(b.memory, entry + 32, {0x00, 0x13, 0, 0, 16, 0, 0, 0});
+            b.write(mbox0 + 8, in_pointer);
+            b.scheduler.advance_by(Isp1020::command_time);
+        };
+        inquiry(0x1100, 1);
+        t.check_equal(b.read(mbox0 + 10), std::uint32_t{1}); // the handler reads in = 1
+        inquiry(0x1140, 2);                                  // another completes meanwhile
+        b.write(mbox0 + 10, 1);                              // out = 1
+        b.write(hccr, 0x7000);
+        t.check_equal(b.read(intf_sts) & 4, std::uint32_t{4}); // response 1 is still unread
+        t.check_equal(b.read(mbox0 + 10), std::uint32_t{2});
+        b.write(mbox0 + 10, 2);
+        b.write(hccr, 0x7000);
+        t.check_equal(b.read(intf_sts) & 4, std::uint32_t{0}); // all taken: the interrupt ends
+    }};
+
 const test::Registration reset{"isp1020.reset_clears_mailboxes", [](test::Context& t) {
                                    Bench b;
                                    b.command({0x0000});

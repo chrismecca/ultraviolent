@@ -857,6 +857,17 @@ RISC firmware.
 * INTA: `hypothesis` asserted while the RISC interrupt is pending and PCI_INTF_CTL has both
   ISP_EN_INT and ISP_EN_RISC (Linux `isp1020_enable_irqs`); the IRIX kernel's driver is
   interrupt-driven (`observed`).
+* Clearing the RISC interrupt (HCCR `0x7000`): `hypothesis` the interrupt stays set while the
+  response queue holds entries the host has not taken (the host's out-pointer, written to
+  mailbox 5, differs from the in-pointer). `observed` (register accesses, two-CPU boot,
+  2026-10-13): IRIX's handler reads PCI_INTF_STS, the semaphore, and the in-pointer
+  (mailbox 5), takes the responses, writes its out-pointer to mailbox 5, clears the RISC
+  interrupt, and reads PCI_INTF_STS again for more. A command another CPU queued completed
+  between its read of the in-pointer and the clear; when the clear dropped the interrupt
+  regardless, that response was never taken, and IRIX reported "ql0: Command timeout" 81 s
+  later and reset the chip. With one CPU it also happens (a completion inside the handler,
+  which then waited for the next interrupt): the `fs` benchmark keeps its output and cycle
+  count, and ends at another PC.
 * Not modeled: a full response queue, asynchronous events, transfer time.
 
 === SCSI
