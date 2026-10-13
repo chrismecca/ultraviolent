@@ -200,6 +200,22 @@ scripts/bench.py run --statistics local/bench/tier0-stats \
     --compare local/bench/step2.json --compare local/bench/stageB.json
 ----
 
+Two-CPU workloads (`--cpus 2`, SMP.adoc) run only when named: `boot2` (power-on to
+`login:`), `cpu2` (two awk loops at once from a root shell), `mix2` (the `fs` pipeline and
+the awk loop at once), and `reboot2` (`init 6` from a root shell, through the PROMs, to a
+root shell and `mpadmin -s`). They load a two-CPU shell snapshot, built once after the
+one-CPU fixture; `--cpu-slice N` sets the slice; `--output DIR` keeps each workload's
+console output, for comparing runs whose digests may differ (other slice lengths):
+
+[source,shell]
+----
+scripts/bench.py fixture --cpus 2
+scripts/bench.py run --repeat 2 boot2 cpu2 mix2 reboot2
+scripts/bench.py run --cpu-slice 1 --output local/runs/slice1 cpu2 mix2
+----
+
+Their rate counts both CPUs' cycles; "x real" is virtual time per host second.
+
 Workloads run on the default engine, tier 1 (JIT.adoc, with `--tier1-threshold N`);
 `--engine tier0` runs decoded blocks (IR.adoc) and `--engine reference` the reference
 interpreter, and the digests of all must be equal. `--statistics DIR` keeps each engine's statistics lines. `--compare` repeats: speedups are reported against each saved result, and a

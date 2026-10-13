@@ -26,9 +26,17 @@ Workloads:
   cpu    from a root shell: an awk arithmetic loop (user-mode integer code)
   fs     from a root shell: find and sum over /usr/lib, /usr/bin, /usr/sbin (kernel, XFS,
          SCSI)
+  boot2  boot with two CPUs (--cpus 2, SMP.adoc)
+  cpu2   from a two-CPU root shell: two cpu loops at once
+  mix2   from a two-CPU root shell: the fs pipeline and the cpu loop at once
+  reboot2  from a two-CPU root shell: init 6, through both PROMs, to a root shell again
+
+The default set is the one-CPU workloads; name the two-CPU ones to run them. They need the
+two-CPU shell snapshot: scripts/bench.py fixture --cpus 2 (after the one-CPU fixture).
 
 Rates count only each workload's own cycles: a snapshot workload starts where the fixture's
-login stopped (fixture/shell.json).
+login stopped (fixture/shell.json). With two CPUs the rate counts both CPUs' cycles (twice
+CPU A's; they differ by at most a slice), and "x real" is virtual time per host second.
 
 --counters runs each workload under `perf stat` (user mode) and reports host instructions,
 branches, branch misses, and L1 misses per guest cycle. The counts include process start and,
@@ -61,22 +69,45 @@ CAP = "200000000000"
 LOGIN = ["@expect Option?", "1", "@expect login:"]
 SHELL = ["@expect # "]
 
+AWK = "awk 'BEGIN { for (i = 0; i < 1500000; i++) s = (s + i * i) % 1000003; print s }'"
+FIND = "find /usr/lib /usr/bin /usr/sbin -type f -print | xargs sum | sum"
+
 WORKLOADS = {
     "prom": {"disk": False, "console": ["@expect Option?", "@stop"]},
     "boot": {"disk": True, "console": LOGIN + ["@stop"]},
-    "cpu": {"snapshot": True, "console": [
-        "awk 'BEGIN { for (i = 0; i < 1500000; i++) s = (s + i * i) % 1000003; print s }'"]
-        + SHELL + ["@stop"]},
-    "fs": {"snapshot": True, "console": [
-        "find /usr/lib /usr/bin /usr/sbin -type f -print | xargs sum | sum"] + SHELL + ["@stop"]},
+    "cpu": {"snapshot": True, "console": [AWK] + SHELL + ["@stop"]},
+    "fs": {"snapshot": True, "console": [FIND] + SHELL + ["@stop"]},
+    "boot2": {"cpus": 2, "disk": True, "console": LOGIN + ["@stop"]},
+    # Both jobs in one sh, so the prompt returns when both are done.
+    "cpu2": {"cpus": 2, "snapshot": True,
+             "console": [f'sh -c "{AWK} & {AWK} & wait"'] + SHELL + ["@stop"]},
+    "mix2": {"cpus": 2, "snapshot": True,
+             "console": [f"sh -c '({FIND}) & {AWK.replace(chr(39), chr(34))} & wait'"]
+             + SHELL + ["@stop"]},
+    # A kernel-requested reboot skips the PROM's diagnostics and its menu (no "Option?").
+    "reboot2": {"cpus": 2, "snapshot": True,
+                "console": ["init 6", "@expect login:", "root", "@expect TERM", "vt100"]
+                + SHELL + ["mpadmin -s"] + SHELL + ["@stop"]},
 }
+DEFAULT_WORKLOADS = [name for name, w in WORKLOADS.items() if w.get("cpus", 1) == 1]
 
 
-def fixture_paths(work):
+def shell_prefix(cpus):
+    # The root-shell snapshot's files: shell-disk.img, shell.uvstate, ... for one CPU, and
+    # shell2-disk.img, shell2.uvstate, ... for two (a snapshot loads only into a machine
+    # with the same number of CPUs).
+    return "shell" if cpus == 1 else f"shell{cpus}"
+
+
+def fixture_paths(work, cpus=1):
     fixture = os.path.join(work, "fixture")
-    return {name: os.path.join(fixture, name) for name in
-            ("disk.img", "nvram.bin", "flash.bin", "shell.uvstate", "shell-disk.img",
-             "shell.json")}
+    shell = shell_prefix(cpus)
+    paths = {name: os.path.join(fixture, name) for name in ("disk.img", "nvram.bin", "flash.bin")}
+    for name in ("disk.img", "nvram.bin", "flash.bin"):
+        paths["shell-" + name] = os.path.join(fixture, f"{shell}-{name}")
+    paths["shell.uvstate"] = os.path.join(fixture, f"{shell}.uvstate")
+    paths["shell.json"] = os.path.join(fixture, f"{shell}.json")
+    return paths
 
 
 def copy(source, destination):
@@ -92,27 +123,32 @@ def default_scratch():
     return None
 
 
-def base_command(args, scratch):
+def base_command(args, scratch, cpus=1):
     return [args.binary, "--machine", "ip27", "--prom", args.prom, "--io6prom", args.io6prom,
             "--flash", os.path.join(scratch, "flash.bin"),
             "--nvram", os.path.join(scratch, "nvram.bin"), "--engine", args.engine] + (
+                ["--cpus", str(cpus)] if cpus != 1 else []) + (
+                ["--cpu-slice", str(args.cpu_slice)] if cpus != 1 and args.cpu_slice else []) + (
                 ["--tier0-cache-entries", str(args.cache_entries)] if args.cache_entries else []) + (
                 ["--tier1-threshold", str(args.tier1_threshold)]
                 if args.tier1_threshold is not None else [])
 
 
 def make_fixture(args):
-    paths = fixture_paths(args.work)
-    os.makedirs(os.path.dirname(paths["disk.img"]), exist_ok=True)
-    for name in ("disk.img", "nvram.bin", "flash.bin"):
-        copy(os.path.join(args.source, name), paths[name])
+    paths = fixture_paths(args.work, args.cpus)
+    if args.cpus == 1:
+        os.makedirs(os.path.dirname(paths["disk.img"]), exist_ok=True)
+        for name in ("disk.img", "nvram.bin", "flash.bin"):
+            copy(os.path.join(args.source, name), paths[name])
+    elif not os.path.exists(paths["disk.img"]):
+        sys.exit("fixture --cpus 2: make the one-CPU fixture first")
     # The shell snapshot: boot a copy of the disk, log in as root, stop at the prompt.
     scratch = os.path.join(args.work, "scratch")
     os.makedirs(scratch, exist_ok=True)
     for name in ("disk.img", "nvram.bin", "flash.bin"):
         copy(paths[name], os.path.join(scratch, name))
     console = LOGIN + ["root", "@expect TERM", "vt100", "@expect # ", "@stop"]
-    command = base_command(args, scratch) + ["--disk", os.path.join(scratch, "disk.img"),
+    command = base_command(args, scratch, args.cpus) + ["--disk", os.path.join(scratch, "disk.img"),
                                              "--save-state", paths["shell.uvstate"],
                                              "--cycles", CAP]
     for line in console:
@@ -124,24 +160,22 @@ def make_fixture(args):
     stopped = STOPPED.search(result.stderr)
     with open(paths["shell.json"], "w") as f:
         json.dump({"cycles": int(stopped.group(1)), "virtual_ns": int(stopped.group(2))}, f)
-    copy(os.path.join(scratch, "disk.img"), paths["shell-disk.img"])
     # The snapshot carries the flash and timekeeper; the files must agree with it.
-    for name in ("nvram.bin", "flash.bin"):
-        copy(os.path.join(scratch, name), os.path.join(os.path.dirname(paths["disk.img"]),
-                                                       "shell-" + name))
+    for name in ("disk.img", "nvram.bin", "flash.bin"):
+        copy(os.path.join(scratch, name), paths["shell-" + name])
     print(f"fixture in {os.path.dirname(paths['disk.img'])}")
 
 
 def run_once(args, name, workload):
-    paths = fixture_paths(args.work)
-    fixture = os.path.dirname(paths["disk.img"])
+    cpus = workload.get("cpus", 1)
+    paths = fixture_paths(args.work, cpus)
     scratch = args.scratch or os.path.join(args.work, "scratch")
     shutil.rmtree(scratch, ignore_errors=True)
     os.makedirs(scratch)
     prefix = "shell-" if workload.get("snapshot") else ""
     for state in ("nvram.bin", "flash.bin"):
-        copy(os.path.join(fixture, prefix + state), os.path.join(scratch, state))
-    command = base_command(args, scratch)
+        copy(paths[prefix + state], os.path.join(scratch, state))
+    command = base_command(args, scratch, cpus)
     if workload.get("snapshot"):
         copy(paths["shell-disk.img"], os.path.join(scratch, "disk.img"))
         command += ["--disk", os.path.join(scratch, "disk.img"),
@@ -168,6 +202,10 @@ def run_once(args, name, workload):
         sys.stderr.buffer.write(result.stderr[-2000:])
         sys.exit(f"{name}: the run failed")
     digest = hashlib.sha256(result.stdout + stopped.group(0)).hexdigest()[:16]
+    if args.output:
+        os.makedirs(args.output, exist_ok=True)
+        with open(os.path.join(args.output, name + ".txt"), "wb") as f:
+            f.write(result.stdout)
     if args.statistics:
         os.makedirs(args.statistics, exist_ok=True)
         with open(os.path.join(args.statistics, name + ".txt"), "wb") as f:
@@ -177,7 +215,7 @@ def run_once(args, name, workload):
     if workload.get("snapshot"):
         with open(paths["shell.json"]) as f:
             origin = json.load(f)
-    result = {"cycles": int(stopped.group(1)) - origin["cycles"],
+    result = {"cycles": (int(stopped.group(1)) - origin["cycles"]) * cpus,
               "virtual_ns": int(stopped.group(2)) - origin["virtual_ns"],
               "wall": wall,
               "cpu": after.ru_utime - before.ru_utime + after.ru_stime - before.ru_stime,
@@ -215,7 +253,7 @@ def counter_summary(entry):
 
 
 def run(args):
-    names = args.workloads or list(WORKLOADS)
+    names = args.workloads or DEFAULT_WORKLOADS
     baselines = []
     for path in args.compare or []:
         with open(path) as f:
@@ -258,7 +296,7 @@ def run(args):
         if args.counters:
             print(counter_summary(entry), flush=True)
     if args.save:
-        host = {"binary": args.binary, "engine": args.engine,
+        host = {"binary": args.binary, "engine": args.engine, "cpu_slice": args.cpu_slice,
                 "cache_entries": args.cache_entries, "tier1_threshold": args.tier1_threshold,
                 "cpu": cpu_model(),
                 "kernel": os.uname().release,
@@ -295,6 +333,8 @@ def main():
     common.add_argument("--io6prom", default=os.path.join(FIRMWARE, "io6prom.img"))
     common.add_argument("--engine", default="tier1", choices=["reference", "tier0", "tier1"])
     common.add_argument("--cache-entries", type=int, help="tier 0's block cache size")
+    common.add_argument("--cpu-slice", type=int,
+                        help="two-CPU workloads: cycles a CPU may run ahead (default 180)")
     common.add_argument("--tier1-threshold", type=int,
                         help="cache hits before tier 1 translates a block")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -302,6 +342,8 @@ def main():
                                   help="build the fixture from an installed system")
     fixture.add_argument("--from", dest="source", default="local/rc",
                          help="directory with disk.img, nvram.bin, flash.bin after a clean shutdown")
+    fixture.add_argument("--cpus", type=int, choices=[1, 2], default=1,
+                         help="2: only the two-CPU shell snapshot, from the existing fixture")
     bench = commands.add_parser("run", parents=[common], help="run workloads")
     bench.add_argument("workloads", nargs="*", help=", ".join(WORKLOADS))
     bench.add_argument("--repeat", type=int, default=3)
@@ -310,6 +352,8 @@ def main():
                        help="a saved result to compare with (repeatable)")
     bench.add_argument("--counters", action="store_true",
                        help="count host events per guest cycle with perf stat")
+    bench.add_argument("--output", metavar="DIR",
+                       help="keep each workload's console output in DIR/WORKLOAD.txt")
     bench.add_argument("--statistics", metavar="DIR",
                        help="write each workload's tier-0 statistics to DIR/WORKLOAD.txt")
     args = parser.parse_args()
