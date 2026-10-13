@@ -312,3 +312,9 @@ Refined in S2 (2026-10-12): devices see the time of the CPU furthest behind rath
 making a CPU wait to the device clock (SMP.adoc "Decisions", "Device time"); the bound on
 skew between a CPU and devices is the same slice.
 
+Refined 2026-10-13: a slice ends only where the running CPU is a slice ahead (or at a stop),
+not where its engine returns for an event, so observing a run cannot change it; a Hub local
+reset releases both CPUs at one cycle. The revisit condition was met in part: the PROM's
+real-time-counter check needs the slice under 2,000 cycles (SMP.adoc "Time and scheduling");
+the default of 180 is well inside it.
+

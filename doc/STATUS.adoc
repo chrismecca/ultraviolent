@@ -8,8 +8,11 @@ Update this file at the end of every significant development session.
 S0-S3 are done: `--cpus 2` puts a second R10000 in the node's slice B; the PROM finds both
 ("2 CPUs on 1 nodes found"), IRIX boots with two processors, and a two-process workload
 gives identical output and byte-identical snapshots on the reference interpreter, tier 0,
-and tier 1. One CPU stays the default, with every benchmark digest unchanged. The user
-reviews before S4 (host-parallel CPUs).** Next: see Next task.
+and tier 1. One CPU stays the default. After the assessment with the user (2026-10-12) the
+two-CPU reference was hardened (2026-10-13): two-CPU benchmark workloads (`boot2`, `cpu2`,
+`mix2`, `reboot2`) agree on all three engines, and three defects were fixed (tracing changed
+the schedule; the CPUs left a local reset out of phase; the ISP1020 lost a completion).
+Proposed next: S5, the second node, before S4.** Next: see Next task.
 
 Before it, the performance baseline (ROADMAP "After RC-IP27"; started 2026-09-28). The repository is public
 at RC-IP27 (the user chose no tag or release). Tier 0 stages A-H are done (2026-10-08): tier
@@ -406,6 +409,11 @@ Housekeeping:
   directory (gone); rebuild a baseline with `git worktree add` and its own
   `scripts/build-pgo.sh`.
 
+* **Current one-CPU baseline: `local/bench/r3600/m-tier1.json`** (2026-10-13, `f8953a1`,
+  best of 3): prom 299.9, boot 214.3, cpu 310.5, fs 296.8 M cycles/s. `fs`'s digest is now
+  `26805b0f3e8232c6` (the ISP1020 interrupt change; same output and cycle count). Two-CPU
+  workloads: `l-tier1-smp.json`.
+
 * **The benchmark slowdown after the host rebuild (2026-10-12) was the harness, not the
   code.** The fixture copies had been timed in tmpfs by hand (DEVELOPMENT "Benchmarks"); the
   reboot removed that copy, and on XFS each run then read the guest disk cold from the hard
@@ -429,15 +437,16 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **SMP S4, after the user's review (SMP.adoc "Stages", "Host-parallel").** S0-S3 are done
-  (SMP.adoc "Progress"). Review with the user: S3's results, the S2 refinement of device
-  time (ADR-023 note), the cache model for lines software installs (MIPS.adoc), and the S4
-  design: one host thread per CPU running to a shared slice deadline, device accesses
-  serialized, LL/SC reservations as an atomic table, not deterministic run to run, accepted
-  against reference-mode outputs. Measure first: on one host thread two CPUs run at about
-  0.49 times real time each (tier 1); where the time goes (slice switches, the writable
-  page drops Coherence causes) decides what S4 needs beyond threads. Then S5 (the second
-  node, its own plan from slate).
+. **Review with the user, then S5: the second node (SMP.adoc).** Assessment with the user
+  (2026-10-12): fix the benchmark harness, harden the two-CPU reference, then the second node
+  on one host thread, then host-parallel CPUs (S4) designed once for four CPUs; the user
+  agreed to the first two, which are done (SMP.adoc "Progress", "Hardening the reference").
+  For the review: the S4-before-S5 order; the default slice (180 cycles; 1,000 would make
+  compute-heavy two-CPU work about 23% faster and stay inside the PROM's 2,000-cycle bound);
+  the ISP1020 interrupt hypothesis (IP27.adoc "ISP1020"), which changed one-CPU `fs`'s digest
+  (same output and cycles). S5 starts with its own plan from slate's topology: slate's
+  capture shows "Found 2 objects (2 hubs, 0 routers)", so the two nodes are linked without a
+  router; slate did not answer on the network on 2026-10-13, so further reads wait for it.
 . **Done: the multiprocessor plan and S0-S3 (2026-10-12).** The history of this item: One CPU now
   runs above real time on every workload at 180 MHz (1.20-1.68x) and at 200 MHz
   (1.08-1.51x); at 250 MHz `boot` is at 0.86x (device-access-bound firmware delay loops),
@@ -1340,4 +1349,34 @@ Unknowns: whether DMA should break LL/SC reservations; secondary lines installed
   software (none observed); the second node's link (S5, from slate).
 Best checkpoint: the two-CPU cold boot in SMP.adoc "Progress"; one-CPU checkpoints unchanged.
 Next step: the user's review, then S4 (host-parallel CPUs), measured first.
+----
+
+----
+Date: 2026-10-12/13
+Milestone: SMP IP27, after S3: assessment with the user, harness, hardening the reference
+Hypothesis: the two-CPU reference is correct beyond the one workload S3 tried, and the
+  post-rebuild benchmark slowdown is environmental.
+Evidence: perf stat and /proc/diskstats on fs runs; PC samples of both CPUs; instruction
+  traces of passing and failing PROM runs; ISP1020 register access logs (scratch builds);
+  PROM disassembly; slate's capture.
+Changed: bench.py runs in /dev/shm and has two-CPU workloads, --cpu-slice, --output;
+  run_two ends a slice only at cpu_slice ahead; Cpu::hold_until and both CPUs released from
+  a local reset at one cycle; ISP1020 keeps the RISC interrupt while responses are unread;
+  SMP.adoc, IP27.adoc, ADR-023 note, DEVELOPMENT.adoc.
+Tests: ip27.two_cpus.observation_keeps_the_schedule, ip27.two_cpus.leave_local_reset_together,
+  mips.hold_until, isp1020.unread_responses_keep_the_interrupt; dev and asan green; two-CPU
+  workloads identical on three engines; one-CPU digests unchanged except fs (explained).
+Newly proven: the slowdown was cold reads of reflinked disk copies on the hard disk (the
+  tmpfs copy was lost in the reboot); the emulator's speed is unchanged. Two CPUs on one
+  thread cost about 1% per guest cycle on boot, about 25% on compute at slice 180 (host
+  caches, engine entries). IRIX reboots on two CPUs. IRIX's results do not depend on the
+  slice (1 to 100,000); the PROM's RTC check needs it under 2,000.
+Disproven: "the order depends only on cycle counts" (S2) when an event made the engine
+  return; "1% two-CPU overhead" as general (true for boot only); the ISP1020's
+  clear-drops-the-interrupt model as harmless.
+Unknowns: the real ISP1020 firmware's interrupt rule (hypothesis); other devices that act
+  instantly where a second CPU can race them; the second node's link.
+Best checkpoint: boot2 and the two-CPU fixture (bench.py fixture --cpus 2).
+Next step: the user's review of the order (S5 before S4) and the default slice; then the S5
+  plan from slate.
 ----
