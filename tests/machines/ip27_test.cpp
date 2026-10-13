@@ -538,6 +538,37 @@ const test::Registration two_cpu_snapshot{
         t.check(!one.load_state(image).has_value(), "a one-CPU machine refuses it");
     }};
 
+// Each CPU sets KX; the first to find the marker at physical 0x400 clear sets it and requests a
+// Hub local reset through NI_PORT_RESET, as the PROM does early (IP27.adoc "Hub local reset");
+// after the reset both count in t6. CPU A goes first on the tie at power-on, so it requests the
+// reset while B is behind: the reset event is due at once, inside A's slice.
+const auto local_reset_prom =
+    program({lui(t7, 0x40), ori(t7, t7, 0x80), mtc0(t7, mips::cp0::status), lui(t3, 0xa800),
+             dsll32(t3, t3, 0), ld(t1, 0x400, t3), bne(t1, zero, 36), nop(), ori(t2, zero, 1),
+             sd(t2, 0x400, t3), lui(t5, 0x9200), dsll32(t5, t5, 0), lui(t2, 0x0160),
+             daddu(t5, t5, t2), ori(t4, zero, 1), sd(t4, 8, t5), daddiu(t6, t6, 1),
+             beq(zero, zero, -8), nop()});
+
+// Observing a run (--probe or --trace cpu steps one instruction at a time) does not change
+// the order in which the CPUs run (ADR-023): a slice ends only where it is cpu_slice ahead,
+// even when an event makes the engine return early.
+const test::Registration two_cpu_observed{
+    "ip27.two_cpus.observation_keeps_the_schedule", [](test::Context& t) {
+        for (const std::uint64_t slice : {std::uint64_t{7}, std::uint64_t{50}}) {
+            Ip27Machine plain{two_cpu_config(slice), local_reset_prom};
+            Ip27Machine observed{two_cpu_config(slice), local_reset_prom};
+            observed.add_pc_probe(0x4); // never reached: only makes the machine step
+            plain.run(3000);
+            observed.run(3000);
+            t.check_equal(memory_word(plain, 0x400), std::uint64_t{1});
+            t.check_equal(plain.cpu(0).cycles(), observed.cpu(0).cycles());
+            t.check_equal(plain.cpu(1).cycles(), observed.cpu(1).cycles());
+            t.check(plain.cpu(0).capture() == observed.cpu(0).capture() &&
+                        plain.cpu(1).capture() == observed.cpu(1).capture(),
+                    "same state with and without observation");
+        }
+    }};
+
 // An inter-processor interrupt is an ordinary Hub interrupt level (IP27.adoc "Hub
 // interrupts"; LINUX intr.h CPU_ACTION_B = 11): B unmasks level 11 in INT_MASK0_B and enables
 // IP2; A sets the level through PI_INT_PEND_MOD; B takes the interrupt at its BEV general

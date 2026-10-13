@@ -699,22 +699,29 @@ void Ip27Machine::run_processor(bool observed) {
 
 void Ip27Machine::run_two(std::uint64_t cycles) {
     // Lowest time first (ADR-023): the CPU behind runs until it is cpu_slice ahead of the
-    // other or an event falls due; A goes first on a tie. The order depends only on the cycle
-    // counts, never on where a run ends: a run ends between slices once both CPUs have
-    // completed `cycles` more, so splitting a run, or resuming a snapshot, changes nothing.
+    // other; A goes first on a tie. A slice ends only there: the engine also returns when an
+    // event falls due (and after every instruction when observed), and the slice then goes on.
+    // So the order depends only on the cycle counts, never on where an engine returns or a run
+    // ends: a run ends between slices once both CPUs have completed `cycles` more, so splitting
+    // a run, observing it, or resuming a snapshot changes nothing.
     run_end_cycle_ = lowest_cycles() + cycles;
     stop_requested_ = false;
     const bool observed = !pc_probes_.empty() || tracer_.enabled(TraceCategory::cpu);
-    while (lowest_cycles() < run_end_cycle_) {
-        const std::uint64_t a = cpu_a_.cpu.cycles();
-        const std::uint64_t b = cpu_b_->cpu.cycles();
-        running_ = b < a ? 1 : 0;
-        slice_end_cycle_ = std::max(a, b) + config_.cpu_slice;
+    bool in_slice = false;
+    while (in_slice || lowest_cycles() < run_end_cycle_) {
+        if (!in_slice) {
+            const std::uint64_t a = cpu_a_.cpu.cycles();
+            const std::uint64_t b = cpu_b_->cpu.cycles();
+            running_ = b < a ? 1 : 0;
+            slice_end_cycle_ = std::max(a, b) + config_.cpu_slice;
+        }
         update_next_event();
         run_processor(observed);
         if (lowest_cycles() >= next_event_cycle_) {
             synchronize_time();
         }
+        // A stop ends the slice; the CPU behind then catches up to the stop (update_next_event).
+        in_slice = !stop_requested_ && processors_[running_]->cpu.cycles() < slice_end_cycle_;
     }
     running_ = 0;
     slice_end_cycle_ = std::numeric_limits<std::uint64_t>::max();
