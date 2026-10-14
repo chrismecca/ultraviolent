@@ -181,13 +181,13 @@ class Ip27Machine {
     [[nodiscard]] mips::ExecutionEngine execution_engine() const {
         return engine_;
     }
-    // CPU A's engine statistics.
+    // The first CPU's engine statistics.
     [[nodiscard]] const mips::BlockStatistics& block_statistics() const {
-        return cpu_a_.blocks.statistics();
+        return nodes_.front()->cpu_a.blocks.statistics();
     }
-    // Tier 1's statistics for CPU A, when it has been selected.
+    // Tier 1's statistics for the first CPU, when it has been selected.
     [[nodiscard]] const mips::NativeCode* native_code() const {
-        return cpu_a_.native.get();
+        return nodes_.front()->cpu_a.native.get();
     }
     // Tier 0's block cache size, a power of two (IR.adoc "Keeping blocks valid").
     void set_block_cache_entries(std::size_t entries) {
@@ -207,7 +207,11 @@ class Ip27Machine {
     }
     // 4 KiB frames of memory and flash now marked as holding decoded code.
     [[nodiscard]] std::size_t marked_code_frames() const {
-        return memory_.marked_frames() + flash_.marked_frames();
+        std::size_t frames = 0;
+        for (const auto& node : nodes_) {
+            frames += node->memory.marked_frames() + node->flash.marked_frames();
+        }
+        return frames;
     }
     // Ends the current run() at the next cycle boundary (for host backends, such as a console
     // script that has run out).
@@ -217,18 +221,19 @@ class Ip27Machine {
         stop_requested_ = true;
     }
 
-    // CPU A, or the CPU in `slice` (which must be installed).
-    [[nodiscard]] mips::Cpu& cpu(unsigned slice = 0) {
-        invariant(slice < processors_.size() && processors_[slice] != nullptr, "no such CPU");
-        return processors_[slice]->cpu;
+    // CPU `index` (which must be installed): node index * 2 + slice, so 0 is the first node's
+    // slice A and 1 its slice B.
+    [[nodiscard]] mips::Cpu& cpu(unsigned index = 0) {
+        invariant(index < processors_.size() && processors_[index] != nullptr, "no such CPU");
+        return processors_[index]->cpu;
     }
-    // The flash PROM's contents, for host persistence of the PROM log (IP27.adoc "Boot PROM").
-    // load_flash replaces them before the machine runs.
+    // The first node's flash PROM contents, for host persistence of the PROM log (IP27.adoc
+    // "Boot PROM"). load_flash replaces them before the machine runs.
     [[nodiscard]] std::span<const std::byte> flash_contents() const {
-        return flash_.bytes();
+        return nodes_.front()->flash.bytes();
     }
     [[nodiscard]] bool flash_dirty() const {
-        return flash_device_.dirty();
+        return nodes_.front()->flash_device.dirty();
     }
     void load_flash(std::span<const std::byte> contents);
     // The BaseIO's own flash PROM (the IO6 PROM, behind the Bridge's external flash port),
@@ -266,8 +271,9 @@ class Ip27Machine {
     [[nodiscard]] Scheduler& scheduler() {
         return scheduler_;
     }
+    // The first node's view of physical addresses.
     [[nodiscard]] AddressSpace& bus() {
-        return bus_;
+        return nodes_.front()->bus;
     }
     // The virtual clock, current within device events (it lags the CPU between them).
     [[nodiscard]] const VirtualClock& clock() const {
@@ -311,15 +317,33 @@ class Ip27Machine {
     void update_next_event();
     // Completed cycles of the CPU furthest behind: virtual time in CPU cycles.
     [[nodiscard]] std::uint64_t lowest_cycles() const {
-        return cpu_b_ ? std::min(cpu_a_.cpu.cycles(), cpu_b_->cpu.cycles()) : cpu_a_.cpu.cycles();
+        std::uint64_t lowest = std::numeric_limits<std::uint64_t>::max();
+        for (const Processor* p : processors_) {
+            if (p != nullptr) {
+                lowest = std::min(lowest, p->cpu.cycles());
+            }
+        }
+        return lowest;
+    }
+    // Completed cycles of the CPU furthest behind other than the running one.
+    [[nodiscard]] std::uint64_t lowest_other_cycles() const {
+        std::uint64_t lowest = std::numeric_limits<std::uint64_t>::max();
+        for (unsigned i = 0; i < processors_.size(); ++i) {
+            if (processors_[i] != nullptr && i != running_) {
+                lowest = std::min(lowest, processors_[i]->cpu.cycles());
+            }
+        }
+        return lowest;
     }
     // Runs processors_[running_] up to stop_cycle_.
     void run_processor(bool observed);
     void step(Processor& processor);
-    void run_two(std::uint64_t cycles);
-    void map_system_windows();
-    void reset_cpus(ResetKind kind);
-    void flash_mode_changed();
+    void run_many(std::uint64_t cycles);
+    // How many CPUs are installed.
+    [[nodiscard]] unsigned cpu_count() const {
+        return static_cast<unsigned>(std::ranges::count_if(
+            processors_, [](const Processor* p) { return p != nullptr; }));
+    }
 
     // The Hub's flash PROM interface (IP27.adoc "Boot PROM").
     class FlashInterface final : public MmioTarget {
@@ -343,6 +367,39 @@ class Ip27Machine {
         FlashInterface& interface;
     };
 
+    // A node board: its Hub, memory, boot PROM, and CPUs, and the node's view of physical
+    // addresses (SMP.adoc "S5: the second node").
+    struct Node {
+        Node(Ip27Machine& machine, unsigned index, unsigned slot, std::span<const std::byte> prom);
+        Node(const Node&) = delete;
+        Node& operator=(const Node&) = delete;
+
+        void map_system_windows();
+        void flash_mode_changed();
+        void reset_cpus(ResetKind kind);
+
+        Ip27Machine& machine;
+        unsigned index;
+        AddressSpace bus{ByteOrder::big};
+        MemoryBlock memory;
+        MemoryBlock flash;
+        devices::Am29f080 flash_device;
+        FlashInterface flash_interface;
+        FlashCommands flash_commands;
+        // The Hub's PCF8584 on the module's I2C bus (IP27.adoc "Junk bus").
+        devices::Pcf8584 i2c;
+        DirectoryMemory directory;
+        Hub hub;
+        Processor cpu_a;
+        std::optional<Processor> cpu_b;
+        SynchronizedTarget synchronized_hub;
+        SynchronizedTarget synchronized_hub_b;
+        SynchronizedTarget synchronized_flash;
+        SynchronizedTarget synchronized_flash_commands;
+        std::array<std::optional<SynchronizedTarget>, xtalk::widget_count> xtalk_windows;
+        std::array<std::optional<SynchronizedTarget>, 7> big_windows;
+    };
+
     Ip27Config config_;
     // Cycle counts to virtual time for the CPU clock, on every synchronized access.
     CycleTime cpu_time_{config_.cpu_clock};
@@ -352,38 +409,19 @@ class Ip27Machine {
     VirtualClock clock_;
     Tracer tracer_{clock_};
     Scheduler scheduler_{clock_, tracer_};
-    AddressSpace bus_{ByteOrder::big};
-    MemoryBlock memory_;
-    MemoryBlock flash_;
-    devices::Am29f080 flash_device_{scheduler_, tracer_, flash_.bytes(),
-                                    [this] { flash_mode_changed(); }};
-    FlashInterface flash_interface_{flash_device_, tracer_};
-    FlashCommands flash_commands_{flash_interface_};
     // The BaseIO board's flash PROM (IP27.adoc "Bridge"): erased until an image is loaded.
     MemoryBlock baseio_flash_{devices::Am29f080::size};
     devices::Am29f080 baseio_flash_device_{
         scheduler_, tracer_, baseio_flash_.bytes(), {}, "baseio.flash"};
-    // The junk-bus I2C bus: the Hub's PCF8584, the system controller, and its NVRAM.
+    // The module's I2C bus: each node's PCF8584, the system controller, and its NVRAM.
     devices::I2cBus i2c_bus_;
-    devices::Pcf8584 i2c_{scheduler_, tracer_, i2c_bus_};
     devices::I2cEeprom controller_nvram_;
     devices::Elsc elsc_{scheduler_, tracer_, i2c_bus_};
-    DirectoryMemory directory_;
-    Hub hub_{scheduler_,
-             tracer_,
-             config_.hub_revision,
-             node_slot_id(config_.node_slot),
-             config_.cpus,
-             i2c_,
-             directory_,
-             bus_,
-             [this] { reset_cpus(ResetKind::cold); }};
-    Processor cpu_a_;
-    std::optional<Processor> cpu_b_;
-    // Slice-indexed; B is null with one CPU.
-    std::array<Processor*, 2> processors_{};
-    // LL/SC and host-page coherence between the two CPUs (unused with one).
+    // LL/SC and host-page coherence between the CPUs (unused with one).
     mips::Coherence coherence_;
+    std::vector<std::unique_ptr<Node>> nodes_;
+    // Indexed node * 2 + slice; null where no CPU is installed.
+    std::array<Processor*, 2> processors_{};
     // The CPU run() is running.
     unsigned running_{};
     // request_stop() was called during this run.
@@ -391,10 +429,6 @@ class Ip27Machine {
     // Where the running CPU must yield to the other (cpu_slice ahead of it).
     std::uint64_t slice_end_cycle_{std::numeric_limits<std::uint64_t>::max()};
     mips::ExecutionEngine engine_{mips::ExecutionEngine::tier0};
-    SynchronizedTarget synchronized_hub_{*this, hub_.port(0)};
-    SynchronizedTarget synchronized_hub_b_{*this, hub_.port(1)};
-    SynchronizedTarget synchronized_flash_{*this, flash_interface_};
-    SynchronizedTarget synchronized_flash_commands_{*this, flash_commands_};
     // The module's crossbow and the Hub's crosstalk windows (IP27.adoc "Xtalk").
     devices::Xbow xbow_{tracer_};
     // The BaseIO board's Bridge, on Crossbow port `baseio_port`.
@@ -425,8 +459,6 @@ class Ip27Machine {
     devices::Nic ethernet_nic_{0x91, std::uint64_t{config_.ethernet_address[3]} << 16 |
                                          std::uint64_t{config_.ethernet_address[4]} << 8 |
                                          config_.ethernet_address[5]};
-    std::array<std::optional<SynchronizedTarget>, xtalk::widget_count> xtalk_windows_;
-    std::array<std::optional<SynchronizedTarget>, 7> big_windows_;
     // First CPU cycle count at which a pending event is due.
     std::uint64_t next_event_cycle_{};
     // Where run() stops; the interpreter runs uninterrupted up to the lesser of the two.

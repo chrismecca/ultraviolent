@@ -41,6 +41,21 @@ std::optional<std::span<const std::byte>> StateImage::get_bytes(std::string_view
     return std::span<const std::byte>{found->second};
 }
 
+void StateImage::put_image(std::string_view prefix, const StateImage& other) {
+    for (const auto& [key, value] : other.fields_) {
+        put_bytes(std::string{prefix} + key, value);
+    }
+}
+
+StateImage StateImage::sub_image(std::string_view prefix) const {
+    StateImage image;
+    for (auto it = fields_.lower_bound(prefix); it != fields_.end() && it->first.starts_with(prefix);
+         ++it) {
+        image.fields_.emplace(it->first.substr(prefix.size()), it->second);
+    }
+    return image;
+}
+
 void StateImage::put_sparse(const std::string& key, std::span<const std::byte> bytes) {
     std::vector<std::uint64_t> pages;
     std::vector<std::byte> contents;

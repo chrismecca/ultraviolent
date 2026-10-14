@@ -51,6 +51,12 @@ class StateImage {
     // `bytes` is unchanged when it did not.
     bool get_sparse(const std::string& key, std::span<std::byte> bytes) const;
 
+    // Every field of `other`, with `prefix` before its key: a second instance of a component
+    // whose fields have fixed names saves into its own image, merged here.
+    void put_image(std::string_view prefix, const StateImage& other);
+    // The fields whose keys start with `prefix`, with it removed.
+    [[nodiscard]] StateImage sub_image(std::string_view prefix) const;
+
     [[nodiscard]] std::vector<std::byte> serialize() const;
     [[nodiscard]] static std::optional<StateImage> deserialize(std::span<const std::byte> data);
 

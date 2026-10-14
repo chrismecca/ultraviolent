@@ -54,3 +54,22 @@ const test::Registration sparse{"state_image.sparse_round_trip", [](test::Contex
                                 }};
 
 } // namespace
+
+namespace {
+
+const test::Registration prefixed{
+    "state_image.prefixed_images", [](test::Context& t) {
+        StateImage part;
+        part.put("hub.x", std::uint64_t{5});
+        StateImage image;
+        image.put("hub.x", std::uint64_t{1});
+        image.put_image("node1.", part);
+        std::uint64_t value = 0;
+        t.check(image.get("node1.hub.x", value) && value == 5);
+        const StateImage back = image.sub_image("node1.");
+        t.check(back.get("hub.x", value) && value == 5, "the prefix is removed");
+        t.check(!back.get("node1.hub.x", value), "only the prefixed fields");
+        t.check(image.sub_image("node2.").serialize() == StateImage{}.serialize(), "none match");
+    }};
+
+} // namespace
