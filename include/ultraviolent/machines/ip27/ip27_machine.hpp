@@ -46,8 +46,18 @@
 
 namespace ultraviolent::ip27 {
 
-// Configuration of the one-node, one-CPU IP27 (IP27-TARGET.adoc). Values marked hypothesis in
-// IP27.adoc are defaults, not constants.
+// The module's chassis (IP27.adoc "Machine type"): the slot IDs its node slots give the node
+// boards, which select the PROM's Crossbow tables.
+enum class ModuleType : std::uint8_t {
+    // A rack module: node slots n1-n4 (slot IDs 7-4) on two Crossbows; the BaseIO on port 8.
+    rack,
+    // A deskside module, as slate: node slots n1 and n2 (slot IDs 3 and 2) on one Crossbow,
+    // ports 0xa and 9; the BaseIO on port 15.
+    deskside,
+};
+
+// Configuration of the IP27 (IP27-TARGET.adoc; SMP.adoc). Values marked hypothesis in IP27.adoc
+// are defaults, not constants.
 struct Ip27Config {
     // Installed memory, filling 512 MB banks from bank 0; a final partial bank must be a power
     // of two of at least 8 MB (memory_bank_sizes).
@@ -66,8 +76,12 @@ struct Ip27Config {
     // hypothesis: Hub 2.4 (IP27.adoc "Hub").
     unsigned hub_revision{Hub::default_revision};
     // The node board's module slot, n1-n4 (IP27.adoc "Machine type"); n1 like slate's first
-    // node board.
+    // node board. With two nodes they are n1 and n2.
     unsigned node_slot{1};
+    ModuleType module{ModuleType::rack};
+    // Node boards: 1, or 2 in a deskside module (SMP.adoc "S5: the second node"). Each has
+    // `memory_bytes` and `cpus`.
+    unsigned nodes{1};
     // CPUs on the node board, from slice A: 1 or 2 (SMP.adoc; slate's node boards hold two).
     unsigned cpus{1};
     // With two CPUs, how far (in processor cycles) the one running may get ahead of the other
@@ -102,18 +116,18 @@ struct BoardIdentity {
 // The NIC memory holding `board`'s manufacturing record (IP27.adoc "NICs"): pages 0 and 1.
 std::array<std::uint8_t, devices::Nic::memory_size> board_nic_memory(const BoardIdentity& board);
 
-// The BaseIO board's Crossbow port: io1 of a rack module, the PROM's slot table for the node
-// slots this machine offers (IP27.adoc "Crossbow"). Slate, a deskside, has it on port 15.
-inline constexpr unsigned baseio_port = 0x8;
+// The BaseIO board's Crossbow port, the module's io1 (IP27.adoc "Crossbow"): 8 in a rack
+// module, 15 in a deskside (slate).
+unsigned baseio_port(ModuleType module);
 
 // The Crossbow port the Hub of node slot n`slot` is cabled to (IP27.adoc "Crossbow").
-unsigned hub_xbow_port(unsigned slot);
+unsigned hub_xbow_port(ModuleType module, unsigned slot);
 
 // The system controller NVRAM's contents at first power-on (IP27.adoc "System controller").
 std::array<std::byte, devices::I2cEeprom::size> initial_controller_nvram(const Ip27Config& config);
 
 // MD_SLOTID_USTAT slot ID of node slot n`slot` (IP27.adoc "Machine type").
-unsigned node_slot_id(unsigned slot);
+unsigned node_slot_id(ModuleType module, unsigned slot);
 
 // The installed size of each memory bank for `memory_bytes`, or nothing when it cannot be
 // populated that way.
@@ -216,7 +230,7 @@ class Ip27Machine {
     // Ends the current run() at the next cycle boundary (for host backends, such as a console
     // script that has run out).
     void request_stop() {
-        run_end_cycle_ = processors_[running_]->cpu.cycles();
+        run_end_cycle_ = installed_[running_]->cpu.cycles();
         stop_cycle_ = run_end_cycle_;
         stop_requested_ = true;
     }
@@ -227,15 +241,18 @@ class Ip27Machine {
         invariant(index < processors_.size() && processors_[index] != nullptr, "no such CPU");
         return processors_[index]->cpu;
     }
-    // The first node's flash PROM contents, for host persistence of the PROM log (IP27.adoc
-    // "Boot PROM"). load_flash replaces them before the machine runs.
-    [[nodiscard]] std::span<const std::byte> flash_contents() const {
-        return nodes_.front()->flash.bytes();
+    [[nodiscard]] unsigned node_count() const {
+        return static_cast<unsigned>(nodes_.size());
     }
-    [[nodiscard]] bool flash_dirty() const {
-        return nodes_.front()->flash_device.dirty();
+    // A node's flash PROM contents, for host persistence of the PROM log (IP27.adoc "Boot
+    // PROM"). load_flash replaces them before the machine runs.
+    [[nodiscard]] std::span<const std::byte> flash_contents(unsigned node = 0) const {
+        return nodes_.at(node)->flash.bytes();
     }
-    void load_flash(std::span<const std::byte> contents);
+    [[nodiscard]] bool flash_dirty(unsigned node = 0) const {
+        return nodes_.at(node)->flash_device.dirty();
+    }
+    void load_flash(std::span<const std::byte> contents, unsigned node = 0);
     // The BaseIO's own flash PROM (the IO6 PROM, behind the Bridge's external flash port),
     // loaded with a promgen image such as io6prom.img (at most 1 MB). Without it the port is
     // empty and the IP27 PROM uses its internal copy of the BASEIO PROM.
@@ -317,32 +334,38 @@ class Ip27Machine {
     void update_next_event();
     // Completed cycles of the CPU furthest behind: virtual time in CPU cycles.
     [[nodiscard]] std::uint64_t lowest_cycles() const {
-        std::uint64_t lowest = std::numeric_limits<std::uint64_t>::max();
-        for (const Processor* p : processors_) {
-            if (p != nullptr) {
-                lowest = std::min(lowest, p->cpu.cycles());
-            }
+        // Runs on every device access: kept small enough to inline for one and two CPUs.
+        if (cpu_count_ == 1) [[likely]] {
+            return installed_[0]->cpu.cycles();
         }
-        return lowest;
+        if (cpu_count_ == 2) {
+            return std::min(installed_[0]->cpu.cycles(), installed_[1]->cpu.cycles());
+        }
+        return lowest_of_several();
     }
+    [[nodiscard]] std::uint64_t lowest_of_several() const;
     // Completed cycles of the CPU furthest behind other than the running one.
-    [[nodiscard]] std::uint64_t lowest_other_cycles() const {
+    [[nodiscard, gnu::always_inline]] std::uint64_t lowest_other_cycles() const {
+        if (cpu_count_ == 2) {
+            return installed_[1 - running_]->cpu.cycles();
+        }
         std::uint64_t lowest = std::numeric_limits<std::uint64_t>::max();
-        for (unsigned i = 0; i < processors_.size(); ++i) {
-            if (processors_[i] != nullptr && i != running_) {
-                lowest = std::min(lowest, processors_[i]->cpu.cycles());
+        for (unsigned i = 0; i < cpu_count_; ++i) {
+            if (i != running_) {
+                lowest = std::min(lowest, installed_[i]->cpu.cycles());
             }
         }
         return lowest;
     }
-    // Runs processors_[running_] up to stop_cycle_.
+    // Runs installed_[running_] up to stop_cycle_.
     void run_processor(bool observed);
     void step(Processor& processor);
     void run_many(std::uint64_t cycles);
+    // Rebuilds every node's view of physical addresses (Node::map_system_windows).
+    void map_views();
     // How many CPUs are installed.
     [[nodiscard]] unsigned cpu_count() const {
-        return static_cast<unsigned>(std::ranges::count_if(
-            processors_, [](const Processor* p) { return p != nullptr; }));
+        return cpu_count_;
     }
 
     // The Hub's flash PROM interface (IP27.adoc "Boot PROM").
@@ -374,9 +397,17 @@ class Ip27Machine {
         Node(const Node&) = delete;
         Node& operator=(const Node&) = delete;
 
+        // Rebuilds the node's view from the node IDs.
         void map_system_windows();
+        void map_aliases();
+        // `node`'s memory, PROM, directory, Hub registers, and crosstalk windows at `base`.
+        void map_resources(Node& node, std::uint64_t base);
+        void map_flash(std::uint64_t address);
         void flash_mode_changed();
         void reset_cpus(ResetKind kind);
+        // The node's own components, under their usual field names.
+        void save_state(StateImage& image) const;
+        [[nodiscard]] bool load_state(const StateImage& image);
 
         Ip27Machine& machine;
         unsigned index;
@@ -421,8 +452,11 @@ class Ip27Machine {
     mips::Coherence coherence_;
     std::vector<std::unique_ptr<Node>> nodes_;
     // Indexed node * 2 + slice; null where no CPU is installed.
-    std::array<Processor*, 2> processors_{};
-    // The CPU run() is running.
+    std::array<Processor*, 4> processors_{};
+    // The installed CPUs in index order, the first cpu_count_ entries.
+    std::array<Processor*, 4> installed_{};
+    unsigned cpu_count_{};
+    // The CPU run() is running, an index into installed_.
     unsigned running_{};
     // request_stop() was called during this run.
     bool stop_requested_{};
@@ -432,7 +466,7 @@ class Ip27Machine {
     // The module's crossbow and the Hub's crosstalk windows (IP27.adoc "Xtalk").
     devices::Xbow xbow_{tracer_};
     // The BaseIO board's Bridge, on Crossbow port `baseio_port`.
-    devices::Bridge baseio_bridge_{tracer_, baseio_port};
+    devices::Bridge baseio_bridge_{tracer_, baseio_port(config_.module)};
     // The BaseIO board's NICs on the Bridge's NIC bus: the MIO daughterboard and the BASEIO
     // board, DS2502 parts (family 0x09) with synthetic laser serial numbers and slate's
     // manufacturing records (IP27.adoc "NICs", OBS-SLATE-0004).

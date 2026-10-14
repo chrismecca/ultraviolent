@@ -12,8 +12,8 @@ and tier 1. One CPU stays the default. After the assessment with the user (2026-
 two-CPU reference was hardened (2026-10-13): two-CPU benchmark workloads (`boot2`, `cpu2`,
 `mix2`, `reboot2`) agree on all three engines, and three defects were fixed (tracing changed
 the schedule; the CPUs left a local reset out of phase; the ISP1020 lost a completion).
-Next, chosen with the user (2026-10-13): S5, the second node, before S4.** Next: see Next
-task.
+Next, chosen with the user (2026-10-13): S5, the second node, before S4; S5.0 and S5.1
+(nodes and routing, link down) are done (2026-10-14).** Next: see Next task.
 
 Before it, the performance baseline (ROADMAP "After RC-IP27"; started 2026-09-28). The repository is public
 at RC-IP27 (the user chose no tag or release). Tier 0 stages A-H are done (2026-10-08): tier
@@ -438,16 +438,23 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **S5: the second node (SMP.adoc "S5: the second node (plan)").** Reviewed with the
-  user 2026-10-13: S5 before S4; the default slice stays 180 cycles (SMP.adoc "Decisions
-  after the hardening"); the ISP1020 interrupt rule stays a hypothesis until the experiment
-  in SMP.adoc "Open questions for slate" runs on slate (needs the user's agreement; no
-  public document defines it, IP27.adoc "ISP1020"). Next: S5.0, observing the PROM's
-  discovery, node-ID assignment, and global-master choice; then S5.1 (nodes and routing,
-  link down, no guest-visible change with one node). The plan is reviewed with the user
-  before S5.2. slate's target is the Origin 2000 deskside module (ADR-021): an Onyx2
-  deskside is that module with graphics; the PROM's other personality, SN00 (Origin 200),
-  is not a target (IP27.adoc "Machine type").
+. **Review with the user, then S5.2: the link and discovery (SMP.adoc "S5: the second
+  node (plan)").** Agreed with the user 2026-10-13: S5 before S4; the default slice stays 180
+  cycles (SMP.adoc "Decisions after the hardening"); the ISP1020 interrupt rule stays a
+  hypothesis until the experiment in SMP.adoc "Open questions for slate" runs on slate (needs
+  the user's agreement). S5.0 and S5.1 are done (2026-10-14, SMP.adoc "Progress"): the
+  machine is built of nodes, `--module deskside --nodes 2` gives slate's topology with the
+  link down, each node's address view follows the node IDs, and every one- and two-CPU
+  digest is unchanged. For the review: the S5.2 approach (model the NI link and vector PIO
+  from the IRIX-derived header and the PROM's observed protocol, then follow the PROM's
+  discovery by its messages and Hub trace); whether to make the deskside module the default
+  (slate's shape; the installed IRIX boots unchanged on it, but every digest and snapshot
+  changes); the node NICs (each Hub's MicroLAN has none yet, and discovery identifies Hubs
+  by NIC). slate (an Onyx2 deskside, which is the Origin 2000 deskside module with graphics;
+  the target, ADR-021) is needed for: `ls -l /hw/nodenum`, POD reads of NI_STATUS_REV_ID,
+  NI_PORT_PARMS, and IIO_ILCSR on each node, and with the user's agreement the ISP1020
+  experiment; and, if the user agrees, a cold-boot capture with the system controller's
+  verbose debug switch.
 . **Done: the multiprocessor plan and S0-S3 (2026-10-12).** The history of this item: One CPU now
   runs above real time on every workload at 180 MHz (1.20-1.68x) and at 200 MHz
   (1.08-1.51x); at 250 MHz `boot` is at 0.86x (device-access-bound firmware delay loops),
@@ -1380,4 +1387,37 @@ Unknowns: the real ISP1020 firmware's interrupt rule (hypothesis); other devices
 Best checkpoint: boot2 and the two-CPU fixture (bench.py fixture --cpus 2).
 Next step: the user's review of the order (S5 before S4) and the default slice; then the S5
   plan from slate.
+----
+
+----
+Date: 2026-10-13/14
+Milestone: SMP IP27, S5.0 and S5.1 (second node, link down)
+Hypothesis: a second node needs only per-node address views keyed by node ID, shared code
+  tracking and coherence, and N-CPU scheduling; the module type is not a free choice.
+Evidence: PROM disassembly (vector PIO, discovery, slot-code and Crossbow-table functions),
+  a load watch on the running PROM (scratch build), deskside boots of the installed IRIX,
+  LED traces of two-node PROM runs, LINUX addrs.h and hubni.h, perf profiles.
+Changed: Ip27Machine built of Nodes; ModuleType (rack, deskside), --module, --nodes,
+  repeatable --flash; Hub node ID writable (hypothesis) with a change callback and trace
+  names; AddressSpace::clear and share_code_writes; Coherence for four CPUs with a CPU
+  index; StateImage put_image/sub_image; per-node scheduler event names; run_many; S5 plan,
+  observations, and progress in SMP.adoc; IP27.adoc "Machine type", Crossbow, snapshots;
+  SMP.adoc slice decision; IP27.adoc ISP1020 evidence search.
+Tests: ip27.two_nodes.views_follow_node_ids, .four_cpus_take_turns, .snapshot,
+  address_space.clear, .shared_code_writes, state_image.prefixed_images; dev and asan
+  green; all eight benchmark digests unchanged; speed 0.98-1.00x of the baselines (PGO,
+  M cycles/s: prom 296, boot 211, cpu 306, fs 298, boot2 211, cpu2 229, mix2 247, reboot2
+  212).
+Newly proven: the PROM selects the deskside Crossbow table from the node's slot ID (IDs 3
+  and 2 are deskside n1 and n2), and the installed IRIX boots unchanged on that layout; the
+  global master assigns node IDs through each Hub's NI_SCRATCH_REG1 over vector PIO. The
+  device-access path is that sensitive: an out-of-line synchronize_time cost `prom` 3.8%, a
+  loop over four CPU slots there cost `boot2` 12%, and Coherence looping over four CPUs on
+  every store about 3% (now a compact CPU list, a two-CPU fast path, and a held-reservation
+  mask).
+Disproven: "what selects the deskside table is not known" (IP27.adoc, 2026-09-27).
+Unknowns: who writes the node ID field and when (S5.2 will show it); the link's register
+  behavior; the node NICs' effect on discovery; whether the ISP1020 rule holds on slate.
+Best checkpoint: unchanged (one- and two-CPU checkpoints).
+Next step: the user's review of the S5.2 approach and the deskside default; then S5.2.
 ----

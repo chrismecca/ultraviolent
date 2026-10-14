@@ -6,6 +6,7 @@
 #include <ultraviolent/devices/i2c.hpp>
 
 #include <cstdint>
+#include <string_view>
 
 namespace ultraviolent::devices {
 
@@ -23,7 +24,9 @@ namespace ultraviolent::devices {
 // byte on the bus. Slave operation (being addressed) is not modeled.
 class Pcf8584 final : public I2cMonitor {
   public:
-    Pcf8584(Scheduler& scheduler, Tracer& tracer, I2cBus& bus);
+    // `event_prefix` keeps a second controller's scheduler event distinct (snapshots name
+    // events).
+    Pcf8584(Scheduler& scheduler, Tracer& tracer, I2cBus& bus, std::string_view event_prefix = {});
 
     void reset();
 

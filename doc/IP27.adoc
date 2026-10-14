@@ -47,7 +47,8 @@ HSPEC, IO, MSPEC, and UNCAC are uncached requests with attributes 0, 1, 2, and 3
 from PRM Table 3-4 and UM 16.2, 6.23.
 * The node ID (NASID) occupies physical address bits 39:32, and node IDs are 0 to 255 (PRM
   §1.2.1, §1.2.2, Table 3-4 `n:` examples): `documented`. Before node IDs are assigned they
-  are all zero (PRM §1.2.3). The single-node target has NASID 0 throughout.
+  are all zero (PRM §1.2.3). With one node the NASID stays 0; with two, each node's view of
+  addresses follows the node IDs (SMP.adoc "S5: the second node", "Progress" S5.1).
 * Memory banks are 512 MB apart: `b:#` adds bank × 512 MB (PRM Table 3-4). `documented`.
 
 === HSPEC (uncached, attribute 0)
@@ -272,7 +273,8 @@ to a Crossbow. The documented control fields (max_burst, max_retry, bm8, llp_en,
 null_to) are stored. `inferred` from the IRIX-derived `hubio.h`. The PROM sets wrm_reset
 during LED `0x5d` (`observed`).
 |`0x400150`, `0x400158` |IIO_SCRATCH_REG0/1 |Scratch storage.
-|`0x600000` |NI_STATUS_REV_ID |Node ID 0 (PRM 1.2.3, `documented`); chip ID 0 = Hub and
+|`0x600000` |NI_STATUS_REV_ID |Node ID 0 at reset (PRM 1.2.3, `documented`), written by
+software (`hypothesis`; a change rebuilds the nodes' address views); chip ID 0 = Hub and
 revision from `Ip27Config::hub_revision`, default 6 = Hub 2.4 (IRIX-derived `sn0/hub.h`;
 the revision is a `hypothesis`); link down, reason "never came out of reset" (`hypothesis`:
 no CrayLink cable). The PROM reads the node ID with mask `0x1ff00` (`observed`).
@@ -617,8 +619,9 @@ register in its low half, `hypothesis`).
   `0xb` io4, `0xc` io2, `0xd` io6, `0xe` io5, `0xf` io3; Crossbow 1 holds n2, n4, io7–io12.
   The rack tables agree with the PROM's Hub widget numbers (n1 9, n2 `0xa`, n3 `0xa`,
   n4 9). With the BaseIO on port 15 (slate's port), this machine's PROM named it io3, so
-  it uses the rack table. What selects the deskside table is not known. The machine
-  therefore cables the BaseIO to port 8, the rack module's io1 (`ip27::baseio_port`).
+  it uses the rack table. The node's slot ID selects the deskside table ("Machine type").
+  A rack module (the default) cables the BaseIO to port 8, its io1; `--module deskside`
+  puts it on 15 and the node in deskside n1 (`ip27::baseio_port`, `hub_xbow_port`).
   `observed` after the move: the PROM reports "Console has moved from
   /hw/module/1/slot/io3 to /hw/module/1/slot/io1", walks SCSI on `.../io1`, and IRIX
   installed with the old topology boots unchanged.
@@ -1065,6 +1068,9 @@ This observes only; the address is specific to that image and is never used by t
 FPU, scheduler events, Hub, PCF8584, and memory as sparse 64 KiB pages). Loading checks the
 memory size, processor clock, and an FNV-1a hash of the flash, and fails on a mismatch. A
 resumed run is bit-identical to an uninterrupted one (`ip27.snapshot_resumes_exactly`).
+A two-CPU snapshot adds `machine.cpus` and CPU B's fields under `slice_b.`; a two-node one
+adds `machine.nodes` and the second node's CPUs, Hub, PCF8584, flash, directory, and memory
+under `node1.` (`ip27.two_nodes.snapshot`). A machine of another shape refuses it.
 
 Snapshots only shorten exploration (for example, skipping the 26 s ELSC wait). A checkpoint
 in STATUS.adoc is established only by a run from power-on.

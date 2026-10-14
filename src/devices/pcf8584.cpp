@@ -23,9 +23,10 @@ constexpr std::uint64_t scl_hertz[] = {90'000, 45'000, 11'000, 1'500};
 
 } // namespace
 
-Pcf8584::Pcf8584(Scheduler& scheduler, Tracer& tracer, I2cBus& bus)
+Pcf8584::Pcf8584(Scheduler& scheduler, Tracer& tracer, I2cBus& bus, std::string_view event_prefix)
     : scheduler_{scheduler}, tracer_{tracer}, bus_{bus},
-      transfer_done_{scheduler.add_event("pcf8584.byte", [this] { finish_transfer(); })} {
+      transfer_done_{scheduler.add_event(std::string{event_prefix} + "pcf8584.byte",
+                                         [this] { finish_transfer(); })} {
     bus_.attach(static_cast<I2cMonitor&>(*this));
     reset();
 }

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <string>
 #include <utility>
 
 namespace ultraviolent::ip27 {
@@ -50,9 +51,11 @@ class Hub final {
     // node's physical address space, which the block-transfer engines read and write.
     // `slot_id` is the backplane slot ID the node board reads in MD_SLOTID_USTAT bits 2:0.
     // `cpu_count` CPUs (1 or 2) are installed, from slice A: PI_CPU_PRESENT_A and _B.
+    // `event_prefix` keeps a second Hub's scheduler events distinct (snapshots name events).
     Hub(Scheduler& scheduler, Tracer& tracer, unsigned revision, unsigned slot_id,
         unsigned cpu_count, devices::Pcf8584& i2c, DirectoryMemory& directory,
-        AddressSpace& memory, std::function<void()> reset_node);
+        AddressSpace& memory, std::function<void()> reset_node,
+        std::string_view event_prefix = {});
 
     void reset(ResetKind kind);
 
@@ -82,6 +85,20 @@ class Hub final {
     // Snapshot support (StateImage), register by register.
     void save_state(StateImage& image) const;
     void load_state(const StateImage& image);
+
+    // The node ID in NI_STATUS_REV_ID (bits 16:8), which places the node in the system's
+    // physical address space (IP27.adoc "Node address space").
+    [[nodiscard]] unsigned node_id() const {
+        return static_cast<unsigned>(nsri_settings_ >> 8) & 0x1ff;
+    }
+    // Prefix for this Hub's trace lines, such as "n2 " (none with one node).
+    void set_trace_name(std::string name) {
+        trace_name_ = std::move(name);
+    }
+    // Called after the node ID changes, so the machine can route requests by it.
+    void connect_node_id(std::function<void()> changed) {
+        node_id_changed_ = std::move(changed);
+    }
 
     // The register window as CPU `slice` (0 for A, 1 for B) sees it.
     [[nodiscard]] MmioTarget& port(unsigned slice) {
@@ -145,6 +162,7 @@ class Hub final {
     void run_bte(unsigned engine);
     void raise_interrupt(unsigned level);
     void local_reset();
+    void set_nsri_settings(std::uint64_t value);
     void update_interrupts();
 
     Scheduler& scheduler_;
@@ -155,6 +173,8 @@ class Hub final {
     DirectoryMemory& directory_;
     AddressSpace& memory_;
     std::function<void()> reset_node_;
+    std::function<void()> node_id_changed_;
+    std::string trace_name_;
     xtalk::Link* xtalk_{};
     std::array<std::uint64_t, 2> cpu_present_{};
     std::array<Port, 2> ports_{};

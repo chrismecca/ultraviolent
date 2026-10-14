@@ -107,7 +107,7 @@ std::expected<void, AccessFault> AddressSpace::write(PhysicalAddress address, Ac
             return std::unexpected(AccessFault::read_only);
         }
         if (memory->block->note_write(memory->block_offset + offset, size)) {
-            ++code_writes_;
+            ++*code_writes_;
         }
         store_unsigned(memory->bytes.subspan(offset, size), value, byte_order_);
         return {};
@@ -140,7 +140,7 @@ std::span<std::byte> AddressSpace::writable_memory_bytes(PhysicalAddress address
     }
     const std::uint64_t offset = address - mapping->range.base;
     if (memory->block->note_write(memory->block_offset + offset, size)) {
-        ++code_writes_;
+        ++*code_writes_;
     }
     return memory->bytes.subspan(offset, size);
 }
@@ -168,6 +168,12 @@ AddressSpace::mmio_range(PhysicalAddress address, std::uint64_t size, unsigned r
         return std::nullopt;
     }
     return MmioRange{(*ports)[requester], address - mapping->range.base};
+}
+
+void AddressSpace::clear() {
+    mappings_.clear();
+    ++generation_;
+    last_hit_ = 0;
 }
 
 const AddressSpace::Mapping* AddressSpace::find(PhysicalAddress address) const {

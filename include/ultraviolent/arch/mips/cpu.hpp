@@ -136,18 +136,19 @@ class Cpu final : public InterruptSink {
     Cpu(const Cpu&) = delete;
     Cpu& operator=(const Cpu&) = delete;
 
-    // Shares memory with other CPUs through `coherence` (SMP.adoc): LL/SC reservations and
-    // writable host pages follow their stores. Call before running. Without it the CPU is
-    // the bus's only processor.
-    void connect_coherence(Coherence& coherence) {
+    // Shares memory with other CPUs through `coherence` (SMP.adoc), as its CPU `index`
+    // (by default the requester number): LL/SC reservations and writable host pages follow
+    // their stores. Call before running. Without it the CPU is the bus's only processor.
+    void connect_coherence(Coherence& coherence, std::optional<unsigned> index = {}) {
         coherence_ = &coherence;
+        coherence_index_ = index.value_or(requester_);
         seen_coherence_ = coherence.generation();
     }
     // LL at `address` succeeded: with other CPUs, reserve its line.
     void note_load_linked(std::uint64_t address);
     // Whether no other CPU has broken this CPU's reservation since its LL.
     [[nodiscard]] bool reservation_intact() const {
-        return coherence_ == nullptr || coherence_->held(requester_);
+        return coherence_ == nullptr || coherence_->held(coherence_index_);
     }
 
     // power_on and cold take the Cold Reset exception; warm takes the Soft Reset exception.
@@ -701,6 +702,7 @@ class Cpu final : public InterruptSink {
     AddressSpace& bus_;
     unsigned requester_;
     Coherence* coherence_{};
+    unsigned coherence_index_{};
     std::uint64_t seen_coherence_{};
     Tracer& tracer_;
     ProcessorModel model_;

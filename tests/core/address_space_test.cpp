@@ -221,3 +221,46 @@ const test::Registration write_target{
     }};
 
 } // namespace
+
+namespace {
+
+// A machine rebuilding its decoding (an IP27 node whose ID changed) clears the space; the
+// generation tells cached translations to go.
+const test::Registration clear{"address_space.clear", [](test::Context& t) {
+                                   MemoryBlock ram{0x1000};
+                                   AddressSpace space{ByteOrder::big};
+                                   t.check(space.map_memory({ram_base, 0x1000}, ram, 0,
+                                                            MemoryAccess::read_write)
+                                               .has_value());
+                                   const std::uint64_t before = space.generation();
+                                   space.clear();
+                                   t.check(space.generation() != before, "generation advances");
+                                   t.check(!space.read(ram_base, AccessWidth::bits32),
+                                           "nothing is mapped");
+                                   t.check(space.map_memory({ram_base, 0x1000}, ram, 0,
+                                                            MemoryAccess::read_write)
+                                               .has_value(),
+                                           "the range can be mapped again");
+                               }};
+
+// Two spaces that map the same memory count writes to its code frames together, so a CPU on
+// either sees a write made through the other.
+const test::Registration shared_code_writes{
+    "address_space.shared_code_writes", [](test::Context& t) {
+        MemoryBlock ram{0x2000};
+        AddressSpace first{ByteOrder::big};
+        AddressSpace second{ByteOrder::big};
+        second.share_code_writes(first);
+        for (AddressSpace* space : {&first, &second}) {
+            t.check(space->map_memory({ram_base, 0x2000}, ram, 0, MemoryAccess::read_write)
+                        .has_value());
+        }
+        ram.mark_code(0x1000);
+        t.check(second.write(PhysicalAddress{0x1008}, AccessWidth::bits32, 1).has_value());
+        t.check_equal(first.code_writes(), std::uint64_t{1});
+        t.check_equal(second.code_writes(), std::uint64_t{1});
+        t.check(first.write(PhysicalAddress{0x8}, AccessWidth::bits32, 1).has_value());
+        t.check_equal(second.code_writes(), std::uint64_t{1}); // not a code frame
+    }};
+
+} // namespace

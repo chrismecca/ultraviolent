@@ -59,6 +59,7 @@ void usage() {
         "                    [--engine reference|tier0|tier1] [--engine-statistics]\n"
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
         "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
+        "                    [--module rack|deskside] [--nodes 1|2]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
         "from a snapshot. Snapshots are for exploration; checkpoints need a cold run.\n"
@@ -100,6 +101,9 @@ void usage() {
         "CPUs take turns, the one behind running until it is --cpu-slice cycles ahead\n"
         "(default 180, 1 us at 180 MHz; 1 alternates every cycle). --cycles counts each\n"
         "CPU's cycles.\n"
+        "--module deskside puts the node in a deskside module, as slate (default rack;\n"
+        "doc/IP27.adoc \"Machine type\"). --nodes 2 adds a second node board in n2 (deskside\n"
+        "only; doc/SMP.adoc); give --flash once per node to keep each node's flash PROM.\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
         "scsi ethernet irq scheduler firmware machine all\n",
         stderr);
@@ -218,6 +222,8 @@ struct Options {
     std::string prom;
     std::uint64_t memory_mib{512};
     unsigned cpus{1};
+    ip27::ModuleType module{ip27::ModuleType::rack};
+    unsigned nodes{1};
     std::uint64_t cpu_slice{180};
     std::uint64_t cycles{1'000'000};
     std::vector<TraceCategory> trace;
@@ -225,7 +231,8 @@ struct Options {
     std::string load_state;
     std::string save_state;
     std::vector<std::string> console_lines;
-    std::string flash;
+    // One per node, in node order.
+    std::vector<std::string> flash;
     std::string nvram;
     std::string io6prom;
     std::string ethernet;
@@ -296,7 +303,7 @@ std::optional<Options> parse(std::span<char*> arguments) {
         } else if (flag == "--save-state") {
             options.save_state = value;
         } else if (flag == "--flash") {
-            options.flash = value;
+            options.flash.emplace_back(value);
         } else if (flag == "--nvram") {
             options.nvram = value;
         } else if (flag == "--io6prom") {
@@ -346,6 +353,18 @@ std::optional<Options> parse(std::span<char*> arguments) {
                 return std::nullopt;
             }
             options.block_cache_entries = *number;
+        } else if (flag == "--module") {
+            if (value != "rack" && value != "deskside") {
+                std::fprintf(stderr, "--module takes rack or deskside\n");
+                return std::nullopt;
+            }
+            options.module = value == "deskside" ? ip27::ModuleType::deskside : ip27::ModuleType::rack;
+        } else if (flag == "--nodes") {
+            if (value != "1" && value != "2") {
+                std::fprintf(stderr, "--nodes takes 1 or 2\n");
+                return std::nullopt;
+            }
+            options.nodes = value == "2" ? 2 : 1;
         } else if (flag == "--cpus") {
             if (value != "1" && value != "2") {
                 std::fprintf(stderr, "--cpus takes 1 or 2\n");
@@ -432,6 +451,12 @@ int main(int argc, char** argv) {
     ip27::Ip27Config config;
     config.memory_bytes = options->memory_mib << 20;
     config.cpus = options->cpus;
+    config.module = options->module;
+    config.nodes = options->nodes;
+    if (options->flash.size() > options->nodes) {
+        std::fprintf(stderr, "--flash is given once per node\n");
+        return exit_usage;
+    }
     config.cpu_slice = options->cpu_slice;
     if (options->date) {
         config.clock_epoch = *options->date;
@@ -544,14 +569,15 @@ int main(int argc, char** argv) {
 
     // The flash persists in a host file: its PROM log survives runs (IP27.adoc "Boot PROM").
     // A snapshot's flash contents take precedence over the file.
-    if (!options->flash.empty()) {
-        if (const auto contents = read_file(options->flash)) {
-            if (contents->size() != machine.flash_contents().size()) {
-                std::fprintf(stderr, "flash file %s is not %zu bytes\n", options->flash.c_str(),
-                             machine.flash_contents().size());
+    for (unsigned node = 0; node < options->flash.size(); ++node) {
+        const std::string& path = options->flash[node];
+        if (const auto contents = read_file(path)) {
+            if (contents->size() != machine.flash_contents(node).size()) {
+                std::fprintf(stderr, "flash file %s is not %zu bytes\n", path.c_str(),
+                             machine.flash_contents(node).size());
                 return exit_asset;
             }
-            machine.load_flash(*contents);
+            machine.load_flash(*contents, node);
         }
     }
 
@@ -652,10 +678,12 @@ int main(int argc, char** argv) {
         scheduler.cancel(sample);
     }
 
-    if (!options->flash.empty() && machine.flash_dirty() &&
-        !write_file(options->flash, machine.flash_contents())) {
-        std::fprintf(stderr, "cannot write flash %s\n", options->flash.c_str());
-        return exit_asset;
+    for (unsigned node = 0; node < options->flash.size(); ++node) {
+        const std::string& path = options->flash[node];
+        if (machine.flash_dirty(node) && !write_file(path, machine.flash_contents(node))) {
+            std::fprintf(stderr, "cannot write flash %s\n", path.c_str());
+            return exit_asset;
+        }
     }
 
     if (!options->nvram.empty() &&

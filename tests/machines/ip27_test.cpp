@@ -428,11 +428,21 @@ const test::Registration controller{
         t.check_equal(std::to_integer<int>(nvram[0x700]), 0x37);
         t.check_equal(std::to_integer<int>(nvram[0x708]), 3);
         t.check_equal(std::to_integer<int>(nvram[0x000]), 0xff); // otherwise erased
-        // Node slots n1-n4 have slot IDs 7-4.
-        t.check_equal(ip27::node_slot_id(1), 7u);
-        t.check_equal(ip27::node_slot_id(4), 4u);
+        // Rack node slots n1-n4 have slot IDs 7-4; deskside n1 and n2 have 3 and 2.
+        t.check_equal(ip27::node_slot_id(ip27::ModuleType::rack, 1), 7u);
+        t.check_equal(ip27::node_slot_id(ip27::ModuleType::rack, 4), 4u);
+        t.check_equal(ip27::node_slot_id(ip27::ModuleType::deskside, 1), 3u);
+        t.check_equal(ip27::node_slot_id(ip27::ModuleType::deskside, 2), 2u);
         config.node_slot = 5;
         t.check(!ip27::validate(config, program({nop()})), "no slot n5");
+        config.node_slot = 3;
+        config.module = ip27::ModuleType::deskside;
+        t.check(!ip27::validate(config, program({nop()})), "a deskside has n1 and n2");
+        config.node_slot = 1;
+        config.nodes = 2;
+        t.check(ip27::validate(config, program({nop()})).has_value(), "two nodes, deskside");
+        config.module = ip27::ModuleType::rack;
+        t.check(!ip27::validate(config, program({nop()})), "two nodes need one Crossbow");
     }};
 
 const test::Registration crosstalk{
@@ -449,7 +459,12 @@ const test::Registration crosstalk{
                               12 &
                           0xffff,
                       std::uint64_t{0xc101});
-        t.check_equal(ip27::hub_xbow_port(2), 0xau);
+        t.check_equal(ip27::hub_xbow_port(ip27::ModuleType::rack, 2), 0xau);
+        // slate's deskside: n1 on 0xa, n2 on 9, the BaseIO (io1) on 15.
+        t.check_equal(ip27::hub_xbow_port(ip27::ModuleType::deskside, 1), 0xau);
+        t.check_equal(ip27::hub_xbow_port(ip27::ModuleType::deskside, 2), 0x9u);
+        t.check_equal(ip27::baseio_port(ip27::ModuleType::deskside), 0xfu);
+        t.check_equal(ip27::baseio_port(ip27::ModuleType::rack), 0x8u);
     }};
 
 Ip27Config two_cpu_config(std::uint64_t slice = 180) {
@@ -622,6 +637,144 @@ const test::Registration two_cpu_ipi{
         t.check_equal(machine.cpu(1).mfc0(mips::cp0::cause) >> 2 & 0x1f, std::uint64_t{0});
         t.check((machine.cpu(1).mfc0(mips::cp0::cause) & (1u << 10)) != 0, "B sees IP2");
         t.check((machine.cpu(0).mfc0(mips::cp0::cause) & (1u << 10)) == 0, "A does not");
+    }};
+
+} // namespace
+
+namespace {
+
+// Two nodes in a deskside module, as slate (SMP.adoc "S5: the second node").
+Ip27Config two_node_config(unsigned cpus = 1) {
+    Ip27Config config = small_config();
+    config.module = ip27::ModuleType::deskside;
+    config.nodes = 2;
+    config.cpus = cpus;
+    return config;
+}
+
+constexpr std::uint64_t ialias = 0x9200'0000'0100'0000;
+constexpr std::uint64_t ni_status_rev_id = 0x60'0000;
+constexpr std::uint64_t pi_int_pend_mod = 0x90;
+constexpr std::uint64_t pi_int_pend0 = 0x98;
+// REMOTE_HUB_ADDR(node, 0): widget 1's window + 0x800000 at the node's addresses.
+constexpr std::uint64_t remote_hub(std::uint64_t node) {
+    return ialias + (node << 32) + 0x80'0000;
+}
+
+std::uint64_t node_id_field(std::uint64_t nsri) {
+    return nsri >> 8 & 0x1ff;
+}
+
+// Each node sees its own resources at its node ID, the aliases (UALIAS, IALIAS) as its own,
+// and the other node at the other's ID once they differ.
+const test::Registration two_node_views{
+    "ip27.two_nodes.views_follow_node_ids", [](test::Context& t) {
+        Ip27Machine machine{two_node_config(), program({nop()})};
+        mips::Cpu& a = machine.cpu(0); // node 0 (n1), slice A
+        mips::Cpu& b = machine.cpu(2); // node 1 (n2), slice A
+        a.mtc0(mips::cp0::status, mips::status::kx);
+        b.mtc0(mips::cp0::status, mips::status::kx);
+        constexpr std::uint64_t cac = 0xa800'0000'0000'1000;
+        // Before node IDs are assigned both are 0, and each node has its own memory there.
+        t.check(a.store(cac, AccessWidth::bits64, 1).has_value());
+        t.check(b.store(cac, AccessWidth::bits64, 2).has_value());
+        t.check_equal(a.load(cac, AccessWidth::bits64).value_or(0), std::uint64_t{1});
+        t.check_equal(b.load(cac, AccessWidth::bits64).value_or(0), std::uint64_t{2});
+        t.check(!a.load(cac + (std::uint64_t{1} << 32), AccessWidth::bits64), "no node 1 yet");
+        // Node 1 takes node ID 1 in its NI_STATUS_REV_ID.
+        t.check(b.store(ialias + ni_status_rev_id, AccessWidth::bits64, 1u << 8).has_value());
+        t.check_equal(node_id_field(b.load(ialias + ni_status_rev_id, AccessWidth::bits64).value_or(0)),
+                      std::uint64_t{1});
+        t.check_equal(node_id_field(a.load(ialias + ni_status_rev_id, AccessWidth::bits64).value_or(1)),
+                      std::uint64_t{0});
+        // Node 0 reaches node 1's memory and Hub at node 1's addresses.
+        t.check_equal(a.load(cac + (std::uint64_t{1} << 32), AccessWidth::bits64).value_or(0),
+                      std::uint64_t{2});
+        t.check_equal(node_id_field(a.load(remote_hub(1) + ni_status_rev_id, AccessWidth::bits64)
+                                        .value_or(0)),
+                      std::uint64_t{1});
+        // Node 1 reaches node 0's memory at node 0's addresses, but UALIAS is its own memory.
+        t.check_equal(b.load(cac, AccessWidth::bits64).value_or(0), std::uint64_t{1});
+        t.check_equal(b.load(0x9000'0000'0000'1000, AccessWidth::bits64).value_or(0),
+                      std::uint64_t{2});
+        // An interrupt sent to node 1's Hub (level 11, as an IPI) is pending there only.
+        t.check(a.store(remote_hub(1) + pi_int_pend_mod, AccessWidth::bits64, 0x10b).has_value());
+        t.check((b.load(ialias + pi_int_pend0, AccessWidth::bits64).value_or(0) & 0x800) != 0,
+                "pending on node 1");
+        t.check((a.load(ialias + pi_int_pend0, AccessWidth::bits64).value_or(0) & 0x800) == 0,
+                "not on node 0");
+    }};
+
+std::uint64_t node_word(Ip27Machine& machine, unsigned cpu, std::uint64_t address) {
+    return machine.cpu(cpu).load(0xa800'0000'0000'0000 | address, AccessWidth::bits64).value_or(~0ull);
+}
+
+void kernel_64_all(Ip27Machine& machine, unsigned cpus) {
+    for (unsigned i = 0; i < cpus; ++i) {
+        machine.cpu(i).mtc0(mips::cp0::status, mips::status::kx);
+    }
+}
+
+// Four CPUs take turns lowest-first (SMP.adoc "Time and scheduling"): every CPU runs, the
+// order is the same however the run is split, and each node's LL/SC counter loses no update.
+const test::Registration four_cpus{
+    "ip27.two_nodes.four_cpus_take_turns", [](test::Context& t) {
+        for (const std::uint64_t slice : {std::uint64_t{1}, std::uint64_t{50}}) {
+            Ip27Config config = two_node_config(2);
+            config.cpu_slice = slice;
+            Ip27Machine whole{config, counter_prom};
+            Ip27Machine split{config, counter_prom};
+            kernel_64_all(whole, 4);
+            kernel_64_all(split, 4);
+            whole.run(20000);
+            split.run(7001);
+            std::uint64_t lowest = ~0ull;
+            for (unsigned cpu = 0; cpu < 4; ++cpu) {
+                lowest = std::min(lowest, split.cpu(cpu).cycles());
+            }
+            split.run(20000 - lowest);
+            for (unsigned cpu = 0; cpu < 4; ++cpu) {
+                t.check(whole.cpu(cpu).state().gpr[t6] > 0, "every CPU makes progress");
+                t.check(whole.cpu(cpu).capture() == split.cpu(cpu).capture(),
+                        "the same however the run is split");
+            }
+            // Both nodes still have node ID 0: each counts in its own memory.
+            for (const unsigned node : {0u, 1u}) {
+                const std::uint64_t counted = whole.cpu(node * 2).state().gpr[t6] +
+                                              whole.cpu(node * 2 + 1).state().gpr[t6];
+                const std::uint64_t counter = node_word(whole, node * 2, 0x200) >> 32;
+                t.check(counter >= counted && counter <= counted + 2, "no lost update");
+            }
+        }
+    }};
+
+// A two-node snapshot resumes exactly where the run would have gone.
+const test::Registration two_node_snapshot{
+    "ip27.two_nodes.snapshot", [](test::Context& t) {
+        Ip27Config config = two_node_config(2);
+        config.cpu_slice = 5;
+        Ip27Machine straight{config, counter_prom};
+        Ip27Machine saved{config, counter_prom};
+        kernel_64_all(straight, 4);
+        kernel_64_all(saved, 4);
+        straight.run(6000);
+        saved.run(3001);
+        const StateImage image = saved.save_state();
+        Ip27Machine resumed{config, counter_prom};
+        if (!t.check(resumed.load_state(image).has_value(), "the snapshot loads")) {
+            return;
+        }
+        std::uint64_t lowest = ~0ull;
+        for (unsigned cpu = 0; cpu < 4; ++cpu) {
+            lowest = std::min(lowest, resumed.cpu(cpu).cycles());
+        }
+        resumed.run(6000 - lowest);
+        for (unsigned cpu = 0; cpu < 4; ++cpu) {
+            t.check(straight.cpu(cpu).capture() == resumed.cpu(cpu).capture(), "each CPU");
+        }
+        t.check_equal(node_word(straight, 2, 0x200), node_word(resumed, 2, 0x200));
+        Ip27Machine one_node{two_cpu_config(5), counter_prom};
+        t.check(!one_node.load_state(image).has_value(), "a one-node machine refuses it");
     }};
 
 } // namespace

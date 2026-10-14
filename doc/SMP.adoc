@@ -301,6 +301,52 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
   - Two-CPU tier-1 rates (best of 2): `boot2` 215, `cpu2` 232, `mix2` 249, `reboot2` 214 M
     guest cycles per second over both CPUs, 0.60-0.69 times real time.
 
+* **S5.0 (2026-10-14):** what the PROM does with a second node, from disassembly and runs
+  ("S5: the second node (plan)", "What is known"; IP27.adoc "Machine type"): the deskside
+  module type follows from the node slot IDs, the installed IRIX boots unchanged on the
+  deskside layout, the PROM's vector PIO protocol, and the shape of discovery (the global
+  master hands out node IDs through each Hub's NI_SCRATCH_REG1, bit 51 and the ID in bits
+  15:0, written over the link; `observed` at `0x1fc51e58`-`0x1fc51f40`).
+* **S5.1 (2026-10-14): nodes and routing, link down.**
+  - The machine is built of nodes (`Ip27Machine::Node`): each has its Hub, memory, flash
+    PROM, PCF8584 on the module's I2C bus, directory, CPUs, and its own view of physical
+    addresses. `--module deskside` (slate's module: slot IDs 3 and 2, Hubs on Crossbow ports
+    `0xa` and 9, the BaseIO on 15) and `--nodes 2` (deskside only) select the topology;
+    `--flash` is given once per node. One rack node stays the default.
+  - Each node's view follows the node IDs (Hub NI_STATUS_REV_ID bits 16:8, `hypothesis`
+    writable; the Hub reports a change and the machine rebuilds every view): its own
+    memory, PROM (RBOOT), directory back door, Hub registers (REMOTE_HUB), and crosstalk
+    windows at its own ID; UALIAS, LBOOT, and IALIAS at node 0's addresses as its own
+    (LINUX addrs.h "position-independent aliases"); the other node's memory, PROM,
+    directory, Hub registers, and crosstalk windows at the other's ID once the IDs differ. A
+    remote Hub access is answered as from slice A (`hypothesis`). Not mapped yet, until the
+    guest is seen to use them: HSPEC below RBOOT at a nonzero ID, IALIAS-like space at a
+    nonzero ID, CALIAS.
+  - The nodes share the code-write count (`AddressSpace::share_code_writes`) and the
+    LL/SC coherence (four CPUs, `Coherence::max_cpus`). Coherence is keyed by physical
+    address: before node IDs are assigned both nodes' memories have the same addresses, so a
+    store on one node can break a reservation on the other (a spurious SC failure, which
+    the architecture allows); after, an alias (UALIAS, CALIAS) and the node's own address
+    for the same memory are not matched. Revisit if the guest uses LL/SC through an alias.
+  - Scheduling: the CPU furthest behind runs until it is a slice ahead of the next lowest
+    (lowest index first on a tie); with two CPUs this is the earlier rule.
+  - Snapshots keep the one-node fields; the second node's components save under `node1.`,
+    and its scheduler events are named `node1.*`.
+  - Gates: unit tests (`ip27.two_nodes.views_follow_node_ids`, `.four_cpus_take_turns`,
+    `.snapshot`, `address_space.clear`, `.shared_code_writes`,
+    `state_image.prefixed_images`); dev and asan suites; all eight benchmark digests
+    unchanged (`prom`, `boot`, `cpu`, `fs`, `boot2`, `cpu2`, `mix2`, `reboot2`), at 0.98-1.00
+    times the baselines' speed. Keeping that took care on the device-access path, which
+    runs on every Hub access: `synchronize_time` stays inlined into it (out of line cost
+    `prom` 3.8%), the CPUs are a compact list with a two-CPU fast path (a loop over four
+    slots cost `boot2` 12%), and Coherence skips stores when no other CPU holds a
+    reservation (looping over four CPUs on every store cost about 3%).
+  - Observed with two nodes and the link down (deskside, two CPUs each): both PROMs run the
+    same path in step; on the shared Crossbow each writes its own port's upper arbitration
+    register (`0x15c` for n2, `0x19c` for n1), then one clears them all and takes port 9's;
+    neither reaches the console (none of the PROM's buffered output appears in 111 s of
+    virtual time). Real hardware with two nodes always has the link, so this is not pursued.
+
 Reproduce (the cold boot to a two-CPU root shell; copy the disk and state first as in
 STATUS "How to reproduce"):
 

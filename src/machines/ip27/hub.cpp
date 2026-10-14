@@ -291,8 +291,11 @@ constexpr std::uint64_t ilcsr_link_working = 2u << 12;
 //   no CrayLink cable.
 constexpr std::uint64_t nsri_down_never_reset = std::uint64_t{1} << 28;
 // NSRI_MORENODES (18) and NSRI_REGIONSIZE (17) are software settings (observed: the PROM
-// writes REGIONSIZE_FINE); inferred writable.
-constexpr std::uint64_t nsri_writable = (std::uint64_t{1} << 18) | (std::uint64_t{1} << 17);
+// writes REGIONSIZE_FINE); inferred writable. hypothesis: so is the node ID, which software
+// assigns during discovery (SMP.adoc "S5: the second node"; to be confirmed by the PROM's
+// writes with two nodes).
+constexpr std::uint64_t nsri_writable =
+    (std::uint64_t{1} << 18) | (std::uint64_t{1} << 17) | (std::uint64_t{0x1ff} << 8);
 constexpr unsigned nsri_rev_shift = 4;
 
 // PI_INT_PEND_MOD (LINUX asm/sn/intr.h, "copied from Irix"): writing 0x100 | level sets
@@ -379,15 +382,18 @@ constexpr std::uint64_t rt_count_mask = (std::uint64_t{1} << 52) - 1;
 
 Hub::Hub(Scheduler& scheduler, Tracer& tracer, unsigned revision, unsigned slot_id,
          unsigned cpu_count, devices::Pcf8584& i2c, DirectoryMemory& directory,
-         AddressSpace& memory, std::function<void()> reset_node)
+         AddressSpace& memory, std::function<void()> reset_node, std::string_view event_prefix)
     : scheduler_{scheduler}, tracer_{tracer}, revision_{revision}, slot_id_{slot_id & 7}, i2c_{i2c},
       directory_{directory}, memory_{memory}, reset_node_{std::move(reset_node)},
       cpu_present_{1, cpu_count > 1 ? 1u : 0u},
-      local_reset_event_{scheduler.add_event("hub.local_reset", [this] { local_reset(); })},
-      comparator_events_{
-          scheduler.add_event("hub.rt_compare_a", [this] { comparator_matched(0); }),
-          scheduler.add_event("hub.rt_compare_b", [this] { comparator_matched(1); }),
-          scheduler.add_event("hub.profile_compare", [this] { comparator_matched(2); })} {
+      local_reset_event_{scheduler.add_event(std::string{event_prefix} + "hub.local_reset",
+                                             [this] { local_reset(); })},
+      comparator_events_{scheduler.add_event(std::string{event_prefix} + "hub.rt_compare_a",
+                                             [this] { comparator_matched(0); }),
+                         scheduler.add_event(std::string{event_prefix} + "hub.rt_compare_b",
+                                             [this] { comparator_matched(1); }),
+                         scheduler.add_event(std::string{event_prefix} + "hub.profile_compare",
+                                             [this] { comparator_matched(2); })} {
     for (unsigned w = 0; w < xtalk::widget_count; ++w) {
         io_windows_[w].hub = this;
         io_windows_[w].widget = w;
@@ -441,13 +447,13 @@ void Hub::schedule_comparators() {
         }
         scheduler_.schedule_at(comparator_events_[i],
                                time_at_cycles(now_ticks + (compare - count), rtc_clock));
-        tracer_.log(TraceCategory::irq, "hub comparator {} at count {:#x} (now {:#x})", i, compare,
+        tracer_.log(TraceCategory::irq, "{}hub comparator {} at count {:#x} (now {:#x})", trace_name_, i, compare,
                     count);
     }
 }
 
 void Hub::comparator_matched(unsigned comparator) {
-    tracer_.log(TraceCategory::irq, "hub comparator {} matched", comparator);
+    tracer_.log(TraceCategory::irq, "{}hub comparator {} matched", trace_name_, comparator);
     if (comparator < 2) {
         rt_pending_[comparator] = true;
     } else {
@@ -460,7 +466,7 @@ void Hub::set_led(unsigned slice, std::uint64_t value) {
     // Eight-bit LEDs, one bank per CPU slice (LINUX MD_LED0/MD_LED1). The PROM reports its
     // boot phase here (PRM 3.1, Table 3-1).
     leds_[slice] = value & 0xff;
-    tracer_.log(TraceCategory::firmware, "led {} {:#04x}", slice == 0 ? 'A' : 'B', leds_[slice]);
+    tracer_.log(TraceCategory::firmware, "{}led {} {:#04x}", trace_name_, slice == 0 ? 'A' : 'B', leds_[slice]);
 }
 
 void Hub::set_memory_config(std::uint64_t value) {
@@ -498,7 +504,7 @@ void Hub::run_bte(unsigned engine) {
     const std::uint64_t source = r[ibsa] & physical_mask;
     const std::uint64_t destination = r[ibda] & physical_mask;
     const bool zero_fill = (r[ibct] & ibct_zero_fill) != 0;
-    tracer_.log(TraceCategory::hub, "bte {} {} {:#x} bytes {:#x} -> {:#x}", engine,
+    tracer_.log(TraceCategory::hub, "{}bte {} {} {:#x} bytes {:#x} -> {:#x}", trace_name_, engine,
                 zero_fill ? "fill" : "copy", bytes, source, destination);
     std::uint64_t status = 0;
     for (std::uint64_t offset = 0; offset < bytes; offset += 8) {
@@ -520,7 +526,7 @@ void Hub::run_bte(unsigned engine) {
     r[ibls] = status;
     if ((r[ibct] & ibct_notify) != 0 &&
         !memory_.write(PhysicalAddress{r[ibna] & physical_mask}, AccessWidth::bits64, r[ibls])) {
-        tracer_.log(TraceCategory::hub, "bte {} notification to {:#x} failed", engine, r[ibna]);
+        tracer_.log(TraceCategory::hub, "{}bte {} notification to {:#x} failed", trace_name_, engine, r[ibna]);
     }
     // Completion raises the interrupt level in IBIA at the node it names (observed: the
     // PROM waits for these levels in PI_INT_PEND0). This machine has one node, NASID 0.
@@ -534,7 +540,7 @@ void Hub::local_reset() {
     // hypothesis: a Hub local reset resets the node's CPUs with a cold reset and reinitializes
     // the Hub's modeled registers, except the error stack addresses, which the PROM relies on
     // to survive it (IP27.adoc "Hub local reset").
-    tracer_.log(TraceCategory::hub, "local reset");
+    tracer_.log(TraceCategory::hub, "{}local reset", trace_name_);
     reset(ResetKind::cold);
     reset_node_();
 }
@@ -560,7 +566,7 @@ std::expected<std::uint64_t, AccessFault> Hub::BigWindow::mmio_read(std::uint64_
         return std::unexpected(AccessFault::unmapped);
     }
     const auto [widget, address] = translate(offset);
-    hub->tracer_.log(TraceCategory::xtalk, "big window {} read {:#x} -> widget {} {:#x}", index,
+    hub->tracer_.log(TraceCategory::xtalk, "{}big window {} read {:#x} -> widget {} {:#x}", hub->trace_name_, index,
                      offset, widget, address);
     return hub->xtalk_->xtalk_read(widget, address, width);
 }
@@ -571,7 +577,7 @@ std::expected<void, AccessFault> Hub::BigWindow::mmio_write(std::uint64_t offset
         return std::unexpected(AccessFault::unmapped);
     }
     const auto [widget, address] = translate(offset);
-    hub->tracer_.log(TraceCategory::xtalk, "big window {} write {:#x} -> widget {} {:#x}", index,
+    hub->tracer_.log(TraceCategory::xtalk, "{}big window {} write {:#x} -> widget {} {:#x}", hub->trace_name_, index,
                      offset, widget, address);
     return hub->xtalk_->xtalk_write(widget, address, width, value);
 }
@@ -636,7 +642,7 @@ bool Hub::Widget::xtalk_dma_read(std::uint64_t address, std::span<std::byte> byt
     const auto memory =
         hub->memory_.memory_bytes(PhysicalAddress{address & physical_mask}, bytes.size());
     if (memory.size() != bytes.size()) {
-        hub->tracer_.log(TraceCategory::hub, "DMA read outside memory {:#x} size {:#x}", address,
+        hub->tracer_.log(TraceCategory::hub, "{}DMA read outside memory {:#x} size {:#x}", hub->trace_name_, address,
                          bytes.size());
         return false;
     }
@@ -648,7 +654,7 @@ bool Hub::Widget::xtalk_dma_write(std::uint64_t address, std::span<const std::by
     const auto memory =
         hub->memory_.writable_memory_bytes(PhysicalAddress{address & physical_mask}, bytes.size());
     if (memory.size() != bytes.size()) {
-        hub->tracer_.log(TraceCategory::hub, "DMA write outside memory {:#x} size {:#x}", address,
+        hub->tracer_.log(TraceCategory::hub, "{}DMA write outside memory {:#x} size {:#x}", hub->trace_name_, address,
                          bytes.size());
         return false;
     }
@@ -667,7 +673,7 @@ void Hub::Widget::xtalk_interrupt(std::uint64_t address, std::uint8_t vector) {
         hub->raise_interrupt(vector);
         return;
     }
-    hub->tracer_.log(TraceCategory::hub, "unmodeled crosstalk interrupt to {:#x} vector {:#x}",
+    hub->tracer_.log(TraceCategory::hub, "{}unmodeled crosstalk interrupt to {:#x} vector {:#x}", hub->trace_name_,
                      address, vector);
 }
 
@@ -752,6 +758,17 @@ void Hub::load_state(const StateImage& image) {
     update_interrupts();
 }
 
+void Hub::set_nsri_settings(std::uint64_t value) {
+    const unsigned old_id = node_id();
+    nsri_settings_ = value;
+    if (node_id() != old_id) {
+        tracer_.log(TraceCategory::hub, "{}node id {} -> {}", trace_name_, old_id, node_id());
+        if (node_id_changed_) {
+            node_id_changed_();
+        }
+    }
+}
+
 void Hub::reset(ResetKind kind) {
     if (kind == ResetKind::warm) {
         // hypothesis: a soft reset leaves the Hub's registers unchanged.
@@ -773,7 +790,7 @@ void Hub::reset(ResetKind kind) {
     refresh_control_ = mrc_reset_defaults;
     mlan_ctl_ = mlan_reset_defaults;
     bte_ = {};
-    nsri_settings_ = 0;
+    set_nsri_settings(0);
     pending_ = {};
     interrupt_mask_ = {};
     update_interrupts();
@@ -892,7 +909,7 @@ std::expected<std::uint64_t, AccessFault> Hub::read(unsigned slice, std::uint64_
             break;
         }
     }
-    tracer_.log(TraceCategory::hub, "unmodeled read {:#08x} width {}", offset, byte_count(width));
+    tracer_.log(TraceCategory::hub, "{}unmodeled read {:#08x} width {}", trace_name_, offset, byte_count(width));
     return std::unexpected(AccessFault::unsupported);
 }
 
@@ -902,10 +919,10 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
         if (const std::size_t slot = find_stored(offset); slot < stored_register_count) {
             stored_[slot] = value & stored_registers[slot].mask;
             if (offset == iio_wcr) {
-                tracer_.log(TraceCategory::hub, "widget control {:#x}", value);
+                tracer_.log(TraceCategory::hub, "{}widget control {:#x}", trace_name_, value);
             }
             if (offset >= 0x40'0160 && offset <= 0x40'0190) {
-                tracer_.log(TraceCategory::hub, "ITTE {} = {:#x}", (offset - 0x40'0160) / 8 + 1,
+                tracer_.log(TraceCategory::hub, "{}ITTE {} = {:#x}", trace_name_, (offset - 0x40'0160) / 8 + 1,
                             value);
             }
             if (offset == pi_rt_compare_a || offset == pi_rt_compare_b ||
@@ -992,7 +1009,7 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
         case md_mlan_ctl:
             // Starts a 1-Wire pulse and sample with the written timing.
             mlan_ctl_ = value & mlan_control;
-            tracer_.log(TraceCategory::hub, "mlan pulse {} sample {}", (value >> 10) & 0x3ff,
+            tracer_.log(TraceCategory::hub, "{}mlan pulse {} sample {}", trace_name_, (value >> 10) & 0x3ff,
                         (value >> 2) & 0xff);
             return {};
         case iio_wid:
@@ -1000,7 +1017,7 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
             return {};
         case md_memory_config:
             set_memory_config(value);
-            tracer_.log(TraceCategory::hub, "md memory config {:#018x}", value);
+            tracer_.log(TraceCategory::hub, "{}md memory config {:#018x}", trace_name_, value);
             return {};
         case md_led0:
             set_led(0, value);
@@ -1012,7 +1029,7 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
             // hypothesis: the control fields hold what is written, including the warm-reset
             // bit, whose effect on the link is not modeled.
             if (((value ^ ilcsr_) & ilcsr_warm_reset) != 0) {
-                tracer_.log(TraceCategory::hub, "llp warm reset {}",
+                tracer_.log(TraceCategory::hub, "{}llp warm reset {}", trace_name_,
                             (value & ilcsr_warm_reset) != 0 ? "asserted" : "released");
             }
             ilcsr_ = value & ilcsr_writable;
@@ -1022,7 +1039,7 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
             // Clearing LLP errors: there are none.
             return {};
         case ni_status_rev_id:
-            nsri_settings_ = value & nsri_writable;
+            set_nsri_settings(value & nsri_writable);
             return {};
         case ni_port_reset:
             // The reset takes effect after the store that requested it completes.
@@ -1031,7 +1048,7 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
             }
             if ((value & npr_portreset) != 0) {
                 // No CrayLink port is connected on a one-node machine.
-                tracer_.log(TraceCategory::hub, "port reset (no link)");
+                tracer_.log(TraceCategory::hub, "{}port reset (no link)", trace_name_);
             }
             return {};
         default:
@@ -1046,7 +1063,7 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
             break;
         }
     }
-    tracer_.log(TraceCategory::hub, "unmodeled write {:#08x} width {} value {:#x}", offset,
+    tracer_.log(TraceCategory::hub, "{}unmodeled write {:#08x} width {} value {:#x}", trace_name_, offset,
                 byte_count(width), value);
     return std::unexpected(AccessFault::unsupported);
 }

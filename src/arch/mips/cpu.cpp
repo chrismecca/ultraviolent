@@ -427,7 +427,7 @@ std::expected<void, Exception> Cpu::write(const Translation& translation, Access
     const std::uint64_t code_writes = bus_.code_writes();
     auto result = bus_.write(address, width, value, requester_);
     if (coherence_ != nullptr && result) {
-        coherence_->store(requester_, address, byte_count(width));
+        coherence_->store(coherence_index_, address, byte_count(width));
     }
     if (bus_.code_writes() != code_writes) {
         last_bus_access_ = BusAccess::code_store;
@@ -467,7 +467,7 @@ void Cpu::write_back(const CacheArrays::Writeback& line) {
         const std::uint64_t value = (std::uint64_t{line.words[i]} << 32) | line.words[i + 1];
         const auto result = bus_.write(at, AccessWidth::bits64, value, requester_);
         if (coherence_ != nullptr && result) {
-            coherence_->store(requester_, at, 8);
+            coherence_->store(coherence_index_, at, 8);
         }
     }
     synchronize_code();
@@ -636,7 +636,7 @@ void Cpu::note_load_linked(std::uint64_t address) {
     }
     // The load has just translated `address`, so this cannot fault.
     if (const auto translation = translate(address, AccessKind::load)) {
-        coherence_->reserve(requester_, translation->address);
+        coherence_->reserve(coherence_index_, translation->address);
         // Our own reservation leaves our pages alone.
         seen_coherence_ = coherence_->generation();
     }
@@ -712,7 +712,7 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
             return;
         }
         // Nor is a frame where another CPU holds a reservation: the stores must break it.
-        if (coherence_ != nullptr && coherence_->watched(requester_, frame)) {
+        if (coherence_ != nullptr && coherence_->watched(coherence_index_, frame)) {
             return;
         }
         const auto bytes = bus_.writable_memory_bytes(frame, page_size);
@@ -1006,7 +1006,7 @@ std::uint64_t Cpu::exception_return() {
     update_derived_state();
     state_.ll_bit = false;
     if (coherence_ != nullptr) {
-        coherence_->release(requester_);
+        coherence_->release(coherence_index_);
     }
     return target;
 }

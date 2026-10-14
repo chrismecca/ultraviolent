@@ -26,8 +26,6 @@ constexpr std::uint64_t lboot_base = 0x1000'0000;
 // The reset vector's physical address: LBOOT offset 0x0fc00000 (IP27.adoc "Boot PROM").
 constexpr std::uint64_t reset_flash_base = 0x1fc0'0000;
 constexpr std::uint64_t rboot_base = 0x3000'0000;
-// The flash appears at the base of LBOOT, at the reset vector, and at the base of RBOOT.
-constexpr std::uint64_t flash_windows[] = {lboot_base, reset_flash_base, rboot_base};
 constexpr std::uint64_t flash_command_span = std::uint64_t{flash_size} << 3;
 constexpr unsigned hspec_attribute = 0;
 constexpr unsigned io_attribute = 1;
@@ -37,6 +35,8 @@ constexpr std::uint64_t hub_widget = 1;
 constexpr std::uint64_t small_window_shift = 24;
 constexpr unsigned big_window_count = 7;
 constexpr std::uint64_t big_window_shift = 29;
+// The node ID's place in a physical address, bits 39:32 (IP27.adoc "Node address space").
+constexpr unsigned node_id_shift = 32;
 
 std::uint64_t fnv1a(std::span<const std::byte> bytes) {
     std::uint64_t hash = 0xcbf2'9ce4'8422'2325;
@@ -44,6 +44,12 @@ std::uint64_t fnv1a(std::span<const std::byte> bytes) {
         hash = (hash ^ std::to_integer<std::uint64_t>(b)) * 0x0000'0100'0000'01b3;
     }
     return hash;
+}
+
+// Scheduler event names for node `index`'s components: the first node keeps the one-node
+// names, so its snapshots are unchanged.
+std::string event_prefix(unsigned index) {
+    return index == 0 ? std::string{} : std::format("node{}.", index);
 }
 
 void must_map(std::expected<void, MapError> result, const char* what) {
@@ -93,6 +99,16 @@ std::expected<void, std::string> validate(const Ip27Config& config,
     }
     if (config.node_slot < 1 || config.node_slot > 4) {
         return std::unexpected("node slot must be n1 to n4");
+    }
+    if (config.module == ModuleType::deskside && config.node_slot > 2) {
+        return std::unexpected("a deskside module has node slots n1 and n2");
+    }
+    if (config.nodes < 1 || config.nodes > 2) {
+        return std::unexpected("one or two node boards");
+    }
+    if (config.nodes == 2 && (config.module != ModuleType::deskside || config.node_slot != 1)) {
+        // A rack module's n1 and n2 are on different Crossbows, which is not modeled.
+        return std::unexpected("two nodes are modeled in a deskside module, in n1 and n2");
     }
     if (config.cpus < 1 || config.cpus > 2) {
         return std::unexpected("a node holds one or two CPUs");
@@ -195,35 +211,49 @@ std::array<std::uint8_t, devices::Nic::memory_size> board_nic_memory(const Board
     return memory;
 }
 
-unsigned hub_xbow_port(unsigned slot) {
-    // observed: the PROM's SN0 table of Hub widget numbers by slot code: n1 9, n2 0xa, n3 0xa,
-    // n4 9 (two crossbows per module).
+unsigned baseio_port(ModuleType module) {
+    // observed: with the BaseIO on port 15 a rack module's PROM names it io3, so a rack module
+    // cables it to port 8, its io1 (IP27.adoc "Crossbow"); a deskside's io1 is port 15.
+    return module == ModuleType::deskside ? 0xf : 0x8;
+}
+
+unsigned hub_xbow_port(ModuleType module, unsigned slot) {
+    // observed: the PROM's Crossbow tables by slot code: deskside n1 0xa, n2 9; rack (two
+    // crossbows per module) n1 9, n2 0xa, n3 0xa, n4 9.
+    if (module == ModuleType::deskside) {
+        return slot == 1 ? 0xa : 0x9;
+    }
     constexpr std::array<unsigned, 5> ports = {0, 0x9, 0xa, 0xa, 0x9};
     return ports[slot];
 }
 
-unsigned node_slot_id(unsigned slot) {
-    // observed: the PROM maps SN0 slot IDs 7, 6, 5, 4 to node slots n1-n4 (its table for IDs
-    // 0-7 is 0xf0, 0xf0, 0x52, 0x51, 4, 3, 2, 1, where 0xf0 is invalid).
+unsigned node_slot_id(ModuleType module, unsigned slot) {
+    // observed: the PROM maps SN0 slot IDs 0-7 through 0xf0, 0xf0, 0x52, 0x51, 4, 3, 2, 1
+    // (0xf0 invalid): IDs 3 and 2 are deskside n1 and n2, IDs 7-4 rack n1-n4.
+    if (module == ModuleType::deskside) {
+        return slot == 1 ? 3 : 2;
+    }
     return (8 - slot) & 7;
 }
 
 Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
                         std::span<const std::byte> prom)
     : machine{owner}, index{node_index}, memory{owner.config_.memory_bytes}, flash{flash_size},
-      flash_device{owner.scheduler_, owner.tracer_, flash.bytes(), [this] { flash_mode_changed(); }},
+      flash_device{owner.scheduler_, owner.tracer_, flash.bytes(), [this] { flash_mode_changed(); },
+                   node_index == 0 ? std::string{} : std::format("node{}.flash", node_index)},
       flash_interface{flash_device, owner.tracer_}, flash_commands{flash_interface},
-      i2c{owner.scheduler_, owner.tracer_, owner.i2c_bus_},
+      i2c{owner.scheduler_, owner.tracer_, owner.i2c_bus_, event_prefix(node_index)},
       directory{owner.tracer_, checked_bank_sizes(owner.config_), owner.config_.directory},
       hub{owner.scheduler_,
           owner.tracer_,
           owner.config_.hub_revision,
-          node_slot_id(slot),
+          node_slot_id(owner.config_.module, slot),
           owner.config_.cpus,
           i2c,
           directory,
           bus,
-          [this] { reset_cpus(ResetKind::cold); }},
+          [this] { reset_cpus(ResetKind::cold); },
+          event_prefix(node_index)},
       cpu_a{bus, owner.tracer_, mips::r10000(cpu_config(owner.config_, prom)), 0},
       synchronized_hub{owner, hub.port(0)}, synchronized_hub_b{owner, hub.port(1)},
       synchronized_flash{owner, flash_interface},
@@ -234,6 +264,18 @@ Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
         // (SMP.adoc).
         cpu_b.emplace(bus, owner.tracer_, mips::r10000(cpu_config(owner.config_, prom)), 1);
         hub.connect_cpu(1, cpu_b->cpu);
+    }
+    for (unsigned widget = 0; widget < xtalk::widget_count; ++widget) {
+        if (widget != hub_widget) {
+            xtalk_windows[widget].emplace(owner, hub.io_window(widget));
+        }
+    }
+    for (unsigned window = 0; window < big_window_count; ++window) {
+        big_windows[window].emplace(owner, hub.big_window(window + 1));
+    }
+    hub.connect_node_id([&owner] { owner.map_views(); });
+    if (owner.config_.nodes > 1) {
+        hub.set_trace_name(std::format("n{} ", slot));
     }
     // Unprogrammed flash reads as 0xff.
     std::ranges::fill(flash.bytes(), std::byte{0xff});
@@ -249,10 +291,22 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     if (node.cpu_b) {
         processors_[1] = &*node.cpu_b;
     }
+    if (config.nodes == 2) {
+        Node& second = *nodes_.emplace_back(std::make_unique<Node>(*this, 1, 2, prom));
+        processors_[2] = &second.cpu_a;
+        if (second.cpu_b) {
+            processors_[3] = &*second.cpu_b;
+        }
+    }
+    for (Processor* p : processors_) {
+        if (p != nullptr) {
+            installed_[cpu_count_++] = p;
+        }
+    }
     if (cpu_count() > 1) {
-        for (Processor* p : processors_) {
-            if (p != nullptr) {
-                p->cpu.connect_coherence(coherence_);
+        for (unsigned i = 0; i < processors_.size(); ++i) {
+            if (processors_[i] != nullptr) {
+                processors_[i]->cpu.connect_coherence(coherence_, i);
             }
         }
     }
@@ -261,9 +315,12 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
         set_execution_engine(mips::ExecutionEngine::tier0);
     }
     i2c_bus_.attach(controller_nvram_);
-    node.hub.connect_xtalk(xbow_);
-    xbow_.attach(hub_xbow_port(config_.node_slot), node.hub.widget());
-    xbow_.attach(baseio_port, baseio_bridge_);
+    for (auto& n : nodes_) {
+        n->hub.connect_xtalk(xbow_);
+        xbow_.attach(hub_xbow_port(config_.module, n->index == 0 ? config_.node_slot : 2),
+                     n->hub.widget());
+    }
+    xbow_.attach(baseio_port(config_.module), baseio_bridge_);
     baseio_bridge_.connect(xbow_);
     // Slate's BaseIO boards (OBS-SLATE-0004), with synthetic barcodes.
     mio_nic_.memory() = board_nic_memory(
@@ -311,76 +368,128 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     std::ranges::copy(initial_controller_nvram(config), controller_nvram_.bytes().begin());
     flash_hash_ = fnv1a(node.flash.bytes());
     for (auto& n : nodes_) {
-        n->map_system_windows();
+        if (n.get() != &node) {
+            n->bus.share_code_writes(node.bus);
+        }
+    }
+    map_views();
+}
+
+void Ip27Machine::map_views() {
+    for (auto& node : nodes_) {
+        node->map_system_windows();
     }
 }
 
 void Ip27Machine::Node::map_system_windows() {
+    // The node's view of the system (SMP.adoc "S5: the second node"): its own resources at
+    // its node ID (physical address bits 39:32), the position-independent aliases at node 0's
+    // addresses (LINUX addrs.h: UALIAS, LBOOT, and IALIAS always reach the reader's own node),
+    // and each other node at that node's ID once the IDs differ. With node ID 0 this is the
+    // one-node map, in which the aliases are the node's own addresses.
+    bus.clear();
+    map_resources(*this, std::uint64_t{hub.node_id()} << node_id_shift);
+    map_aliases();
+    for (const auto& other : machine.nodes_) {
+        if (other.get() != this && other->hub.node_id() != hub.node_id()) {
+            map_resources(*other, std::uint64_t{other->hub.node_id()} << node_id_shift);
+        }
+    }
+}
+
+void Ip27Machine::Node::map_flash(std::uint64_t address) {
+    const PhysicalRange range{PhysicalAddress{address}, flash_size};
+    must_map(flash_device.array_mode()
+                 ? bus.map_memory(range, flash, 0, MemoryAccess::read_only, &synchronized_flash)
+                 : bus.map_mmio(range, synchronized_flash),
+             "boot PROM window");
+}
+
+void Ip27Machine::Node::map_aliases() {
     using mips::system_address::uncached_window;
     const std::uint64_t memory_size = machine.config_.memory_bytes;
-
-    // CAC: cached requests reach memory.
-    must_map(bus.map_memory({PhysicalAddress{0}, memory_size}, memory, 0, MemoryAccess::read_write),
-             "CAC memory window");
-    // UNCAC: uncached attribute 3 reaches memory.
-    must_map(bus.map_memory({PhysicalAddress{uncached_window(uncac_attribute)}, memory_size},
-                            memory, 0, MemoryAccess::read_write),
-             "UNCAC memory window");
     // HSPEC UALIAS: uncached attribute 0, the first 256 MB of node space, reaches memory.
     must_map(bus.map_memory({PhysicalAddress{uncached_window(hspec_attribute)},
                              std::min(memory_size, ualias_size)},
                             memory, 0, MemoryAccess::read_write),
              "UALIAS window");
     // HSPEC LBOOT: the boot PROM, at the base of LBOOT (observed: the PROM reads its
-    // ip27conf block there) and where the reset vector points. HSPEC RBOOT (LINUX addrs.h
-    // NODE_RBOOT_BASE, "Hub's RBOOT space"): the node's boot PROM addressed through the
-    // node's own HSPEC space (observed: the PROM reads the ip27conf processor clock at RBOOT
-    // + 0x70). Reads come straight from the flash array while it is in read-array mode;
-    // writes always reach the flash through its interface (IP27.adoc "Boot PROM").
-    for (const std::uint64_t base : flash_windows) {
-        must_map(
-            bus.map_memory({PhysicalAddress{uncached_window(hspec_attribute) + base}, flash_size},
-                           flash, 0, MemoryAccess::read_only, &synchronized_flash),
-            "boot PROM window");
+    // ip27conf block there) and where the reset vector points. Reads come straight from the
+    // flash array while it is in read-array mode; writes always reach the flash through its
+    // interface (IP27.adoc "Boot PROM").
+    for (const std::uint64_t base : {lboot_base, reset_flash_base}) {
+        map_flash(uncached_window(hspec_attribute) + base);
     }
     // Command writes address the flash at offset << 3, so writing all of it takes 8 MB of
     // LBOOT (observed: sector 14's erase command goes to LBOOT + 0x700000). hypothesis: the
-    // rest of that range only takes writes; RBOOT decodes the same way.
-    for (const std::uint64_t base : {lboot_base, rboot_base}) {
-        must_map(
-            bus.map_mmio({PhysicalAddress{uncached_window(hspec_attribute) + base + flash_size},
-                          flash_command_span - flash_size},
-                         synchronized_flash_commands),
-            "boot PROM command window");
+    // rest of that range only takes writes.
+    must_map(bus.map_mmio({PhysicalAddress{uncached_window(hspec_attribute) + lboot_base +
+                                           flash_size},
+                           flash_command_span - flash_size},
+                          synchronized_flash_commands),
+             "boot PROM command window");
+    // IO IALIAS: the local Hub's registers. Each CPU reaches the Hub through its own port
+    // (ADR-023).
+    must_map(bus.map_ports({PhysicalAddress{uncached_window(io_attribute) +
+                                            (hub_widget << small_window_shift)},
+                            Hub::window_size},
+                           {&synchronized_hub, &synchronized_hub_b}),
+             "Hub window");
+}
+
+void Ip27Machine::Node::map_resources(Node& node, std::uint64_t base) {
+    using mips::system_address::uncached_window;
+    const std::uint64_t memory_size = machine.config_.memory_bytes;
+    const bool own = &node == this;
+    // CAC: cached requests reach memory.
+    must_map(bus.map_memory({PhysicalAddress{base}, memory_size}, node.memory, 0,
+                            MemoryAccess::read_write),
+             "CAC memory window");
+    // UNCAC: uncached attribute 3 reaches memory.
+    must_map(bus.map_memory({PhysicalAddress{uncached_window(uncac_attribute) + base}, memory_size},
+                            node.memory, 0, MemoryAccess::read_write),
+             "UNCAC memory window");
+    // HSPEC RBOOT (LINUX addrs.h NODE_RBOOT_BASE, "Hub's RBOOT space"): the node's boot PROM
+    // addressed through the node's own HSPEC space (observed: the PROM reads the ip27conf
+    // processor clock at RBOOT + 0x70). Commands decode as in LBOOT (hypothesis).
+    const std::uint64_t rboot = uncached_window(hspec_attribute) + base + rboot_base;
+    if (own) {
+        map_flash(rboot);
+    } else {
+        // Another node's PROM, read through its interface (its array mode is its own).
+        must_map(bus.map_mmio({PhysicalAddress{rboot}, flash_size}, node.synchronized_flash),
+                 "remote boot PROM window");
     }
+    must_map(bus.map_mmio({PhysicalAddress{rboot + flash_size}, flash_command_span - flash_size},
+                          node.synchronized_flash_commands),
+             "boot PROM command window");
     // HSPEC back door: directory and protection memory at 3 GB (IP27.adoc "Memory and
     // directory").
-    must_map(bus.map_mmio({PhysicalAddress{uncached_window(hspec_attribute) +
+    must_map(bus.map_mmio({PhysicalAddress{uncached_window(hspec_attribute) + base +
                                            DirectoryMemory::window_offset},
                            DirectoryMemory::window_size},
-                          directory),
+                          node.directory),
              "back-door directory window");
-    // IO: the local Hub's registers, at IALIAS and at the remote-Hub alias for this node
-    // (widget 1 window + 0x800000, LINUX REMOTE_HUB_ADDR; observed: the PROM uses it for its
-    // own NASID 0).
+    // IO: the node's Hub registers at the remote-Hub alias (widget 1 window + 0x800000, LINUX
+    // REMOTE_HUB_ADDR; observed: the PROM uses it for its own NASID 0). A remote request comes
+    // over the link rather than from a processor: hypothesis, the Hub answers it as from
+    // slice A.
     const std::uint64_t hub_window =
-        uncached_window(io_attribute) + (hub_widget << small_window_shift);
-    // Each CPU reaches the Hub through its own port (ADR-023).
-    for (const std::uint64_t base : {hub_window, hub_window + Hub::window_size}) {
-        must_map(bus.map_ports({PhysicalAddress{base}, Hub::window_size},
-                               {&synchronized_hub, &synchronized_hub_b}),
-                 "Hub window");
-    }
-    // IO: every other widget's small window is PIO over the Hub's crosstalk link.
+        uncached_window(io_attribute) + base + (hub_widget << small_window_shift);
+    must_map(bus.map_ports({PhysicalAddress{hub_window + Hub::window_size}, Hub::window_size},
+                           own ? AddressSpace::Ports{&synchronized_hub, &synchronized_hub_b}
+                               : AddressSpace::Ports{&node.synchronized_hub,
+                                                     &node.synchronized_hub}),
+             "Hub window");
+    // IO: every other widget's small window is PIO over the node's crosstalk link.
     for (unsigned widget = 0; widget < xtalk::widget_count; ++widget) {
         if (widget == hub_widget) {
             continue;
         }
-        auto& window = xtalk_windows[widget].emplace(machine, hub.io_window(widget));
-        must_map(bus.map_mmio({PhysicalAddress{uncached_window(io_attribute) +
-                                                (std::uint64_t{widget} << small_window_shift)},
-                                xtalk::small_window_size},
-                               window),
+        must_map(bus.map_mmio({PhysicalAddress{uncached_window(io_attribute) + base +
+                                               (std::uint64_t{widget} << small_window_shift)},
+                               xtalk::small_window_size},
+                              *node.xtalk_windows[widget]),
                  "crosstalk window");
     }
     // IO: the big windows (M mode: seven of 512 MB from IO + 512 MB, LINUX sn0/addrs.h
@@ -388,11 +497,10 @@ void Ip27Machine::Node::map_system_windows() {
     // (Hub::BigWindow). observed: IRIX programs the ITTEs, and its flash utility reaches the
     // BaseIO PROM through one.
     for (unsigned window = 0; window < big_window_count; ++window) {
-        auto& target = big_windows[window].emplace(machine, hub.big_window(window + 1));
-        must_map(bus.map_mmio({PhysicalAddress{uncached_window(io_attribute) +
-                                                (std::uint64_t{window + 1} << big_window_shift)},
-                                std::uint64_t{1} << big_window_shift},
-                               target),
+        must_map(bus.map_mmio({PhysicalAddress{uncached_window(io_attribute) + base +
+                                               (std::uint64_t{window + 1} << big_window_shift)},
+                               std::uint64_t{1} << big_window_shift},
+                              *node.big_windows[window]),
                  "crosstalk big window");
     }
 }
@@ -435,16 +543,8 @@ std::expected<void, AccessFault> Ip27Machine::FlashCommands::mmio_write(std::uin
 }
 
 void Ip27Machine::Node::flash_mode_changed() {
-    using mips::system_address::uncached_window;
-    for (const std::uint64_t base : flash_windows) {
-        const PhysicalRange range{PhysicalAddress{uncached_window(hspec_attribute) + base},
-                                  flash_size};
-        must_map(
-            flash_device.array_mode()
-                ? bus.remap_memory(range, flash, 0, MemoryAccess::read_only, &synchronized_flash)
-                : bus.remap_mmio(range, synchronized_flash),
-            "boot PROM window");
-    }
+    // Every view that reads this flash fast follows its mode; rebuilding them is simplest.
+    machine.map_views();
 }
 
 void Ip27Machine::load_baseio_flash(std::span<const std::byte> image) {
@@ -457,9 +557,9 @@ void Ip27Machine::load_baseio_flash(std::span<const std::byte> image) {
     baseio_bridge_.connect_flash(baseio_flash_device_);
 }
 
-void Ip27Machine::load_flash(std::span<const std::byte> contents) {
+void Ip27Machine::load_flash(std::span<const std::byte> contents, unsigned node) {
     invariant(contents.size() == flash_size, "flash contents are 1 MB");
-    std::ranges::copy(contents, nodes_.front()->flash.bytes().begin());
+    std::ranges::copy(contents, nodes_.at(node)->flash.bytes().begin());
 }
 
 void Ip27Machine::connect_ethernet(EthernetLink* link) {
@@ -484,7 +584,7 @@ StateImage Ip27Machine::save_state() {
     image.put("machine.memory_bytes", config_.memory_bytes);
     image.put("machine.cpu_clock", config_.cpu_clock.hertz);
     image.put("machine.flash_hash", flash_hash_);
-    image.put("machine.baseio_port", std::uint64_t{baseio_port});
+    image.put("machine.baseio_port", std::uint64_t{baseio_port(config_.module)});
     Node& node = *nodes_.front();
     if (node.cpu_b) {
         // One-CPU snapshots have no such key and keep their format.
@@ -513,7 +613,41 @@ StateImage Ip27Machine::save_state() {
     controller_nvram_.save_state(image, "controller_nvram");
     node.directory.save_state(image);
     image.put_sparse("memory", node.memory.bytes());
+    if (nodes_.size() > 1) {
+        // The second node's components keep their field names under "node1.".
+        image.put("machine.nodes", std::uint64_t{nodes_.size()});
+        StateImage second;
+        nodes_[1]->save_state(second);
+        image.put_image("node1.", second);
+    }
     return image;
+}
+
+void Ip27Machine::Node::save_state(StateImage& image) const {
+    cpu_a.cpu.save_state(image);
+    if (cpu_b) {
+        cpu_b->cpu.save_state(image, "slice_b.");
+    }
+    hub.save_state(image);
+    i2c.save_state(image);
+    flash_device.save_state(image);
+    directory.save_state(image);
+    image.put_sparse("memory", memory.bytes());
+}
+
+bool Ip27Machine::Node::load_state(const StateImage& image) {
+    if (!image.get_sparse("memory", memory.bytes())) {
+        return false;
+    }
+    cpu_a.cpu.load_state(image);
+    if (cpu_b) {
+        cpu_b->cpu.load_state(image, "slice_b.");
+    }
+    hub.load_state(image);
+    i2c.load_state(image);
+    flash_device.load_state(image);
+    directory.load_state(image);
+    return true;
 }
 
 std::expected<void, std::string> Ip27Machine::load_state(const StateImage& image) {
@@ -535,13 +669,18 @@ std::expected<void, std::string> Ip27Machine::load_state(const StateImage& image
     // this field had the BaseIO on Crossbow port 15.
     std::uint64_t snapshot_baseio_port = 0xf;
     image.get("machine.baseio_port", snapshot_baseio_port);
-    if (snapshot_baseio_port != baseio_port) {
+    if (snapshot_baseio_port != baseio_port(config_.module)) {
         return std::unexpected("snapshot was taken with the BaseIO on another Crossbow port");
     }
     std::uint64_t cpus = 1;
     image.get("machine.cpus", cpus);
     if (cpus != config_.cpus) {
         return std::unexpected("snapshot was taken with a different number of CPUs");
+    }
+    std::uint64_t nodes = 1;
+    image.get("machine.nodes", nodes);
+    if (nodes != nodes_.size()) {
+        return std::unexpected("snapshot was taken with a different number of nodes");
     }
     if (std::ranges::any_of(processors_,
                             [](const Processor* p) { return p != nullptr && p->cpu.cycles() != 0; })) {
@@ -575,6 +714,11 @@ std::expected<void, std::string> Ip27Machine::load_state(const StateImage& image
     ethernet_phy_.load_state(image);
     controller_nvram_.load_state(image, "controller_nvram");
     node.directory.load_state(image);
+    if (nodes_.size() > 1 && !nodes_[1]->load_state(image.sub_image("node1."))) {
+        return std::unexpected("snapshot memory is malformed");
+    }
+    // The Hubs' node IDs and the flash modes decide each node's view.
+    map_views();
     update_next_event();
     return {};
 }
@@ -621,10 +765,15 @@ void Ip27Machine::step() {
 
 void Ip27Machine::step(Processor& processor) {
     const mips::IntegerState& state = processor.cpu.state();
-    // With several CPUs, each line names the CPU's slice.
-    const std::string_view slice = cpu_count() == 1                ? ""
-                                   : &processor == processors_[0] ? "A "
-                                                                  : "B ";
+    // With several CPUs, each line names the CPU's slice, and with two nodes its node slot.
+    constexpr std::array<std::string_view, 4> slices = {"A ", "B ", "n2 A ", "n2 B "};
+    constexpr std::array<std::string_view, 4> node_slices = {"n1 A ", "n1 B ", "n2 A ",
+                                                             "n2 B "};
+    const auto index = static_cast<std::size_t>(std::ranges::find(processors_, &processor) -
+                                                processors_.begin());
+    const std::string_view slice = cpu_count() == 1   ? ""
+                                   : nodes_.size() > 1 ? node_slices[index]
+                                                       : slices[index];
     for (const std::uint64_t probe : pc_probes_) {
         if (probe == state.pc) {
             tracer_.log(TraceCategory::cpu,
@@ -646,7 +795,17 @@ void Ip27Machine::step(Processor& processor) {
     }
 }
 
-void Ip27Machine::synchronize_time() {
+std::uint64_t Ip27Machine::lowest_of_several() const {
+    std::uint64_t lowest = std::numeric_limits<std::uint64_t>::max();
+    for (unsigned i = 0; i < cpu_count_; ++i) {
+        lowest = std::min(lowest, installed_[i]->cpu.cycles());
+    }
+    return lowest;
+}
+
+// On every device access (SynchronizedTarget), so inlined there: measured 2026-10-14, the call
+// cost the device-bound `prom` workload about 3%.
+[[gnu::always_inline]] inline void Ip27Machine::synchronize_time() {
     invariant(!executing_ || synchronized_accesses_ != 0,
               "events run only between instructions or inside a synchronized access");
     scheduler_.advance_to(cpu_time_.time_at(lowest_cycles()));
@@ -730,7 +889,7 @@ void Ip27Machine::run(std::uint64_t cycles) {
 }
 
 void Ip27Machine::run_processor(bool observed) {
-    Processor& p = *processors_[running_];
+    Processor& p = *installed_[running_];
     if (observed) {
         while (p.cpu.cycles() < stop_cycle_) {
             step(p);
@@ -759,15 +918,12 @@ void Ip27Machine::run_many(std::uint64_t cycles) {
     bool in_slice = false;
     while (in_slice || lowest_cycles() < run_end_cycle_) {
         if (!in_slice) {
-            std::optional<unsigned> behind;
-            for (unsigned i = 0; i < processors_.size(); ++i) {
-                if (processors_[i] != nullptr &&
-                    (!behind ||
-                     processors_[i]->cpu.cycles() < processors_[*behind]->cpu.cycles())) {
-                    behind = i;
+            running_ = 0;
+            for (unsigned i = 1; i < cpu_count_; ++i) {
+                if (installed_[i]->cpu.cycles() < installed_[running_]->cpu.cycles()) {
+                    running_ = i;
                 }
             }
-            running_ = *behind;
             slice_end_cycle_ = lowest_other_cycles() + config_.cpu_slice;
         }
         update_next_event();
@@ -776,7 +932,7 @@ void Ip27Machine::run_many(std::uint64_t cycles) {
             synchronize_time();
         }
         // A stop ends the slice; the CPU behind then catches up to the stop (update_next_event).
-        in_slice = !stop_requested_ && processors_[running_]->cpu.cycles() < slice_end_cycle_;
+        in_slice = !stop_requested_ && installed_[running_]->cpu.cycles() < slice_end_cycle_;
     }
     running_ = 0;
     slice_end_cycle_ = std::numeric_limits<std::uint64_t>::max();

@@ -116,6 +116,10 @@ class AddressSpace {
                                                std::uint64_t block_offset, MemoryAccess access,
                                                MmioTarget* write_target = nullptr);
     std::expected<void, MapError> remap_mmio(PhysicalRange range, MmioTarget& target);
+    // Removes every mapping, so a machine can rebuild its decoding (an IP27 node whose ID
+    // changed). A target's access may do this: the space does not touch the mapping after
+    // calling it.
+    void clear();
 
     std::expected<std::uint64_t, AccessFault> read(PhysicalAddress address, AccessWidth width,
                                                    unsigned requester = 0);
@@ -151,9 +155,14 @@ class AddressSpace {
     [[nodiscard]] std::optional<MmioRange> mmio_range(PhysicalAddress address, std::uint64_t size,
                                                      unsigned requester = 0) const;
     // Writes through this space that touched a frame holding decoded code (write and
-    // writable_memory_bytes).
+    // writable_memory_bytes), and through every space sharing its count.
     [[nodiscard]] std::uint64_t code_writes() const {
-        return code_writes_;
+        return *code_writes_;
+    }
+    // Counts code-frame writes together with `other` (which must outlive this space): spaces
+    // that map the same memory, so that a CPU on one sees writes made through the other.
+    void share_code_writes(AddressSpace& other) {
+        code_writes_ = other.code_writes_;
     }
     // Changes whenever a mapping is added or replaced.
     [[nodiscard]] std::uint64_t generation() const {
@@ -188,7 +197,8 @@ class AddressSpace {
     // IP27 PROM runs (callgrind, 2026-09-24).
     mutable std::size_t last_hit_{};
     std::uint64_t generation_{};
-    std::uint64_t code_writes_{};
+    std::uint64_t own_code_writes_{};
+    std::uint64_t* code_writes_{&own_code_writes_};
 };
 
 } // namespace ultraviolent
