@@ -347,6 +347,32 @@ and both Hubs' crosstalk links on the module's one Crossbow, which carries the B
   NI_VECTOR, NI_VECTOR_DATA, and the results in NI_VECTOR_STATUS, NI_RETURN_VECTOR,
   NI_VECTOR_READ_DATA (LINUX `hubni.h`; storage only today, IP27.adoc "Storage-only
   registers").
+* The PROM's vector PIO (disassembly of `0x1fc14c2c`, write, and `0x1fc14ed0`, read; their
+  callers pass the route, the data, the NI address, and a result pointer), `observed`:
+  read NI_VECTOR_CLEAR (`0x600380`), then NI_VECTOR_STATUS, and give up (-1) if VALID (bit
+  63) is still set; for a read, write `0xdeadbeefdeadbeef` to NI_VECTOR_READ_DATA; write
+  the route to NI_VECTOR and, for a write, the data to NI_VECTOR_DATA; set an NI_AGE
+  register's virtual channel to 1 (`0x600500` or `0x600510`), write NI_VECTOR_PARMS, and
+  restore the age register. PARMS holds the address bits 19:3, a write ID in 39:32, a PIO ID
+  in 49:40 (`0x7b` for writes, `0x1c8` for reads), and the type in 1:0. It then polls
+  NI_VECTOR_STATUS every 100 µs (a count from PROM data) for VALID, retrying the whole
+  operation up to eight times (-7 when all time out). Then OVERRUN (bit 62) is -2, and the
+  status type (2:0) 4, 5, or 6 is -4, -5, or -6 (address, command, protection error). A
+  write succeeds only when the status echoes type 1, the PIO ID, the write ID, and the
+  address; a read returns NI_VECTOR_READ_DATA. The address field is an offset in the
+  target's NI space: the discovery's read of `0x600000` is the neighbor's NI_STATUS_REV_ID
+  (LINUX field masks: NVP_ADDRESS bits 19:3).
+* PROM messages give the shape of discovery (strings in the image): the global master reads
+  each Hub's NIC ("Could not read remote NIC for nasid %d"), assigns node IDs ("Distributing
+  NASIDs", "Notifying Hub: index %d, nic 0x%lx, nasid %d") while the others wait ("Local
+  Master: Waiting for my NASID ...", "Local Slave : Waiting for my NASID ..."); a Hub with
+  no CPUs is "headless"; "Peer HUB detected on Xbow but no NUMAlink connection" shows each
+  PROM also looks for the other Hub on the Crossbow. "04: verbose" is one of the system
+  controller's debug switches ("dbg" in POD), which our ELSC model cannot report yet.
+* The deskside module type follows from the node slot IDs (IP27.adoc "Machine type"):
+  slot ID 3 is n1 on Crossbow port `0xa`, ID 2 is n2 on port 9, and the BaseIO is io1 on
+  port 15. The installed IRIX boots unchanged on that layout. The machine today uses the
+  rack layout (n1 on port 9, the BaseIO on 8), where n1 and n2 are on different Crossbows.
 * NI_STATUS_REV_ID holds the Hub's node ID in bits 16:8 (LINUX NSRI_NODEID; the PROM reads it
   with mask `0x1ff00`, `observed`); physical address bits 39:32 select the node (PRM §1.2.1);
   before node IDs are assigned they are all zero (PRM §1.2.3).

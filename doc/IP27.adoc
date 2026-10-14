@@ -549,6 +549,27 @@ slot IDs 0–7 through the table `0xf0, 0xf0, 0x52, 0x51, 4, 3, 2, 1` (`0xf0` in
 slots n1–n4 are IDs 7–4. `Ip27Config::node_slot` (default n1, as slate's first node board)
 selects it. Slot ID 0 had given "cpu in SLOT Invalid0" and `/hw/module/0/slot/n0`.
 
+Deskside and rack modules (`observed` 2026-10-14, disassembly and a load watch on the
+running PROM):
+
+* The slot-code function (`0x1fc461fc`) returns, for SN0, the table entry for the slot ID.
+  The table is the one above unless bit 0 of the word at LBOOT + `0xa8` is set (0 in the
+  user's image); then it is `0xf0, 0xf0, 6, 5, 4, 3, 2, 1`.
+* Codes `0x5n` are deskside ("Kego") node slots: slot ID 3 is n1 (`0x51`), slot ID 2 is n2
+  (`0x52`). Codes 1–4 are rack node slots n1–n4 (IDs 7–4).
+* `xbwidget_to_xtslot` (`0x1fc419cc`, named by its error message "crossbow nonzero on
+  Kego") turns a Crossbow widget into an IO slot code with one of four tables (IP27.adoc
+  "Crossbow"): the deskside table when the node's slot code is `0x5n` (and only for
+  Crossbow 0), the SN00 table when LBOOT + `0x90` is nonzero, else the rack table of
+  Crossbow 0 or 1. So the module type follows from the node's slot ID: a deskside midplane
+  gives its node slots IDs 3 and 2. `inferred` for slate, whose names agree (n1 on port
+  `0xa`, n2 on 9, the BaseIO on 15 named io1).
+* With slot ID 3, the Hub on port `0xa`, and the BaseIO on 15 (a scratch build), the PROM's
+  console output to its menu is identical to the rack layout's (n1, io1, "Global master is
+  /hw/module/1/slot/n1"), and the installed IRIX boots to `login:` with identical console
+  output on one and on two CPUs; the cycle counts differ slightly (`boot` 16,375,376,704
+  against 16,375,106,269).
+
 == Xtalk
 
 `xtalk::Link` is a crosstalk link's far end: PIO requests name a widget (0–15) and an offset
