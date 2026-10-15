@@ -78,7 +78,8 @@ struct Ip27Config {
     // The node board's module slot, n1-n4 (IP27.adoc "Machine type"); n1 like slate's first
     // node board. With two nodes they are n1 and n2.
     unsigned node_slot{1};
-    ModuleType module{ModuleType::rack};
+    // Deskside, slate's chassis (ADR-021, the target); a rack module is the other layout.
+    ModuleType module{ModuleType::deskside};
     // Node boards: 1, or 2 in a deskside module (SMP.adoc "S5: the second node"). Each has
     // `memory_bytes` and `cpus`.
     unsigned nodes{1};

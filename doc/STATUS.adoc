@@ -13,7 +13,8 @@ two-CPU reference was hardened (2026-10-13): two-CPU benchmark workloads (`boot2
 `mix2`, `reboot2`) agree on all three engines, and three defects were fixed (tracing changed
 the schedule; the CPUs left a local reset out of phase; the ISP1020 lost a completion).
 Next, chosen with the user (2026-10-13): S5, the second node, before S4; S5.0 and S5.1
-(nodes and routing, link down) are done (2026-10-14).** Next: see Next task.
+(nodes and routing, link down) are done (2026-10-14). The deskside module, slate's chassis,
+is the default (with the user, 2026-10-15; ADR-021 addendum).** Next: see Next task.
 
 Before it, the performance baseline (ROADMAP "After RC-IP27"; started 2026-09-28). The repository is public
 at RC-IP27 (the user chose no tag or release). Tier 0 stages A-H are done (2026-10-08): tier
@@ -445,11 +446,12 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   the user's agreement). S5.0 and S5.1 are done (2026-10-14, SMP.adoc "Progress"): the
   machine is built of nodes, `--module deskside --nodes 2` gives slate's topology with the
   link down, each node's address view follows the node IDs, and every one- and two-CPU
-  digest is unchanged. For the review: the S5.2 approach (model the NI link and vector PIO
-  from the IRIX-derived header and the PROM's observed protocol, then follow the PROM's
-  discovery by its messages and Hub trace); whether to make the deskside module the default
-  (slate's shape; the installed IRIX boots unchanged on it, but every digest and snapshot
-  changes); the node NICs (each Hub's MicroLAN has none yet, and discovery identifies Hubs
+  digest is unchanged. Decided 2026-10-15: the deskside module is the default (ADR-021
+  addendum; `--module rack` keeps the other layout); the benchmark fixture was rebuilt and
+  its results are the new baselines (session log 2026-10-15). Still for the review: the
+  S5.2 approach (model the NI link and vector PIO from the IRIX-derived header and the
+  PROM's observed protocol, then follow the PROM's discovery by its messages and Hub
+  trace); the node NICs (each Hub's MicroLAN has none yet, and discovery identifies Hubs
   by NIC). slate (an Onyx2 deskside, which is the Origin 2000 deskside module with graphics;
   the target, ADR-021) is needed for: `ls -l /hw/nodenum`, POD reads of NI_STATUS_REV_ID,
   NI_PORT_PARMS, and IIO_ILCSR on each node, and with the user's agreement the ISP1020
@@ -1420,4 +1422,37 @@ Unknowns: who writes the node ID field and when (S5.2 will show it); the link's 
   behavior; the node NICs' effect on discovery; whether the ISP1020 rule holds on slate.
 Best checkpoint: unchanged (one- and two-CPU checkpoints).
 Next step: the user's review of the S5.2 approach and the deskside default; then S5.2.
+----
+
+----
+Date: 2026-10-15
+Milestone: SMP IP27, S5 (deskside default)
+Hypothesis: making slate's deskside module the default changes no guest behavior beyond
+  the slot ID and Crossbow ports, so the console output stays the same.
+Evidence: the PROM's console output to its menu, rack against deskside (byte-identical);
+  the benchmark workloads on the rebuilt fixture on all three engines.
+Changed: Ip27Config::module and the --module default are deskside (ADR-021 addendum, with
+  the user); snapshots record machine.module and machine.node_slot (absent: rack n1) and
+  refuse another, closing a gap: the BaseIO port alone accepted a pre-2026-10 snapshot
+  (BaseIO on 15, Hub on port 9) in a deskside machine; ip27.hub_windows and
+  ip27.crosstalk_windows test the deskside default and keep a rack check; IP27.adoc
+  "Machine type" and Crossbow, SMP.adoc "Progress", DECISIONS ADR-021.
+Tests: ip27.snapshot_resumes_exactly refuses rack and other-slot snapshots; dev, asan, and
+  gcc green. The bench fixture's shell snapshots were rebuilt
+  (/var/tmp/ultraviolent-bench/fixture; the rack ones kept in fixture-rack). New baselines
+  (`local/bench/r3600/n-deskside-tier1.json`, PGO, best of 3, M cycles/s; digests): prom
+  295.4 1fb8ad1e76d615aa, boot 211.2 8218c3f6dc256986, cpu 304.4 8fcd9caad72919df, fs
+  292.0 46f5442bca3d70ee, boot2 211.6 03267d8179f3b487, cpu2 228.5 d30228d25a64c828, mix2
+  247.4 86f5342e820be32b, reboot2 211.7 3795ed343fa678fa. Speeds are within 2% of the
+  rack layout's (b4e3b67). Tier 0 and the reference interpreter give the same eight
+  digests (`n-deskside-tier0.out`, `n-deskside-reference.out`).
+Newly proven: the digest covers the stop line, so a cycle count alone changes it: prom
+  stops at 8,133,653,981 cycles against the rack's 8,133,653,960 with the same console
+  bytes (the other workloads' text was not compared byte for byte); one-CPU login at 16,487,876,740 against 16,487,043,805, two-CPU at
+  16,362,586,991 against 16,365,963,072.
+Disproven: none.
+Unknowns: as on 2026-10-14 (the node ID writer, the link registers, the node NICs, the
+  ISP1020 rule on slate).
+Best checkpoint: the deskside fixture (bench.py fixture, then fixture --cpus 2).
+Next step: the user's review of the S5.2 approach and the node NICs; then S5.2.
 ----

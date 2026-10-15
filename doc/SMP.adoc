@@ -312,7 +312,8 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
     PROM, PCF8584 on the module's I2C bus, directory, CPUs, and its own view of physical
     addresses. `--module deskside` (slate's module: slot IDs 3 and 2, Hubs on Crossbow ports
     `0xa` and 9, the BaseIO on 15) and `--nodes 2` (deskside only) select the topology;
-    `--flash` is given once per node. One rack node stays the default.
+    `--flash` is given once per node. One rack node stays the default (until 2026-10-15,
+    below).
   - Each node's view follows the node IDs (Hub NI_STATUS_REV_ID bits 16:8, `hypothesis`
     writable; the Hub reports a change and the machine rebuilds every view): its own
     memory, PROM (RBOOT), directory back door, Hub registers (REMOTE_HUB), and crosstalk
@@ -346,6 +347,12 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
     register (`0x15c` for n2, `0x19c` for n1), then one clears them all and takes port 9's;
     neither reaches the console (none of the PROM's buffered output appears in 111 s of
     virtual time). Real hardware with two nodes always has the link, so this is not pursued.
+* **Deskside default (2026-10-15, with the user; ADR-021 addendum).** One node in deskside
+  n1 (slot ID 3, Crossbow port `0xa`, the BaseIO on 15) is the default; `--module rack`
+  keeps the rack layout. Snapshots record the module and node slot (`machine.module`,
+  `machine.node_slot`; absent, rack n1) and refuse another. Every benchmark digest and
+  snapshot changed once; the fixture was rebuilt and the new results are the baselines
+  (STATUS session log 2026-10-15).
 
 Reproduce (the cold boot to a two-CPU root shell; copy the disk and state first as in
 STATUS "How to reproduce"):
@@ -417,8 +424,9 @@ and both Hubs' crosstalk links on the module's one Crossbow, which carries the B
   controller's debug switches ("dbg" in POD), which our ELSC model cannot report yet.
 * The deskside module type follows from the node slot IDs (IP27.adoc "Machine type"):
   slot ID 3 is n1 on Crossbow port `0xa`, ID 2 is n2 on port 9, and the BaseIO is io1 on
-  port 15. The installed IRIX boots unchanged on that layout. The machine today uses the
-  rack layout (n1 on port 9, the BaseIO on 8), where n1 and n2 are on different Crossbows.
+  port 15. The installed IRIX boots unchanged on that layout. Until 2026-10-15 the machine
+  used the rack layout (n1 on port 9, the BaseIO on 8), where n1 and n2 are on different
+  Crossbows; deskside is now the default (IP27.adoc "Machine type").
 * NI_STATUS_REV_ID holds the Hub's node ID in bits 16:8 (LINUX NSRI_NODEID; the PROM reads it
   with mask `0x1ff00`, `observed`); physical address bits 39:32 select the node (PRM §1.2.1);
   before node IDs are assigned they are all zero (PRM §1.2.3).

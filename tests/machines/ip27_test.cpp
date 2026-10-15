@@ -221,11 +221,19 @@ const test::Registration hub_windows{
         // The Hub answers at IALIAS and at the remote-Hub alias for NASID 0 (IP27.adoc "IO").
         Ip27Machine machine{small_config(), program({nop()})};
         machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
-        // MD_SLOTID_USTAT: FPROMRDY and slot ID 7, node slot n1 (the default).
+        // MD_SLOTID_USTAT: FPROMRDY and slot ID 3, deskside node slot n1 (the default).
         t.check_equal(machine.cpu().load(0x9200'0000'0122'0048, AccessWidth::bits64).value_or(0),
-                      std::uint64_t{0x17});
+                      std::uint64_t{0x13});
         t.check_equal(machine.cpu().load(0x9200'0000'01a2'0048, AccessWidth::bits64).value_or(0),
-                      std::uint64_t{0x17});
+                      std::uint64_t{0x13});
+        // A rack module's n1 has slot ID 7.
+        Ip27Config rack = small_config();
+        rack.module = ip27::ModuleType::rack;
+        Ip27Machine rack_machine{rack, program({nop()})};
+        rack_machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
+        t.check_equal(
+            rack_machine.cpu().load(0x9200'0000'0122'0048, AccessWidth::bits64).value_or(0),
+            std::uint64_t{0x17});
     }};
 
 const test::Registration virtual_time{
@@ -404,6 +412,23 @@ const test::Registration snapshot{
         other.memory_bytes = 32u << 20;
         Ip27Machine mismatched{other, prom};
         t.check(!mismatched.load_state(*image).has_value());
+        // And another module type or node slot: the guest saw its slot ID and Crossbow ports.
+        // Snapshots without these fields were taken in rack slot n1.
+        Ip27Config rack = small_config();
+        rack.module = ip27::ModuleType::rack;
+        Ip27Machine in_rack{rack, prom};
+        t.check(!in_rack.load_state(*image).has_value(), "a rack module refuses it");
+        Ip27Machine rack_first{rack, prom};
+        rack_first.run(100);
+        Ip27Machine deskside{small_config(), prom};
+        t.check(!deskside.load_state(rack_first.save_state()).has_value(),
+                "a deskside module refuses a rack snapshot");
+        Ip27Config n2 = small_config();
+        n2.node_slot = 2;
+        Ip27Machine n2_first{n2, prom};
+        n2_first.run(100);
+        Ip27Machine n1{small_config(), prom};
+        t.check(!n1.load_state(n2_first.save_state()).has_value(), "another node slot is refused");
     }};
 
 const test::Registration back_door{
@@ -452,13 +477,15 @@ const test::Registration crosstalk{
         // IO widget 0 is the crossbow; its WIDGET_ID at offset 4.
         t.check_equal(machine.cpu().load(0x9200'0000'0000'0004, AccessWidth::bits32).value_or(0),
                       std::uint64_t{0x4000'0001});
-        // The n1 Hub is on port 9: link 9 alive, and widget 9 answers with the Hub's ID.
-        t.check_equal(machine.cpu().load(0x9200'0000'0000'0154, AccessWidth::bits32).value_or(0),
+        // The n1 Hub is on port 0xa (deskside, the default): link 0xa alive, and widget 0xa
+        // answers with the Hub's ID.
+        t.check_equal(machine.cpu().load(0x9200'0000'0000'0194, AccessWidth::bits32).value_or(0),
                       std::uint64_t{0x8000'0000});
-        t.check_equal(machine.cpu().load(0x9200'0000'0900'0004, AccessWidth::bits32).value_or(0) >>
+        t.check_equal(machine.cpu().load(0x9200'0000'0a00'0004, AccessWidth::bits32).value_or(0) >>
                               12 &
                           0xffff,
                       std::uint64_t{0xc101});
+        t.check_equal(ip27::hub_xbow_port(ip27::ModuleType::rack, 1), 0x9u);
         t.check_equal(ip27::hub_xbow_port(ip27::ModuleType::rack, 2), 0xau);
         // slate's deskside: n1 on 0xa, n2 on 9, the BaseIO (io1) on 15.
         t.check_equal(ip27::hub_xbow_port(ip27::ModuleType::deskside, 1), 0xau);

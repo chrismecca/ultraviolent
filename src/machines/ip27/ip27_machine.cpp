@@ -9,6 +9,7 @@
 #include <format>
 #include <limits>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace ultraviolent::ip27 {
@@ -585,6 +586,8 @@ StateImage Ip27Machine::save_state() {
     image.put("machine.cpu_clock", config_.cpu_clock.hertz);
     image.put("machine.flash_hash", flash_hash_);
     image.put("machine.baseio_port", std::uint64_t{baseio_port(config_.module)});
+    image.put("machine.module", std::uint64_t{std::to_underlying(config_.module)});
+    image.put("machine.node_slot", std::uint64_t{config_.node_slot});
     Node& node = *nodes_.front();
     if (node.cpu_b) {
         // One-CPU snapshots have no such key and keep their format.
@@ -671,6 +674,15 @@ std::expected<void, std::string> Ip27Machine::load_state(const StateImage& image
     image.get("machine.baseio_port", snapshot_baseio_port);
     if (snapshot_baseio_port != baseio_port(config_.module)) {
         return std::unexpected("snapshot was taken with the BaseIO on another Crossbow port");
+    }
+    // Snapshots from before these fields were taken in rack slot n1 (the slot ID and Hub port
+    // the guest saw).
+    std::uint64_t module = std::to_underlying(ModuleType::rack);
+    std::uint64_t node_slot = 1;
+    image.get("machine.module", module);
+    image.get("machine.node_slot", node_slot);
+    if (module != std::to_underlying(config_.module) || node_slot != config_.node_slot) {
+        return std::unexpected("snapshot was taken in another module type or node slot");
     }
     std::uint64_t cpus = 1;
     image.get("machine.cpus", cpus);

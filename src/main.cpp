@@ -101,7 +101,7 @@ void usage() {
         "CPUs take turns, the one behind running until it is --cpu-slice cycles ahead\n"
         "(default 180, 1 us at 180 MHz; 1 alternates every cycle). --cycles counts each\n"
         "CPU's cycles.\n"
-        "--module deskside puts the node in a deskside module, as slate (default rack;\n"
+        "--module rack puts the node in a rack module (default deskside, as slate;\n"
         "doc/IP27.adoc \"Machine type\"). --nodes 2 adds a second node board in n2 (deskside\n"
         "only; doc/SMP.adoc); give --flash once per node to keep each node's flash PROM.\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
@@ -222,7 +222,7 @@ struct Options {
     std::string prom;
     std::uint64_t memory_mib{512};
     unsigned cpus{1};
-    ip27::ModuleType module{ip27::ModuleType::rack};
+    ip27::ModuleType module{ip27::ModuleType::deskside};
     unsigned nodes{1};
     std::uint64_t cpu_slice{180};
     std::uint64_t cycles{1'000'000};

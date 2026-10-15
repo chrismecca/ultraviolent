@@ -571,6 +571,9 @@ running PROM):
   /hw/module/1/slot/n1"), and the installed IRIX boots to `login:` with identical console
   output on one and on two CPUs; the cycle counts differ slightly (`boot` 16,375,376,704
   against 16,375,106,269).
+* The deskside module is the default (with the user, 2026-10-15; ADR-021): it is slate's
+  chassis, the target. `--module rack` keeps the rack layout; other modules (the Origin 200,
+  SN00) would be further configurations of the same machine.
 
 == Xtalk
 
@@ -620,8 +623,9 @@ register in its low half, `hypothesis`).
   The rack tables agree with the PROM's Hub widget numbers (n1 9, n2 `0xa`, n3 `0xa`,
   n4 9). With the BaseIO on port 15 (slate's port), this machine's PROM named it io3, so
   it uses the rack table. The node's slot ID selects the deskside table ("Machine type").
-  A rack module (the default) cables the BaseIO to port 8, its io1; `--module deskside`
-  puts it on 15 and the node in deskside n1 (`ip27::baseio_port`, `hub_xbow_port`).
+  A rack module cables the BaseIO to port 8, its io1; a deskside module (the default since
+  2026-10-15, slate's chassis) puts it on 15 and the node in deskside n1 on port `0xa`
+  (`ip27::baseio_port`, `hub_xbow_port`; `--module rack|deskside`).
   `observed` after the move: the PROM reports "Console has moved from
   /hw/module/1/slot/io3 to /hw/module/1/slot/io1", walks SCSI on `.../io1`, and IRIX
   installed with the old topology boots unchanged.

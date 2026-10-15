@@ -260,6 +260,12 @@ ROADMAP).
 Revisit if the reference hardware becomes unavailable or a different physical machine with
 better access replaces it.
 
+Addendum (with the user, 2026-10-15): the machine's default chassis is slate's deskside
+module (IP27.adoc "Machine type"), also with one node. The rack module stays a configuration
+(`--module rack`); other chassis, such as the Origin 200 (SN00), can be added later as
+configurations of the same IP27 machine. Every benchmark digest and snapshot changed once
+with the default (STATUS session log 2026-10-15).
+
 == ADR-022: Processor personalities own CPU behavior; execution engines do not
 
 Status: accepted (with the user, 2026-10-09)
