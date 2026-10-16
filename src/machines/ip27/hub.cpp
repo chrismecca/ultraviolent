@@ -84,6 +84,20 @@ constexpr std::uint64_t ni_port_error = 0x60'8008;
 constexpr std::uint64_t ni_port_error_clear = 0x60'8088;
 constexpr std::uint64_t ni_scratch_reg0 = 0x60'0100;
 constexpr std::uint64_t ni_scratch_reg1 = 0x60'0108;
+constexpr std::uint64_t ni_vector_parms = 0x60'0200;
+constexpr std::uint64_t ni_vector = 0x60'0208;
+constexpr std::uint64_t ni_vector_data = 0x60'0210;
+constexpr std::uint64_t ni_vector_status = 0x60'0300;
+constexpr std::uint64_t ni_return_vector = 0x60'0308;
+constexpr std::uint64_t ni_vector_read_data = 0x60'0310;
+constexpr std::uint64_t ni_vector_clear = 0x60'0380;
+constexpr std::uint64_t ni_base = 0x60'0000;
+// NI_META_TABLE0 (32 entries) then NI_LOCAL_TABLE0 (16), contiguous: routing tables whose
+// entries hold an exit port, NMT_/NLT_EXIT_PORT_MASK (LINUX sn0/hubni.h). hypothesis:
+// stored only; no modeled packet is routed by them (no router), and they reset to 0.
+constexpr std::uint64_t ni_routing_first = 0x63'8000;
+constexpr std::uint64_t ni_routing_last = 0x63'8178;
+constexpr std::uint64_t exit_port_mask = 0xf;
 
 // Ranges of registers that report an idle, error-free Hub: reads return 0 and writes (error
 // clears) are accepted with no effect. Nothing modeled produces errors, keeps requests in
@@ -106,11 +120,6 @@ constexpr IdleRange idle_ranges[] = {
     // IIO_ICRB_A..D(0..14): coherent request buffers, none valid. The PROM zeroes them
     // during INITII (observed); writes are accepted.
     {0x40'0400, 0x40'05d8, true},
-    // NI_VECTOR_STATUS, NI_RETURN_VECTOR, NI_VECTOR_READ_DATA: no vector PIO response ever
-    // arrives, because the node has no CrayLink cable. Writes (clears) are accepted.
-    {0x60'0300, 0x60'0310, true},
-    // NI_VECTOR_CLEAR.
-    {0x60'0380, 0x60'0380, false},
 };
 
 constexpr const IdleRange* find_idle(std::uint64_t offset) {
@@ -238,8 +247,8 @@ constexpr StoredRegister stored_registers[] = {
     {0x00'04b8, all_bits}, // PI_NACK_CMP
     {0x60'0400, all_bits}, // NI_IO_PROTECT
     {0x60'0408, all_bits}, // NI_IO_PROT_OVRRD
-    // Vector PIO route and data: stored. hypothesis: launching a vector PIO has no effect on a
-    // node without a link; no response arrives (see idle_ranges).
+    // Vector PIO parameters, route, and data: stored; a write of the parameters sends the
+    // request (Hub::start_vector_pio).
     {0x60'0200, all_bits}, // NI_VECTOR_PARMS
     {0x60'0208, all_bits}, // NI_VECTOR
     {0x60'0210, all_bits}, // NI_VECTOR_DATA
@@ -290,6 +299,9 @@ constexpr std::uint64_t ilcsr_link_working = 2u << 12;
 //   link up 29 = 0, down reason 28 = 1 ("never came out of reset"): hypothesis for a node with
 //   no CrayLink cable.
 constexpr std::uint64_t nsri_down_never_reset = std::uint64_t{1} << 28;
+// With a cable (SMP.adoc "S5"): link up, documented by the IRIX-derived header and observed
+// as the PROM's link test (bit 29).
+constexpr std::uint64_t nsri_link_up = std::uint64_t{1} << 29;
 // NSRI_MORENODES (18) and NSRI_REGIONSIZE (17) are software settings (observed: the PROM
 // writes REGIONSIZE_FINE); inferred writable. hypothesis: so is the node ID, which software
 // assigns during discovery (SMP.adoc "S5: the second node"; to be confirmed by the PROM's
@@ -297,6 +309,20 @@ constexpr std::uint64_t nsri_down_never_reset = std::uint64_t{1} << 28;
 constexpr std::uint64_t nsri_writable =
     (std::uint64_t{1} << 18) | (std::uint64_t{1} << 17) | (std::uint64_t{0x1ff} << 8);
 constexpr unsigned nsri_rev_shift = 4;
+
+// Vector PIO (LINUX sn0/hubni.h NVP_*, NVS_*, PIOTYPE_*): NI_VECTOR_PARMS holds the PIO ID
+// 49:40, write ID 39:32, the target address 19:3, and the type 1:0; NI_VECTOR_STATUS holds
+// VALID 63, OVERRUN 62, TARGET 60:51, the PIO ID, write ID, address 31:3, and the type 2:0.
+constexpr std::uint64_t nvp_echo = (std::uint64_t{0x3ff} << 40) | (std::uint64_t{0xff} << 32);
+constexpr std::uint64_t nvp_address = 0xf'fff8;
+constexpr std::uint64_t nvp_type = 0x3;
+constexpr std::uint64_t nvs_valid = std::uint64_t{1} << 63;
+constexpr std::uint64_t nvs_overrun = std::uint64_t{1} << 62;
+constexpr unsigned piotype_read = 0;
+constexpr unsigned piotype_write = 1;
+constexpr unsigned piotype_exchange = 3;
+constexpr unsigned piotype_addr_err = 4;
+constexpr unsigned piotype_cmd_err = 5;
 
 // PI_INT_PEND_MOD (LINUX asm/sn/intr.h, "copied from Irix"): writing 0x100 | level sets
 // pending interrupt `level` (0-127), writing `level` clears it. Levels 0-63 are INT_PEND0 bits,
@@ -602,9 +628,18 @@ std::expected<void, AccessFault> Hub::IoWindow::mmio_write(std::uint64_t offset,
 // holds WIDGET_ID, IIO_WSTAT 0x400008 WIDGET_STATUS, IIO_WCR 0x400020 WIDGET_CONTROL), so the
 // Hub's widget space starts at II offset 0. 32-bit registers sit in the low half of each
 // doubleword.
+// inferred: the whole local register space (PI, MD, II, NI) answers at crosstalk offset
+// 0x1000000 + its local offset. observed: the PROM's xbow_update points a big window at the
+// peer Hub's Crossbow port and reads its node ID (bits 16:8) at 0x1600000, NI_STATUS_REV_ID.
+constexpr std::uint64_t xtalk_local_base = 0x100'0000;
+
 std::expected<std::uint64_t, AccessFault> Hub::Widget::mmio_read(std::uint64_t offset,
                                                                  AccessWidth width) {
     constexpr std::uint64_t ii_base = 0x40'0000;
+    if (offset >= xtalk_local_base && offset < xtalk_local_base + window_size &&
+        width == AccessWidth::bits64 && offset % 8 == 0) {
+        return hub->read(not_a_cpu, offset - xtalk_local_base, width);
+    }
     if (width == AccessWidth::bits64 && offset % 8 == 0) {
         return hub->read(not_a_cpu, ii_base + offset, width);
     }
@@ -621,6 +656,10 @@ std::expected<std::uint64_t, AccessFault> Hub::Widget::mmio_read(std::uint64_t o
 std::expected<void, AccessFault> Hub::Widget::mmio_write(std::uint64_t offset, AccessWidth width,
                                                          std::uint64_t value) {
     constexpr std::uint64_t ii_base = 0x40'0000;
+    if (offset >= xtalk_local_base && offset < xtalk_local_base + window_size &&
+        width == AccessWidth::bits64 && offset % 8 == 0) {
+        return hub->write(offset - xtalk_local_base, width, value);
+    }
     if (width == AccessWidth::bits64 && offset % 8 == 0) {
         return hub->write(ii_base + offset, width, value);
     }
@@ -718,6 +757,9 @@ void Hub::save_state(StateImage& image) const {
     image.put("hub.mlan_ctl", mlan_ctl_);
     image.put("hub.bte", bte_);
     image.put("hub.nsri_settings", nsri_settings_);
+    image.put("hub.mlan_line", std::uint8_t{mlan_line_});
+    image.put("hub.routing_tables", routing_tables_);
+    image.put("hub.vector", std::array{vector_status_, return_vector_, vector_read_data_});
     image.put("hub.pending", pending_);
     image.put("hub.interrupt_mask", interrupt_mask_);
     image.put("hub.rt_base", rt_base_);
@@ -742,6 +784,15 @@ void Hub::load_state(const StateImage& image) {
     image.get("hub.mlan_ctl", mlan_ctl_);
     image.get("hub.bte", bte_);
     image.get("hub.nsri_settings", nsri_settings_);
+    std::uint8_t mlan_line = 1;
+    image.get("hub.mlan_line", mlan_line);
+    mlan_line_ = mlan_line != 0;
+    image.get("hub.routing_tables", routing_tables_);
+    std::array<std::uint64_t, 3> vector{};
+    image.get("hub.vector", vector);
+    vector_status_ = vector[0];
+    return_vector_ = vector[1];
+    vector_read_data_ = vector[2];
     image.get("hub.pending", pending_);
     image.get("hub.interrupt_mask", interrupt_mask_);
     image.get("hub.rt_base", rt_base_);
@@ -769,6 +820,62 @@ void Hub::set_nsri_settings(std::uint64_t value) {
     }
 }
 
+void Hub::start_vector_pio() {
+    const std::uint64_t parms = stored_[find_stored(ni_vector_parms)];
+    const std::uint64_t route = stored_[find_stored(ni_vector)];
+    const std::uint64_t data = stored_[find_stored(ni_vector_data)];
+    const unsigned type = parms & nvp_type;
+    const std::uint64_t address = parms & nvp_address;
+    tracer_.log(TraceCategory::hub, "{}vector pio type {} route {:#x} address {:#x} data {:#x}",
+                trace_name_, type, route, address, data);
+    if (neighbor_ == nullptr) {
+        // No cable: the request goes nowhere and no response arrives.
+        return;
+    }
+    // hypothesis: with no router, every route ends at the neighbor Hub, and the response
+    // arrives before the CPU's next access (link latency is not modeled). TARGET and the
+    // return route are 0.
+    unsigned result = type;
+    std::uint64_t read = 0;
+    if (type == piotype_read || type == piotype_write || type == piotype_exchange) {
+        if (const auto value = neighbor_->serve_vector_pio(type, address, data)) {
+            read = *value;
+        } else {
+            result = piotype_addr_err;
+        }
+    } else {
+        result = piotype_cmd_err;
+    }
+    const bool overrun = (vector_status_ & nvs_valid) != 0;
+    vector_status_ = nvs_valid | (overrun ? nvs_overrun : 0) | (parms & nvp_echo) | address |
+                     result;
+    return_vector_ = 0;
+    if (result == piotype_read || result == piotype_exchange) {
+        vector_read_data_ = read;
+    }
+    tracer_.log(TraceCategory::hub, "{}vector pio status {:#x} read {:#x}", trace_name_,
+                vector_status_, vector_read_data_);
+}
+
+std::optional<std::uint64_t> Hub::serve_vector_pio(unsigned type, std::uint64_t address,
+                                                   std::uint64_t data) {
+    // The address is an offset in this Hub's NI space (observed: the PROM's discovery reads the
+    // neighbor's NI_STATUS_REV_ID at 0 and assigns its node ID at 0x108, NI_SCRATCH_REG1).
+    const std::uint64_t offset = ni_base | address;
+    std::uint64_t value = 0;
+    if (type != piotype_write) {
+        const auto read_value = read(0, offset, AccessWidth::bits64);
+        if (!read_value) {
+            return std::nullopt;
+        }
+        value = *read_value;
+    }
+    if (type != piotype_read && !write(offset, AccessWidth::bits64, data)) {
+        return std::nullopt;
+    }
+    return value;
+}
+
 void Hub::reset(ResetKind kind) {
     if (kind == ResetKind::warm) {
         // hypothesis: a soft reset leaves the Hub's registers unchanged.
@@ -789,6 +896,11 @@ void Hub::reset(ResetKind kind) {
     set_memory_config(mmc_reset_defaults);
     refresh_control_ = mrc_reset_defaults;
     mlan_ctl_ = mlan_reset_defaults;
+    mlan_line_ = true;
+    routing_tables_ = {};
+    vector_status_ = 0;
+    return_vector_ = 0;
+    vector_read_data_ = 0;
     bte_ = {};
     set_nsri_settings(0);
     pending_ = {};
@@ -877,9 +989,8 @@ std::expected<std::uint64_t, AccessFault> Hub::read(unsigned slice, std::uint64_
             return refresh_control_;
         case md_mlan_ctl:
             // hypothesis: each operation completes before the next access (its duration is
-            // not modeled). Nothing is attached to the 1-Wire bus, so no device answers a
-            // reset with a presence pulse or pulls a slot low: the pulled-up line samples 1.
-            return (mlan_ctl_ & mlan_control) | mlan_done | mlan_rd_data;
+            // not modeled). With nothing attached the pulled-up line samples 1.
+            return (mlan_ctl_ & mlan_control) | mlan_done | (mlan_line_ ? mlan_rd_data : 0);
         case iio_wid:
             return (std::uint64_t{revision_ & 0xf} << 28) | (hub_widget_part << 12) |
                    (hub_widget_mfgr << 1);
@@ -896,12 +1007,27 @@ std::expected<std::uint64_t, AccessFault> Hub::read(unsigned slice, std::uint64_
             // No CrayLink cable, so no LLP errors (NI_STATUS_REV_ID reports the link down).
             return 0;
         case ni_status_rev_id:
-            return nsri_down_never_reset | nsri_settings_ |
-                   (std::uint64_t{revision_ & 0xf} << nsri_rev_shift);
+            return (neighbor_ != nullptr ? nsri_link_up : nsri_down_never_reset) |
+                   nsri_settings_ | (std::uint64_t{revision_ & 0xf} << nsri_rev_shift);
+        case ni_vector_status:
+            return vector_status_;
+        case ni_return_vector:
+            return return_vector_;
+        case ni_vector_read_data:
+            return vector_read_data_;
+        case ni_vector_clear: {
+            // Reads the status and clears it (LINUX: "Vector PIO read & clear status").
+            const std::uint64_t status = vector_status_;
+            vector_status_ = 0;
+            return status;
+        }
         default:
             if (offset >= pi_err_status_first && offset <= pi_err_status_last && offset % 8 == 0) {
                 // ERR_STATUS0/1_A/B and their clear-on-read forms: no errors recorded.
                 return 0;
+            }
+            if (offset >= ni_routing_first && offset <= ni_routing_last && offset % 8 == 0) {
+                return routing_tables_[(offset - ni_routing_first) / 8];
             }
             if (find_idle(offset) != nullptr) {
                 return 0;
@@ -928,6 +1054,9 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
             if (offset == pi_rt_compare_a || offset == pi_rt_compare_b ||
                 offset == pi_profile_compare) {
                 schedule_comparators();
+            }
+            if (offset == ni_vector_parms) {
+                start_vector_pio();
             }
             return {};
         }
@@ -1009,6 +1138,8 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
         case md_mlan_ctl:
             // Starts a 1-Wire pulse and sample with the written timing.
             mlan_ctl_ = value & mlan_control;
+            mlan_line_ = mlan_bus_ == nullptr ||
+                         mlan_bus_->pulse((value >> 10) & 0x3ff, (value >> 2) & 0xff);
             tracer_.log(TraceCategory::hub, "{}mlan pulse {} sample {}", trace_name_, (value >> 10) & 0x3ff,
                         (value >> 2) & 0xff);
             return {};
@@ -1041,20 +1172,33 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
         case ni_status_rev_id:
             set_nsri_settings(value & nsri_writable);
             return {};
+        case ni_vector_status:
+        case ni_return_vector:
+            // hypothesis: read-only; the status is cleared through NI_VECTOR_CLEAR.
+            return {};
+        case ni_vector_read_data:
+            // inferred: writable (the PROM writes 0xdeadbeefdeadbeef before a read, observed).
+            vector_read_data_ = value;
+            return {};
         case ni_port_reset:
             // The reset takes effect after the store that requested it completes.
             if ((value & npr_localreset) != 0) {
                 scheduler_.schedule_after(local_reset_event_, VirtualDuration{0});
             }
             if ((value & npr_portreset) != 0) {
-                // No CrayLink port is connected on a one-node machine.
-                tracer_.log(TraceCategory::hub, "{}port reset (no link)", trace_name_);
+                // hypothesis: the link's warm reset has no modeled effect on either end.
+                tracer_.log(TraceCategory::hub, "{}port reset{}", trace_name_,
+                            neighbor_ != nullptr ? "" : " (no link)");
             }
             return {};
         default:
             if (offset >= pi_err_status_first && offset <= pi_err_status_last && offset % 8 == 0) {
                 // hypothesis: writes to the error status registers clear them; they hold
                 // nothing.
+                return {};
+            }
+            if (offset >= ni_routing_first && offset <= ni_routing_last && offset % 8 == 0) {
+                routing_tables_[(offset - ni_routing_first) / 8] = value & exit_port_mask;
                 return {};
             }
             if (const IdleRange* range = find_idle(offset); range != nullptr && range->writable) {

@@ -276,10 +276,12 @@ during LED `0x5d` (`observed`).
 |`0x600000` |NI_STATUS_REV_ID |Node ID 0 at reset (PRM 1.2.3, `documented`), written by
 software (`hypothesis`; a change rebuilds the nodes' address views); chip ID 0 = Hub and
 revision from `Ip27Config::hub_revision`, default 6 = Hub 2.4 (IRIX-derived `sn0/hub.h`;
-the revision is a `hypothesis`); link down, reason "never came out of reset" (`hypothesis`:
-no CrayLink cable). The PROM reads the node ID with mask `0x1ff00` (`observed`).
+the revision is a `hypothesis`). One node: link down, reason "never came out of reset"
+(`hypothesis`: no CrayLink cable). Two nodes: link up (bit 29, NSRI_LINKUP, which the PROM's
+link test polls, `observed`). The PROM reads the node ID with mask `0x1ff00` (`observed`).
 |`0x600008` |NI_PORT_RESET |LOCALRESET (bit 0) performs a Hub local reset after the
-requesting store completes. PORTRESET (bit 7) has no link to reset on one node.
+requesting store completes. PORTRESET (bit 7) is traced; its effect on the link is not
+modeled (`hypothesis`: none visible).
 |`0x600010` |NI_PROTECTION |Storage (`hypothesis`: no effect on one node).
 |`0x600100`, `0x600108` |NI_SCRATCH_REG0/1 |Scratch storage.
 |`0x200018` |MD_MEMORY_CONFIG |Resets to MMC_RESET_DEFAULTS (`0x001e7fbc3fffffff`, IRIX-derived
@@ -295,7 +297,12 @@ block-transfer engines. See "Block-transfer engines".
 `hypothesis`), part `0xc101`, manufacturer `0x036` (IRIX-derived `hubio.h`, `xwidget.h`).
 |`0x000400` |PI_ERR_INT_PEND |Reads 0; writes (clears) accepted. No modeled error source.
 |`0x000430`–`0x000468` |PI_ERR_STATUS0/1_A/B (+ `_RCLR`) |Read 0: no errors recorded.
-|`0x608008`, `0x608088` |NI_PORT_ERROR, _CLEAR |Read 0: no link, so no LLP errors.
+|`0x608008`, `0x608088` |NI_PORT_ERROR, _CLEAR |Read 0: no LLP errors (none are modeled).
+|`0x600200`–`0x600380` |NI_VECTOR_* |Vector PIO. See "Vector PIO".
+|`0x638000`–`0x638178` |NI_META_TABLE(0–31), NI_LOCAL_TABLE(0–15) |Routing tables: each
+entry's exit port (bits 3:0, NMT_/NLT_EXIT_PORT_MASK) is stored (`hypothesis`: no modeled
+packet is routed by them, as there is no router; reset 0). The global master writes them in
+"Router table distribution" (`observed`).
 |===
 
 `hypothesis`: undocumented reset values are zero.
@@ -317,8 +324,8 @@ below). Offsets and names are from the IRIX-derived Linux headers.
   gap before IOPRB_0), IXCC, IMEM, IXTT, IBCN, IPCA, PRTE_0–7, IPDR, ICDR, IFDR, IIAP, ICMR,
   ICCR, ICTO, ICTP, IPCR, IPPR.
 * NI: PROTECTION, GLOBAL_PARMS, DIAG_PARMS, PORT_PARMS, SCRATCH_REG0/1, AGE_* (`0x600500`–
-  `0x600538`), IO_PROTECT, IO_PROT_OVRRD, VECTOR_PARMS, VECTOR, VECTOR_DATA (`hypothesis`:
-  launching a vector PIO on an unlinked node does nothing).
+  `0x600538`), IO_PROTECT, IO_PROT_OVRRD, VECTOR_PARMS (a write sends the request, "Vector
+  PIO"), VECTOR, VECTOR_DATA.
 
 ==== Idle ranges
 
@@ -335,9 +342,37 @@ requests in flight, or runs a block-transfer engine.
 |`0x400198`–`0x4001d8` |IIO_IOPRB_0, _8.._F |refused
 |`0x4001f8` |IIO_IECLR |accepted
 |`0x400400`–`0x4005d8` |IIO_ICRB_A..D(0..14); zeroed by INITII (`observed`) |accepted
-|`0x600300`–`0x600310` |NI_VECTOR_STATUS, RETURN_VECTOR, VECTOR_READ_DATA |accepted
-|`0x600380` |NI_VECTOR_CLEAR |refused
 |===
+
+=== Vector PIO
+
+Route-addressed access between NIs, used before node IDs exist (LINUX `hubni.h` field
+masks; the PROM's protocol in SMP.adoc "What is known", `observed` by disassembly). A write
+of NI_VECTOR_PARMS (PIO ID 49:40, write ID 39:32, address 19:3, type 1:0: read 0, write 1,
+exchange 3) sends the request along NI_VECTOR with NI_VECTOR_DATA. The address is an offset
+in the target's NI space (`observed`: discovery reads offset 0, NI_STATUS_REV_ID, and the
+global master writes each node ID to `0x108`, NI_SCRATCH_REG1).
+
+Model (`hypothesis` unless noted): with no router every route ends at the neighbor Hub, and
+the response arrives before the requesting CPU's next access. The target serves the request
+on its own NI registers (an exchange returns the old value and writes the new). The
+response sets NI_VECTOR_STATUS: VALID 63; OVERRUN 62 when an earlier response was not
+cleared; the request's PIO ID, write ID, and address; and its type, or 4 (address error)
+when the target has no register there, 5 (command error) for type 2. TARGET (60:51) and
+NI_RETURN_VECTOR are 0. A read or exchange puts the value in NI_VECTOR_READ_DATA, which
+software can also write (`observed`: the PROM writes `0xdeadbeefdeadbeef` there before a
+read). Reading NI_VECTOR_CLEAR returns the status and clears it; NI_VECTOR_STATUS and
+NI_RETURN_VECTOR ignore writes. On one node a request goes nowhere and no response arrives.
+
+=== The Hub over crosstalk
+
+The Hub is a crosstalk widget on its Crossbow port. Its widget configuration space starts at
+II offset 0 (IIO_WID at `0x400000` is WIDGET_ID, `inferred`). `inferred`: its whole local
+register space (PI, MD, II, NI) also answers at crosstalk offset `0x1000000` + the local
+offset, 64-bit. `observed`: with two nodes, the PROM's `xbow_update` (`0x1fc3a3a4`) aims big
+window 1 at the peer Hub's Crossbow port (ITTE `0x1900`) and reads its node ID (bits 16:8)
+at `0x1600000`, NI_STATUS_REV_ID; without the window it printed "xbow_update: Could not get
+slave nasid".
 
 === MicroLAN
 
@@ -348,9 +383,9 @@ starts a pulse and sample; it resets to PHI1 = PHI0 = `0x31`.
 `observed`: the PROM's first operation is a 520-unit pulse sampled at 65, a 1-Wire reset
 and presence detect; it tries three times and continues without a serial number.
 
-Model: nothing is attached to the bus, so no device answers with a presence pulse or pulls a
-slot low, and the pulled-up line samples 1. `hypothesis`: an operation completes before the
-next access. A NIC device (serial and part numbers, which IRIX reports) is not modeled.
+Model: each node's bus (`Node::mlan`) carries its NICs ("NICs"); a write performs the
+operation on it with the MCR encoding, and RD_DATA returns the sampled line, 1 with nothing
+attached. `hypothesis`: an operation completes before the next access.
 
 === Block-transfer engines
 
@@ -536,6 +571,13 @@ Model:
   answer, so ELSC commands (display, DIP switches, NIC, heartbeat) fail fast with
   I2C_ERROR_NAK and the PROM carries on ("MSC DIP switches unavailable").
 * The NVRAM is not persisted across runs yet.
+* `observed` with two nodes: the PROM's `ust_change` (`0x1fc4899c`, run on one node of a
+  multi-node SN0 system) reads one byte at the command address `0x20` (`0x1fc39c14`), sets
+  or clears bits 6 and 7 by a klconfig field, and writes it back (`0x1fc39bac`). The model
+  does not answer, so the PROM prints "Error in ust_change: Addressed slave not responding"
+  twice and continues; slate's prints nothing. Not modeled until the controller's command
+  interface is (a PCF8574-style port there was tried and withdrawn: `0x20` is the
+  controller's own command address).
 
 Before this model the PROM spent 5 s waiting at I2CINIT and 21 s retrying the controller,
 and module voting failed (modid -1).
@@ -975,7 +1017,17 @@ read or write-1 slot, longer a write-0 slot, 0 a wait.
 * The IOC3's NIC bus holds the Ethernet address NIC: `Ip27Config::ethernet_address`
   (`hypothesis` default `08:00:69:0e:17:01`, SGI's OUI; not slate's) stored so that Linux's
   reader finds it (address byte j at memory byte 11 − j).
-* The Hub's MicroLAN bus is empty (the node board's NICs are not modeled).
+* Each node board's MicroLAN (Hub MD_MLAN_CTL, `Node::mlan`) holds its board NIC: a DS2502
+  with a record named "IP27" (`hypothesis`, after slate's "IP31" node boards; the part
+  number is unknown and left blank), barcode UVX005 for n1 and UVX006 for n2, laser
+  `0x5` and `0x6`. In a deskside module n1's bus also holds the module's NICs, as slate's
+  (OBS-SLATE-0004): MODULEID (barcode K0000001, no part number, laser `0x3`) and the
+  midplane 4P1G5_MPLN (030-1066-002 rev K, barcode UVX004, laser `0x4`); serials are
+  synthetic. slate's IP31 boards also carry a processor-module NIC (IP31PIMMR12KS); an
+  IP27 board has no PIMM (`hypothesis`). `observed`: with the board NIC the PROM no longer
+  prints "using BaseIO nic" (its fallback, "Hub NIC broken; using BaseIO nic", which gave
+  both Hubs of a two-node machine the BaseIO's NIC as their identity), and two-node
+  discovery still elects n2, as slate does.
 
 === Console
 

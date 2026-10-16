@@ -7,6 +7,7 @@
 #include <ultraviolent/core/state_image.hpp>
 #include <ultraviolent/core/trace.hpp>
 #include <ultraviolent/core/virtual_time.hpp>
+#include <ultraviolent/devices/one_wire.hpp>
 #include <ultraviolent/devices/pcf8584.hpp>
 #include <ultraviolent/machines/ip27/directory_memory.hpp>
 #include <ultraviolent/xtalk/xtalk.hpp>
@@ -16,6 +17,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -100,6 +102,16 @@ class Hub final {
         node_id_changed_ = std::move(changed);
     }
 
+    // The NUMAlink cable to `neighbor`'s NI, with no router between (SMP.adoc "S5"): the link
+    // reports up, and vector PIO reaches the neighbor's NI registers. Connect both ends.
+    void connect_link(Hub& neighbor) {
+        neighbor_ = &neighbor;
+    }
+    // The node board's MicroLAN (MD_MLAN_CTL), with its NICs (IP27.adoc "NICs").
+    void connect_mlan(devices::OneWireBus& bus) {
+        mlan_bus_ = &bus;
+    }
+
     // The register window as CPU `slice` (0 for A, 1 for B) sees it.
     [[nodiscard]] MmioTarget& port(unsigned slice) {
         return ports_.at(slice);
@@ -164,6 +176,12 @@ class Hub final {
     void local_reset();
     void set_nsri_settings(std::uint64_t value);
     void update_interrupts();
+    // Vector PIO (IP27.adoc "Vector PIO"): sends the request NI_VECTOR_PARMS describes, and
+    // serves one that arrives from the neighbor, returning the read value or no value for an
+    // address error.
+    void start_vector_pio();
+    std::optional<std::uint64_t> serve_vector_pio(unsigned type, std::uint64_t address,
+                                                  std::uint64_t data);
 
     Scheduler& scheduler_;
     Tracer& tracer_;
@@ -191,6 +209,16 @@ class Hub final {
     std::uint64_t memory_config_{};
     std::uint64_t refresh_control_{};
     std::uint64_t mlan_ctl_{};
+    // The line sampled by the last MicroLAN operation; released (1) with nothing attached.
+    bool mlan_line_{true};
+    devices::OneWireBus* mlan_bus_{};
+    Hub* neighbor_{};
+    // NI_META_TABLE(0-31) then NI_LOCAL_TABLE(0-15): routing table exit ports.
+    std::array<std::uint64_t, 48> routing_tables_{};
+    // NI_VECTOR_STATUS, NI_RETURN_VECTOR, NI_VECTOR_READ_DATA: the last vector PIO response.
+    std::uint64_t vector_status_{};
+    std::uint64_t return_vector_{};
+    std::uint64_t vector_read_data_{};
     // IBLS, IBSA, IBDA, IBCT, IBNA, IBIA for BTE 0 and 1.
     std::array<std::array<std::uint64_t, 6>, 2> bte_{};
     std::uint64_t nsri_settings_{};

@@ -245,6 +245,7 @@ Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
       flash_interface{flash_device, owner.tracer_}, flash_commands{flash_interface},
       i2c{owner.scheduler_, owner.tracer_, owner.i2c_bus_, event_prefix(node_index)},
       directory{owner.tracer_, checked_bank_sizes(owner.config_), owner.config_.directory},
+      board_nic{0x09, 0x5 + node_index},
       hub{owner.scheduler_,
           owner.tracer_,
           owner.config_.hub_revision,
@@ -260,6 +261,14 @@ Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
       synchronized_flash{owner, flash_interface},
       synchronized_flash_commands{owner, flash_commands} {
     hub.connect_cpu(0, cpu_a.cpu);
+    // hypothesis: an IP27 node board's record is named "IP27", like slate's IP31 boards'
+    // "IP31" (OBS-SLATE-0004); its part number is not known, so it is left blank. The
+    // barcode is synthetic.
+    board_nic.memory() = board_nic_memory(
+        {.serial = std::format("UVX{:03}", 5 + node_index), .part = "", .revision = "",
+         .name = "IP27"});
+    mlan.attach(board_nic);
+    hub.connect_mlan(mlan);
     if (owner.config_.cpus == 2) {
         // Slice B: the same processor on the Hub's second port, sharing memory with A
         // (SMP.adoc).
@@ -316,6 +325,11 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
         set_execution_engine(mips::ExecutionEngine::tier0);
     }
     i2c_bus_.attach(controller_nvram_);
+    if (nodes_.size() == 2) {
+        // slate's two Hubs are cabled to each other without a router (SMP.adoc "S5").
+        nodes_[0]->hub.connect_link(nodes_[1]->hub);
+        nodes_[1]->hub.connect_link(nodes_[0]->hub);
+    }
     for (auto& n : nodes_) {
         n->hub.connect_xtalk(xbow_);
         xbow_.attach(hub_xbow_port(config_.module, n->index == 0 ? config_.node_slot : 2),
@@ -331,6 +345,16 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     baseio_nic_bus_.attach(mio_nic_);
     baseio_nic_bus_.attach(baseio_nic_);
     baseio_bridge_.connect_nic(baseio_nic_bus_);
+    if (config_.module == ModuleType::deskside) {
+        // slate's module NICs (OBS-SLATE-0004) on n1's MicroLAN, with synthetic serials:
+        // MODULEID (no part number) and the deskside midplane, 4P1G5_MPLN 030-1066-002 rev K.
+        module_nic_.memory() = board_nic_memory(
+            {.serial = "K0000001", .part = "", .revision = "", .name = "MODULEID"});
+        midplane_nic_.memory() = board_nic_memory(
+            {.serial = "UVX004", .part = "030-1066-002", .revision = "K", .name = "4P1G5_MPLN"});
+        nodes_.front()->mlan.attach(module_nic_);
+        nodes_.front()->mlan.attach(midplane_nic_);
+    }
     baseio_bridge_.attach(0, scsi0_);
     baseio_bridge_.attach(1, scsi1_);
     scsi0_.connect_dma(baseio_bridge_.dma_port(0));

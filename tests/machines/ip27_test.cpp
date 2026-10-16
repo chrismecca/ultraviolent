@@ -692,6 +692,132 @@ std::uint64_t node_id_field(std::uint64_t nsri) {
     return nsri >> 8 & 0x1ff;
 }
 
+constexpr std::uint64_t nsri_link_up = std::uint64_t{1} << 29;
+constexpr std::uint64_t nsri_down_reason = std::uint64_t{1} << 28;
+constexpr std::uint64_t ni_scratch_reg1 = 0x60'0108;
+constexpr std::uint64_t ni_vector_parms = 0x60'0200;
+constexpr std::uint64_t ni_vector = 0x60'0208;
+constexpr std::uint64_t ni_vector_data = 0x60'0210;
+constexpr std::uint64_t ni_vector_status = 0x60'0300;
+constexpr std::uint64_t ni_vector_read_data = 0x60'0310;
+constexpr std::uint64_t ni_vector_clear = 0x60'0380;
+constexpr std::uint64_t nvs_valid = std::uint64_t{1} << 63;
+constexpr std::uint64_t nvs_overrun = std::uint64_t{1} << 62;
+
+// NI_VECTOR_PARMS: PIO ID 49:40, write ID 39:32, address 19:3, type 1:0 (LINUX hubni.h).
+constexpr std::uint64_t vector_parms(std::uint64_t pio_id, std::uint64_t write_id,
+                                     std::uint64_t address, std::uint64_t type) {
+    return pio_id << 40 | write_id << 32 | address | type;
+}
+
+// The NUMAlink cable: with two nodes both NIs report the link up; vector PIO reaches the
+// neighbor's NI registers, and the response echoes the request (SMP.adoc "S5").
+const test::Registration two_node_link{
+    "ip27.two_nodes.link_and_vector_pio", [](test::Context& t) {
+        Ip27Machine one{small_config(), program({nop()})};
+        one.cpu().mtc0(mips::cp0::status, mips::status::kx);
+        const std::uint64_t alone = one.cpu().load(ialias + ni_status_rev_id, AccessWidth::bits64).value_or(0);
+        t.check((alone & nsri_link_up) == 0 && (alone & nsri_down_reason) != 0, "one node: down");
+
+        Ip27Machine machine{two_node_config(), program({nop()})};
+        mips::Cpu& a = machine.cpu(0);
+        mips::Cpu& b = machine.cpu(2);
+        a.mtc0(mips::cp0::status, mips::status::kx);
+        b.mtc0(mips::cp0::status, mips::status::kx);
+        const auto reg = [](mips::Cpu& cpu, std::uint64_t offset) {
+            return cpu.load(ialias + offset, AccessWidth::bits64).value_or(0xbad);
+        };
+        const auto set = [&t](mips::Cpu& cpu, std::uint64_t offset, std::uint64_t value) {
+            t.check(cpu.store(ialias + offset, AccessWidth::bits64, value).has_value());
+        };
+        t.check((reg(a, ni_status_rev_id) & (nsri_link_up | nsri_down_reason)) == nsri_link_up,
+                "n1: up");
+        t.check((reg(b, ni_status_rev_id) & (nsri_link_up | nsri_down_reason)) == nsri_link_up,
+                "n2: up");
+
+        // A read of the neighbor's NI_STATUS_REV_ID (NI offset 0), as the PROM's discovery.
+        set(b, ni_status_rev_id, 1u << 8);
+        set(a, ni_vector_read_data, 0xdead'beef'dead'beef);
+        set(a, ni_vector, 0);
+        set(a, ni_vector_parms, vector_parms(0x1c8, 0, 0, 0));
+        t.check_equal(reg(a, ni_vector_status), nvs_valid | vector_parms(0x1c8, 0, 0, 0));
+        t.check_equal(node_id_field(reg(a, ni_vector_read_data)), std::uint64_t{1});
+        // NI_VECTOR_CLEAR returns the status and clears it.
+        t.check_equal(reg(a, ni_vector_clear), nvs_valid | vector_parms(0x1c8, 0, 0, 0));
+        t.check_equal(reg(a, ni_vector_status), std::uint64_t{0});
+
+        // A write of the neighbor's NI_SCRATCH_REG1, as the global master hands out node IDs.
+        set(a, ni_vector_data, (std::uint64_t{1} << 51) | 1);
+        set(a, ni_vector_parms, vector_parms(0x7b, 5, 0x108, 1));
+        t.check_equal(reg(a, ni_vector_status), nvs_valid | vector_parms(0x7b, 5, 0x108, 1));
+        t.check_equal(reg(b, ni_scratch_reg1), (std::uint64_t{1} << 51) | 1);
+
+        // An exchange returns the old value; a second response before a clear overruns.
+        set(a, ni_vector_data, 7);
+        set(a, ni_vector_parms, vector_parms(1, 0, 0x108, 3));
+        t.check_equal(reg(a, ni_vector_status),
+                      nvs_valid | nvs_overrun | vector_parms(1, 0, 0x108, 3));
+        t.check_equal(reg(a, ni_vector_read_data), (std::uint64_t{1} << 51) | 1);
+        t.check_equal(reg(b, ni_scratch_reg1), std::uint64_t{7});
+
+        // An address with no register answers with an address error (type 4).
+        (void)reg(a, ni_vector_clear);
+        set(a, ni_vector_parms, vector_parms(2, 0, 0xf'fff8, 0));
+        t.check_equal(reg(a, ni_vector_status) & 7, std::uint64_t{4});
+    }};
+
+// The node boards' MicroLANs (IP27.adoc "NICs"): each Hub reaches its node board's NIC; n1's
+// bus also holds the module's. A Read ROM on n2, whose bus holds one part, returns the
+// node board NIC's ROM ID: family 0x09, serial 6.
+const test::Registration node_nics{
+    "ip27.two_nodes.node_nics", [](test::Context& t) {
+        Ip27Machine machine{two_node_config(), program({nop()})};
+        mips::Cpu& b = machine.cpu(2);
+        b.mtc0(mips::cp0::status, mips::status::kx);
+        constexpr std::uint64_t md_mlan_ctl = 0x20'00a8;
+        // MCR_PACK(pulse, sample) and the slot timings Linux ioc3-eth.c uses.
+        const auto pulse = [&](std::uint64_t width, std::uint64_t sample) {
+            (void)b.store(ialias + md_mlan_ctl, AccessWidth::bits64, width << 10 | sample << 2);
+            return (b.load(ialias + md_mlan_ctl, AccessWidth::bits64).value_or(1) & 1) != 0;
+        };
+        t.check(!pulse(500, 65), "a presence pulse");
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            const bool one = (0x33u >> bit & 1) != 0; // Read ROM
+            (void)(one ? pulse(6, 110) : pulse(80, 30));
+        }
+        std::uint64_t rom = 0;
+        for (unsigned bit = 0; bit < 64; ++bit) {
+            rom |= std::uint64_t{pulse(6, 13)} << bit;
+        }
+        t.check_equal(rom & 0xff, std::uint64_t{0x09});
+        t.check_equal(rom >> 8 & 0xffff'ffff'ffff, std::uint64_t{6});
+
+        // n1's bus answers too (several parts, so only presence is checked here).
+        mips::Cpu& a = machine.cpu(0);
+        a.mtc0(mips::cp0::status, mips::status::kx);
+        (void)a.store(ialias + md_mlan_ctl, AccessWidth::bits64, std::uint64_t{500} << 10 | 65 << 2);
+        t.check((a.load(ialias + md_mlan_ctl, AccessWidth::bits64).value_or(1) & 1) == 0,
+                "n1: a presence pulse");
+    }};
+
+// Over crosstalk, a Hub answers with its local registers at 0x1000000 + offset: n1 reads n2's
+// node ID through a big window aimed at n2's Crossbow port (9), as the PROM's xbow_update.
+const test::Registration hub_crosstalk_registers{
+    "ip27.two_nodes.hub_registers_over_crosstalk", [](test::Context& t) {
+        Ip27Machine machine{two_node_config(), program({nop()})};
+        mips::Cpu& a = machine.cpu(0);
+        mips::Cpu& b = machine.cpu(2);
+        a.mtc0(mips::cp0::status, mips::status::kx);
+        b.mtc0(mips::cp0::status, mips::status::kx);
+        t.check(b.store(ialias + ni_status_rev_id, AccessWidth::bits64, 1u << 8).has_value());
+        constexpr std::uint64_t iio_itte1 = 0x40'0160;
+        t.check(a.store(ialias + iio_itte1, AccessWidth::bits64, 0x900).has_value());
+        constexpr std::uint64_t big_window1 = 0x9200'0000'2000'0000;
+        t.check_equal(
+            node_id_field(a.load(big_window1 + 0x160'0000, AccessWidth::bits64).value_or(0)),
+            std::uint64_t{1});
+    }};
+
 // Each node sees its own resources at its node ID, the aliases (UALIAS, IALIAS) as its own,
 // and the other node at the other's ID once they differ.
 const test::Registration two_node_views{

@@ -347,6 +347,44 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
     register (`0x15c` for n2, `0x19c` for n1), then one clears them all and takes port 9's;
     neither reaches the console (none of the PROM's buffered output appears in 111 s of
     virtual time). Real hardware with two nodes always has the link, so this is not pursued.
+* **S5.2 (2026-10-16): the link and discovery.** With the user's go-ahead for S5.2 and S5.3
+  without further review (2026-10-16).
+  - The link: `Hub::connect_link` joins the two Hubs' NIs; NI_STATUS_REV_ID reports the link
+    up; a write of NI_VECTOR_PARMS performs the vector PIO on the neighbor's NI registers
+    and posts the response (IP27.adoc "Vector PIO"). The routing tables are storage. The
+    Hub answers crosstalk reads of its local registers at `0x1000000` + offset (IP27.adoc
+    "The Hub over crosstalk"). Each node has its MicroLAN bus (`Node::mlan`) with its node
+    board NIC, and n1's holds the module's MODULEID and midplane NICs (IP27.adoc "NICs").
+    Without a node NIC the PROM gave both Hubs the BaseIO's NIC as their identity ("Hub NIC
+    broken; using BaseIO nic").
+  - Transparent before the NICs: all eight benchmark digests unchanged
+    (`local/bench/r3600/o-s52-digests.out`). The NICs change the one-node output (the
+    PROM no longer prints "using BaseIO nic"; IRIX no longer warns "Invalid serial number
+    for module 1"), so the baselines are re-recorded with S5.3.
+  - IRIX on two nodes, already at S5.2 (`observed` 2026-10-16, the bench fixture's disk):
+    it boots to `login:`; `hinv -mvv` shows four 180 MHz R10000s, CPUs 0 and 1 at n2's
+    slices A and B and CPUs 2 and 3 at n1's (as slate's), memory at "Slot 82" and "Slot 81"
+    (512 MB each), both Hubs and PROMs, and the NICs; `/hw/nodenum` has node 0 at n2 and 1
+    at n1; `mpadmin -s` lists processors 0-3.
+  - Gate met: the PROM on two nodes of two CPUs prints "Discovering NUMAlink connectivity
+    ... DONE", "Found 2 objects (2 hubs, 0 routers) in 10272 usec" (slate: 10464),
+    "Global master is /hw/module/1/slot/n2" (as slate), "4 CPUs on 2 nodes found", and its
+    summary "No. of NODEs enabled = 2", "No. of CPUs enabled = 4", "No. of RTRs enabled =
+    0", then the menu. Each step was found by running it: the link test passed and
+    discovery's vector reads answered; "Router table distribution failed" (vector write
+    address error at `0x638100`) named the routing tables; "xbow_update: Could not get
+    slave nasid" named the Hub's crosstalk register window.
+  - Remaining differences from slate's capture: "Error in ust_change: Addressed slave not
+    responding" twice (a system controller command, IP27.adoc "Junk bus"); slate's n1 prints
+    its first lines with a "1A 000:" prefix before the master's banner, ours does not; the
+    one-node differences (IOC3 serial DMA diagnostic, "Inventory table ID value is 0. Check
+    Midplane NIC").
+  - Tests: `ip27.two_nodes.link_and_vector_pio` (link up, read, write, exchange, overrun,
+    address error, clear), `ip27.two_nodes.hub_registers_over_crosstalk`,
+    `ip27.two_nodes.node_nics` (presence on both buses; Read ROM on n2 returns its board
+    NIC).
+  - Unknown: why slate's n1 prints "1A 000:" lines and ours does not; what drives the
+    global master election (n2 on both, with and without NICs).
 * **Deskside default (2026-10-15, with the user; ADR-021 addendum).** One node in deskside
   n1 (slot ID 3, Crossbow port `0xa`, the BaseIO on 15) is the default; `--module rack`
   keeps the rack layout. Snapshots record the module and node slot (`machine.module`,
