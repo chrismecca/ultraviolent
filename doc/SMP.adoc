@@ -385,6 +385,25 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
     NIC).
   - Unknown: why slate's n1 prints "1A 000:" lines and ours does not; what drives the
     global master election (n2 on both, with and without NICs).
+* **S5.3 (2026-10-17): IRIX on two nodes.** No model change; the gates measured.
+  - Four-CPU workloads (`bench.py fixture --cpus 4`, then `boot4`, `cpu4`, `reboot4`):
+    identical digests on tier 1, tier 0, and the reference interpreter
+    (`local/bench/r3600/p-s53-*.json`). `cpu4` prints 749961 four times; after `reboot4`
+    `mpadmin -s` lists processors 0 1 2 3.
+  - Same-cycle snapshots: `cpu4` from the four-CPU shell snapshot with `--save-state` stops
+    at 19,699,161,840 cycles on all three engines, with byte-identical console output,
+    snapshot, disk, NVRAM, and both flash PROMs.
+  - The one- and two-CPU workloads agree on all three engines. Against the build before
+    S5.2 (`6754878`, which reproduces the 2026-10-15 digests), `prom`, `boot`, and `boot2`
+    differ only by the lines the node NICs remove: "using BaseIO nic", and IRIX's "Invalid
+    serial number for module 1, possible missing or invalid NIC" and "No serial number
+    found". New baselines, STATUS session log 2026-10-17.
+  - Found on the way: `cpu4` first wrote its four awk loops out in full; the line exceeds
+    IRIX's terminal input line and the shell received it cut ("Unmatched \""), which still
+    ended at a prompt with a stable digest. It now starts them with a shell loop.
+  - Speed, four CPUs on one host thread (tier 1, best of 3, all CPUs' cycles): `boot4` 201,
+    `cpu4` 173, `reboot4` 199 M cycles/s; 0.24-0.28x real time. The host-parallel stage
+    (S4) is what changes this.
 * **Deskside default (2026-10-15, with the user; ADR-021 addendum).** One node in deskside
   n1 (slot ID 3, Crossbow port `0xa`, the BaseIO on 15) is the default; `--module rack`
   keeps the rack layout. Snapshots record the module and node slot (`machine.module`,
@@ -402,6 +421,10 @@ build/pgo/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img --cpus
     --disk local/disks/irix.img --console '@expect login:' --console root \
     --console vt100 --console 'mpadmin -s' --stop-at-prompt --cycles 150000000000
 ----
+
+Four CPUs on two nodes: replace `--cpus 2` with `--nodes 2 --cpus 2` and give each node
+its flash PROM (`--flash local/state/flash-cold.bin --flash local/state/flash1-cold.bin`,
+both copies of `flash.bin`).
 
 == S5: the second node (plan)
 

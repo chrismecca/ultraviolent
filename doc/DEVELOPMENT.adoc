@@ -215,7 +215,8 @@ scripts/bench.py run --cpu-slice 1 --output local/runs/slice1 cpu2 mix2
 ----
 
 Four-CPU workloads (two nodes of two, `--nodes 2 --cpus 2`, SMP.adoc "S5") run the same
-way: `boot4`, `cpu4` (four awk loops at once), and `reboot4`, from a four-CPU shell snapshot
+way: `boot4`, `cpu4` (four awk loops at once, started by a shell loop: four copies written
+out exceed IRIX's terminal line), and `reboot4`, from a four-CPU shell snapshot
 (`scripts/bench.py fixture --cpus 4`). Each node has its own flash PROM file; both start
 from the fixture's.
 

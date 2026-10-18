@@ -93,8 +93,9 @@ WORKLOADS = {
                 "console": ["init 6", "@expect login:", "root", "@expect TERM", "vt100"]
                 + SHELL + ["mpadmin -s"] + SHELL + ["@stop"]},
     "boot4": {"cpus": 4, "disk": True, "console": LOGIN + ["@stop"]},
+    # A loop: four copies written out exceed IRIX's 256-byte terminal line (MAX_CANON).
     "cpu4": {"cpus": 4, "snapshot": True,
-             "console": [f'sh -c "{AWK} & {AWK} & {AWK} & {AWK} & wait"'] + SHELL + ["@stop"]},
+             "console": [f'sh -c "for n in 1 2 3 4; do {AWK} & done; wait"'] + SHELL + ["@stop"]},
     "reboot4": {"cpus": 4, "snapshot": True,
                 "console": ["init 6", "@expect login:", "root", "@expect TERM", "vt100"]
                 + SHELL + ["mpadmin -s"] + SHELL + ["@stop"]},

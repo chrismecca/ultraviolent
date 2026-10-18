@@ -14,7 +14,11 @@ two-CPU reference was hardened (2026-10-13): two-CPU benchmark workloads (`boot2
 the schedule; the CPUs left a local reset out of phase; the ISP1020 lost a completion).
 Next, chosen with the user (2026-10-13): S5, the second node, before S4; S5.0 and S5.1
 (nodes and routing, link down) are done (2026-10-14). The deskside module, slate's chassis,
-is the default (with the user, 2026-10-15; ADR-021 addendum).** Next: see Next task.
+is the default (with the user, 2026-10-15; ADR-021 addendum). S5.2 and S5.3 are done
+(2026-10-16/17): the NUMAlink link, vector PIO, and node NICs; the PROM discovers two
+nodes as slate does, IRIX boots on four CPUs in two nodes, and the four-CPU workloads give
+identical digests and same-cycle snapshots on all three engines. S5 is complete.** Next:
+see Next task.
 
 Before it, the performance baseline (ROADMAP "After RC-IP27"; started 2026-09-28). The repository is public
 at RC-IP27 (the user chose no tag or release). Tier 0 stages A-H are done (2026-10-08): tier
@@ -392,9 +396,11 @@ user's decision).
 
 IRIX reports these and carries on:
 
-* The module serial number ("Invalid serial number for module 1, possible missing or
-  invalid NIC") and "Warning: Inventory table ID value is 0. Check Midplane NIC". Slate's
-  node bus carries MODULEID and midplane NICs (OBS-SLATE-0004); our Hub's MicroLAN is empty.
+* "Warning: Inventory table ID value is 0. Check Midplane NIC". Since S5.2 each node's
+  MicroLAN carries its NICs and n1's the MODULEID and midplane NICs (OBS-SLATE-0004), which
+  ended "Invalid serial number for module 1"; the inventory warning remains.
+* With two nodes: "Error in ust_change: Addressed slave not responding" twice (a system
+  controller command, IP27.adoc "Junk bus").
 * "Some CPUs have old firmware. Please update node board flash proms."
 * The PROM's IOC3 diagnostics (serial DMA timeout, Ethernet PHY/SSRAM/NIC). Because the
   IOC3 fails its diagnostic, a cold boot stops at the System Maintenance Menu (`Option?`)
@@ -411,10 +417,9 @@ Housekeeping:
   directory (gone); rebuild a baseline with `git worktree add` and its own
   `scripts/build-pgo.sh`.
 
-* **Current one-CPU baseline: `local/bench/r3600/m-tier1.json`** (2026-10-13, `f8953a1`,
-  best of 3): prom 299.9, boot 214.3, cpu 310.5, fs 296.8 M cycles/s. `fs`'s digest is now
-  `26805b0f3e8232c6` (the ISP1020 interrupt change; same output and cycle count). Two-CPU
-  workloads: `l-tier1-smp.json`.
+* **Current baseline, one, two, and four CPUs: `local/bench/r3600/p-s53-tier1.json`**
+  (2026-10-17, `50ec0f1` with the `cpu4` fix, best of 3; the S5.3 session log has the
+  numbers). `p-s53-tier0.json` and `p-s53-reference.json` give the same eleven digests.
 
 * **The benchmark slowdown after the host rebuild (2026-10-12) was the harness, not the
   code.** The fixture copies had been timed in tmpfs by hand (DEVELOPMENT "Benchmarks"); the
@@ -439,24 +444,18 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **Review with the user, then S5.2: the link and discovery (SMP.adoc "S5: the second
-  node (plan)").** Agreed with the user 2026-10-13: S5 before S4; the default slice stays 180
-  cycles (SMP.adoc "Decisions after the hardening"); the ISP1020 interrupt rule stays a
-  hypothesis until the experiment in SMP.adoc "Open questions for slate" runs on slate (needs
-  the user's agreement). S5.0 and S5.1 are done (2026-10-14, SMP.adoc "Progress"): the
-  machine is built of nodes, `--module deskside --nodes 2` gives slate's topology with the
-  link down, each node's address view follows the node IDs, and every one- and two-CPU
-  digest is unchanged. Decided 2026-10-15: the deskside module is the default (ADR-021
-  addendum; `--module rack` keeps the other layout); the benchmark fixture was rebuilt and
-  its results are the new baselines (session log 2026-10-15). Still for the review: the
-  S5.2 approach (model the NI link and vector PIO from the IRIX-derived header and the
-  PROM's observed protocol, then follow the PROM's discovery by its messages and Hub
-  trace); the node NICs (each Hub's MicroLAN has none yet, and discovery identifies Hubs
-  by NIC). slate (an Onyx2 deskside, which is the Origin 2000 deskside module with graphics;
-  the target, ADR-021) is needed for: `ls -l /hw/nodenum`, POD reads of NI_STATUS_REV_ID,
-  NI_PORT_PARMS, and IIO_ILCSR on each node, and with the user's agreement the ISP1020
-  experiment; and, if the user agrees, a cold-boot capture with the system controller's
-  verbose debug switch.
+. **Review with the user: S5 is complete; next S4, host-parallel CPUs (SMP.adoc "Stages"),
+  which the plan reserves for the user's review.** S5.2 and S5.3 (2026-10-16/17, SMP.adoc
+  "Progress"): the link, vector PIO, the Hub over crosstalk, and the node NICs; the PROM's
+  discovery as slate's ("2 hubs, 0 routers", global master n2, "4 CPUs on 2 nodes"); IRIX
+  on four CPUs; four-CPU workloads agree on all three engines, with same-cycle snapshots.
+  Four CPUs on one host thread run at 0.24-0.28x real time (S5.3 session log), which is
+  the case for S4. Still open from S5, for slate (SMP.adoc "Open questions for slate";
+  needs the user to power it up): `ls -l /hw/nodenum`, POD reads of NI_STATUS_REV_ID,
+  NI_PORT_PARMS, and IIO_ILCSR on each node; with the user's agreement the ISP1020
+  experiment and a cold-boot capture with the system controller's verbose debug switch.
+  Unexplained differences from slate: the "1A 000:" prefix on n1's early lines,
+  "ust_change: Addressed slave not responding", and what elects the global master.
 . **Done: the multiprocessor plan and S0-S3 (2026-10-12).** The history of this item: One CPU now
   runs above real time on every workload at 180 MHz (1.20-1.68x) and at 200 MHz
   (1.08-1.51x); at 250 MHz `boot` is at 0.86x (device-access-bound firmware delay loops),
@@ -474,8 +473,8 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   device accesses in `boot` (about 140 host cycles each, spread over four layers); tier 0
   and translation for lukewarm code (`boot` 13% in the engine loop); then dispatch and
   direct links (J6).
-. **Node NICs**: MODULEID and midplane NICs on the Hub's MicroLAN (module serial number,
-  inventory ID). What the PROM reads there may also select the deskside slot table.
+. **Inventory ID**: the NICs are on each node's MicroLAN (S5.2), but the BASEIO PROM still
+  warns "Inventory table ID value is 0. Check Midplane NIC".
 . **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.
 . Before any public announcement, rescan the tree and history for private data
   (`git log --all --format='%ae %ce'`; `git grep` over `git rev-list --all` for home paths,
@@ -1455,4 +1454,41 @@ Unknowns: as on 2026-10-14 (the node ID writer, the link registers, the node NIC
   ISP1020 rule on slate).
 Best checkpoint: the deskside fixture (bench.py fixture, then fixture --cpus 2).
 Next step: the user's review of the S5.2 approach and the node NICs; then S5.2.
+----
+
+----
+Date: 2026-10-16/17
+Milestone: SMP IP27, S5.2 and S5.3 (the link, discovery, IRIX on two nodes)
+Hypothesis: the PROM's discovery needs only the NI link, vector PIO, and the node NICs;
+  IRIX then needs nothing more for two nodes.
+Evidence: PROM runs on two nodes followed by their messages and Hub traces; slate's
+  console capture; the four-CPU workloads on three engines; console diffs against the
+  build before S5.2 (6754878).
+Changed: S5.2 (commit 50ec0f1): Hub::connect_link, NI_STATUS_REV_ID link up, vector PIO
+  through NI_VECTOR_PARMS, NI routing tables as storage, the Hub's registers over
+  crosstalk, node NICs and the module's MODULEID and midplane NICs; bench.py boot4, cpu4,
+  reboot4. S5.3: no model change; cpu4 starts its loops with a shell loop (the written-out
+  line exceeded IRIX's terminal line and was cut); SMP.adoc "Progress" S5.3.
+Tests: ip27.two_nodes.link_and_vector_pio, .hub_registers_over_crosstalk, .node_nics; dev
+  green. Benchmarks (fixture rebuilt with the NICs, `fixture --cpus 4` added): all eleven
+  digests identical on tier 1, tier 0, and the reference interpreter
+  (`local/bench/r3600/p-s53-{tier1,tier0,reference}.json`). Tier 1, PGO, best of 3, M
+  cycles/s; digests: prom 292.4 284f9eb4d915da1c, boot 210.9 1dff96a7fa52c78d, cpu 308.5
+  07b07c666df160e9, fs 296.4 fa0b3a1eb4ee0974, boot2 207.0 7f168cac54ff69a3, cpu2 229.9
+  66cea51cd2fae5fc, mix2 247.8 2fcd2e6fc24f5b69, reboot2 212.5 74c295395a045048, boot4
+  201.1 ac7e9f3936055c10, cpu4 173.1 a88693bf079312f7, reboot4 199.2 b0e890b3f8255c62.
+  0.98-1.02x of n-deskside-tier1.json. cpu4's end snapshot at 19,699,161,840 cycles is
+  byte-identical (with the disk, NVRAM, and both flashes) on all three engines.
+Newly proven: the PROM discovers two nodes, elects n2, and IRIX runs four CPUs with these
+  models alone; the one- and two-CPU console output changed only by the three lines the
+  NICs remove ("using BaseIO nic", "Invalid serial number for module 1", "No serial number
+  found"); the PROM now runs 70.6 M cycles longer to its menu (8,204,213,985).
+Disproven: the first cpu4 workload as a four-CPU load (its line was cut).
+Unknowns: slate's "1A 000:" prefix, ust_change errors, the global master rule; the
+  inventory ID warning; the ISP1020 rule on slate.
+Best checkpoint: the four-CPU fixture (bench.py fixture --cpus 4) and boot4.
+Next step: the user's review before S4 (host-parallel CPUs); slate reads when it is on.
+Housekeeping: the session died overnight 2026-10-16 when a scratch script hashed three
+  9 GB guest disk copies in /dev/shm by reading each whole into memory (host OOM); hash
+  with sha256sum, and give parallel runs separate --scratch directories.
 ----
