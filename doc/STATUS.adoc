@@ -451,7 +451,7 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   on four CPUs; four-CPU workloads agree on all three engines, with same-cycle snapshots.
   Four CPUs on one host thread run at 0.24-0.28x real time (S5.3 session log), which is
   the case for S4. Still open from S5, for slate (SMP.adoc "Open questions for slate";
-  needs the user to power it up): `ls -l /hw/nodenum`, POD reads of NI_STATUS_REV_ID,
+  the read-only IRIX checks matched, OBS-SLATE-0005, 2026-10-25): POD reads of NI_STATUS_REV_ID,
   NI_PORT_PARMS, and IIO_ILCSR on each node; with the user's agreement the ISP1020
   experiment and a cold-boot capture with the system controller's verbose debug switch.
   Unexplained differences from slate: the "1A 000:" prefix on n1's early lines,
@@ -1491,4 +1491,22 @@ Next step: the user's review before S4 (host-parallel CPUs); slate reads when it
 Housekeeping: the session died overnight 2026-10-16 when a scratch script hashed three
   9 GB guest disk copies in /dev/shm by reading each whole into memory (host OOM); hash
   with sha256sum, and give parallel runs separate --scratch directories.
+----
+
+----
+Date: 2026-10-25
+Milestone: SMP IP27, S5 follow-up (slate reads)
+Hypothesis: IRIX on slate numbers and links the two nodes as on the emulator.
+Evidence: slate at its new LAN address, read-only telnet commands; the same
+  commands on the emulator's four-CPU fixture.
+Changed: OBS-SLATE-0005 in SOURCES.adoc; SMP.adoc "Open questions for slate".
+Tests: none (observation only).
+Newly proven: /hw/nodenum, the n1 and n2 node listings (links, crosstalk owner, device
+  numbers), and mpadmin -s agree with slate; slate's hardware inventory is unchanged since
+  2026-09-28.
+Disproven: none.
+Unknowns: as on 2026-10-17 (POD register reads and a new cold-boot capture need the user at
+  slate's console).
+Best checkpoint: unchanged.
+Next step: unchanged: the user's review before S4.
 ----

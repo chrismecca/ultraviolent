@@ -143,6 +143,23 @@ Conclusion: /hw/module/1/slot/io1/baseio: MIO board, part 030-0880-003, rev C; B
 Confidence: observed once
 ----
 
+----
+OBS-SLATE-0005
+Source: slate, read-only commands (2026-10-25); captures in local/slate/
+  (hw-slots-2026-10-25.txt, hinv-mvv-2026-10-25.txt)
+Question: IRIX's node numbering and node topology with two nodes (SMP.adoc "Open questions
+  for slate")
+Capture: ls -l /hw/nodenum; ls -l /hw/module/1/slot, .../n1/node, .../n2/node; mpadmin -s;
+  hinv -mvv
+Conclusion: node 0 is /hw/module/1/slot/n2/node and node 1 is n1; each node's `link`
+  names the other; n2 holds the crosstalk (`xtalk` directory) and `sys_critical_parent`,
+  and n1's `io` and `xtalk` link to n2's; processors 0-3; hinv -mvv unchanged from
+  OBS-SLATE-0004. The emulator's four-CPU guest (bench fixture --cpus 4) gives the same
+  listings, device numbers included, without slate's io4 and io5 (graphics and MENET, not
+  modeled).
+Confidence: observed once
+----
+
 == Source classes
 
 Every cited fact names its source class. Classes are listed from strongest to weakest:

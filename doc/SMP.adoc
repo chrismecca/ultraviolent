@@ -541,9 +541,8 @@ three engines; the one- and two-CPU workloads unchanged.
 
 Read-only, when slate is on (local/tools/slate-tn.py):
 
-* Each node's node ID: `ls -l /hw/nodenum` (IRIX's links from node number to board).
-* `hinv -vm` already gives the boards; `sn0msc` and `/hw/module/1/slot/n*` listings as for
-  OBS-SLATE-0001.
+* Answered 2026-10-25 (OBS-SLATE-0005): `/hw/nodenum` (node 0 at n2, 1 at n1), the
+  `/hw/module/1/slot/n*` listings, and `mpadmin -s` match the emulator's four-CPU guest.
 
 POD reads, at the console during a boot (the user drives; nothing is written):
 
