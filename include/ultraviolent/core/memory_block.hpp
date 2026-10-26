@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -38,48 +39,56 @@ class MemoryBlock {
     // report here (AddressSpace::write, AddressSpace::writable_memory_bytes). Writes through
     // bytes() happen only when loading images and snapshots, which invalidate decoded code
     // globally instead.
+    //
+    // CPUs on several host threads mark and write concurrently (SMP.adoc "S4"): marks and
+    // generations are atomics. Relaxed, except where a mark is set or cleared, which decides
+    // who counts it; the CPUs' own protocol orders the rest (Cpu::claim_code_frame).
     static constexpr std::size_t frame_size = 0x1000;
-    void mark_code(std::size_t offset) {
-        std::uint8_t& mark = code_marks_[offset / frame_size];
-        if (mark == 0) {
-            mark = 1;
-            ++marked_frames_;
+    // Returns whether the frame was not marked before.
+    bool mark_code(std::size_t offset) {
+        std::atomic<std::uint8_t>& mark = code_marks_[offset / frame_size];
+        if (mark.load(std::memory_order_relaxed) != 0 || mark.exchange(1) != 0) {
+            return false;
         }
+        marked_frames_.fetch_add(1, std::memory_order_relaxed);
+        return true;
     }
     [[nodiscard]] bool holds_code(std::size_t offset) const {
-        return code_marks_[offset / frame_size] != 0;
+        return code_marks_[offset / frame_size].load(std::memory_order_relaxed) != 0;
     }
     // The generation of the frame holding `offset`; stable storage for the block's lifetime.
-    [[nodiscard]] const std::uint64_t* code_generation(std::size_t offset) const {
+    [[nodiscard]] const std::atomic<std::uint64_t>* code_generation(std::size_t offset) const {
         return &code_generations_[offset / frame_size];
     }
     // A write of `size` bytes at `offset` may follow: advances and unmarks the marked frames it
     // touches. Returns whether it touched one.
     bool note_write(std::size_t offset, std::size_t size) {
-        if (marked_frames_ == 0 || size == 0) {
+        if (marked_frames_.load(std::memory_order_relaxed) == 0 || size == 0) {
             return false;
         }
         bool touched = false;
         for (std::size_t frame = offset / frame_size; frame <= (offset + size - 1) / frame_size;
              ++frame) {
-            if (code_marks_[frame] != 0) {
-                code_marks_[frame] = 0;
-                ++code_generations_[frame];
-                --marked_frames_;
+            std::atomic<std::uint8_t>& mark = code_marks_[frame];
+            if (mark.load(std::memory_order_relaxed) != 0 && mark.exchange(0) != 0) {
+                code_generations_[frame].fetch_add(1, std::memory_order_relaxed);
+                marked_frames_.fetch_sub(1, std::memory_order_relaxed);
                 touched = true;
             }
         }
         return touched;
     }
     [[nodiscard]] std::size_t marked_frames() const {
-        return marked_frames_;
+        return marked_frames_.load(std::memory_order_relaxed);
     }
 
   private:
     std::vector<std::byte> bytes_;
-    std::vector<std::uint8_t> code_marks_ = std::vector<std::uint8_t>(frames());
-    std::vector<std::uint64_t> code_generations_ = std::vector<std::uint64_t>(frames());
-    std::size_t marked_frames_{};
+    std::vector<std::atomic<std::uint8_t>> code_marks_ =
+        std::vector<std::atomic<std::uint8_t>>(frames());
+    std::vector<std::atomic<std::uint64_t>> code_generations_ =
+        std::vector<std::atomic<std::uint64_t>>(frames());
+    std::atomic<std::size_t> marked_frames_{};
 
     [[nodiscard]] std::size_t frames() const {
         return (bytes_.size() + frame_size - 1) / frame_size;

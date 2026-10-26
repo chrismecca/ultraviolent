@@ -48,7 +48,7 @@ std::expected<void, MapError> AddressSpace::replace(Mapping mapping) {
         if (existing.range.base == mapping.range.base &&
             existing.range.size == mapping.range.size) {
             existing = mapping;
-            ++generation_;
+            publish();
             return {};
         }
     }
@@ -107,7 +107,7 @@ std::expected<void, AccessFault> AddressSpace::write(PhysicalAddress address, Ac
             return std::unexpected(AccessFault::read_only);
         }
         if (memory->block->note_write(memory->block_offset + offset, size)) {
-            ++*code_writes_;
+            code_writes_->fetch_add(1, std::memory_order_relaxed);
         }
         store_unsigned(memory->bytes.subspan(offset, size), value, byte_order_);
         return {};
@@ -140,7 +140,7 @@ std::span<std::byte> AddressSpace::writable_memory_bytes(PhysicalAddress address
     }
     const std::uint64_t offset = address - mapping->range.base;
     if (memory->block->note_write(memory->block_offset + offset, size)) {
-        ++*code_writes_;
+        code_writes_->fetch_add(1, std::memory_order_relaxed);
     }
     return memory->bytes.subspan(offset, size);
 }
@@ -172,25 +172,53 @@ AddressSpace::mmio_range(PhysicalAddress address, std::uint64_t size, unsigned r
 
 void AddressSpace::clear() {
     mappings_.clear();
-    ++generation_;
-    last_hit_ = 0;
+    publish();
+}
+
+void AddressSpace::end_update() {
+    invariant(updating_ != 0, "end_update without begin_update");
+    if (--updating_ == 0) {
+        publish();
+    }
+}
+
+void AddressSpace::set_shared(bool shared) {
+    shared_ = shared;
+    publish();
+}
+
+void AddressSpace::publish() {
+    if (updating_ != 0) {
+        return;
+    }
+    if (shared_) {
+        versions_.push_back(std::make_unique<const Mappings>(mappings_));
+        current_.store(versions_.back().get(), std::memory_order_release);
+    } else {
+        current_.store(&mappings_, std::memory_order_release);
+    }
+    last_hit_.store(0, std::memory_order_relaxed);
+    generation_.store(generation_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
 }
 
 const AddressSpace::Mapping* AddressSpace::find(PhysicalAddress address) const {
-    if (last_hit_ < mappings_.size() && mappings_[last_hit_].range.contains(address)) {
-        return &mappings_[last_hit_];
+    const Mappings& mappings = *current_.load(std::memory_order_acquire);
+    const std::size_t hint = last_hit_.load(std::memory_order_relaxed);
+    if (hint < mappings.size() && mappings[hint].range.contains(address)) {
+        return &mappings[hint];
     }
     // First mapping whose base is above the address; the candidate is the one before it.
-    auto next = std::ranges::upper_bound(mappings_, address, {},
+    auto next = std::ranges::upper_bound(mappings, address, {},
                                          [](const Mapping& m) { return m.range.base; });
-    if (next == mappings_.begin()) {
+    if (next == mappings.begin()) {
         return nullptr;
     }
     const Mapping& candidate = *std::prev(next);
     if (!candidate.range.contains(address)) {
         return nullptr;
     }
-    last_hit_ = static_cast<std::size_t>(std::prev(next) - mappings_.begin());
+    last_hit_.store(static_cast<std::size_t>(std::prev(next) - mappings.begin()),
+                    std::memory_order_relaxed);
     return &candidate;
 }
 
@@ -211,8 +239,7 @@ std::expected<void, MapError> AddressSpace::insert(Mapping mapping) {
         return std::unexpected(MapError::overlap);
     }
     mappings_.insert(next, mapping);
-    ++generation_;
-    last_hit_ = 0;
+    publish();
     return {};
 }
 

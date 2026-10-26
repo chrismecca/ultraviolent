@@ -401,8 +401,11 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
 }
 
 void Ip27Machine::map_views() {
+    // Each view changes as a whole (AddressSpace::begin_update).
     for (auto& node : nodes_) {
+        node->bus.begin_update();
         node->map_system_windows();
+        node->bus.end_update();
     }
 }
 

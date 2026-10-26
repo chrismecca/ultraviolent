@@ -6,6 +6,7 @@
 #include <ultraviolent/arch/mips/native_code.hpp>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -145,7 +146,7 @@ class BlockInterpreter {
         std::uint64_t pc{empty_pc};
         std::uint64_t context{};
         std::uint64_t epoch{};
-        const std::uint64_t* frame_generation{};
+        const std::atomic<std::uint64_t>* frame_generation{};
         std::uint64_t frame_generation_value{};
         std::uint64_t tlb_generation{};
         std::int8_t tlb_index{-1};
@@ -180,7 +181,7 @@ class BlockInterpreter {
     // What validates a dispatch entry, besides its pc and context (as for Entry).
     struct DispatchValidity {
         std::uint64_t epoch{};
-        const std::uint64_t* frame_generation{};
+        const std::atomic<std::uint64_t>* frame_generation{};
         std::uint64_t frame_generation_value{};
         std::uint64_t tlb_generation{};
         std::int8_t tlb_index{-1};

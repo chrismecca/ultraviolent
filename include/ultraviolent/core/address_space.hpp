@@ -5,9 +5,11 @@
 #include <ultraviolent/core/memory_block.hpp>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <optional>
 #include <span>
 #include <utility>
@@ -120,6 +122,18 @@ class AddressSpace {
     // changed). A target's access may do this: the space does not touch the mapping after
     // calling it.
     void clear();
+    // Changes between begin_update and end_update become visible together, when shared. They
+    // nest.
+    void begin_update() {
+        ++updating_;
+    }
+    void end_update();
+    // Several threads read the space while one changes it (host-parallel CPUs, SMP.adoc "S4"):
+    // each change then publishes a new version of the mappings, and the space keeps every
+    // version until it is destroyed, so a reader is never left holding a removed table.
+    // Changes still come from one thread at a time. Unshared, readers see the table being
+    // changed, as when one thread does everything.
+    void set_shared(bool shared);
 
     std::expected<std::uint64_t, AccessFault> read(PhysicalAddress address, AccessWidth width,
                                                    unsigned requester = 0);
@@ -157,16 +171,17 @@ class AddressSpace {
     // Writes through this space that touched a frame holding decoded code (write and
     // writable_memory_bytes), and through every space sharing its count.
     [[nodiscard]] std::uint64_t code_writes() const {
-        return *code_writes_;
+        return code_writes_->load(std::memory_order_relaxed);
     }
     // Counts code-frame writes together with `other` (which must outlive this space): spaces
     // that map the same memory, so that a CPU on one sees writes made through the other.
     void share_code_writes(AddressSpace& other) {
         code_writes_ = other.code_writes_;
     }
-    // Changes whenever a mapping is added or replaced.
+    // Changes whenever a mapping is added or replaced. Once a reader sees a new generation,
+    // it finds the mappings that go with it.
     [[nodiscard]] std::uint64_t generation() const {
-        return generation_;
+        return generation_.load(std::memory_order_acquire);
     }
     std::expected<void, AccessFault> write(PhysicalAddress address, AccessWidth width,
                                            std::uint64_t value, unsigned requester = 0);
@@ -185,20 +200,29 @@ class AddressSpace {
         std::variant<MemoryMapping, Ports> target;
     };
 
+    using Mappings = std::vector<Mapping>;
+
     [[nodiscard]] const Mapping* find(PhysicalAddress address) const;
     std::expected<void, MapError> insert(Mapping mapping);
     std::expected<void, MapError> replace(Mapping mapping);
+    // Makes the changes to mappings_ visible to readers (unless an update is open).
+    void publish();
 
     ByteOrder byte_order_;
-    // Sorted by base address; ranges never overlap.
-    std::vector<Mapping> mappings_;
+    // The mappings as changed, sorted by base address; ranges never overlap.
+    Mappings mappings_;
+    // What readers decode with: mappings_ itself, or when shared, the latest version.
+    std::atomic<const Mappings*> current_{&mappings_};
+    std::vector<std::unique_ptr<const Mappings>> versions_;
+    bool shared_{};
+    unsigned updating_{};
     // Index of the mapping that decoded the last access, tried first. Transparent because
     // mappings never overlap. Measured: the binary search dominated AddressSpace::read in
     // IP27 PROM runs (callgrind, 2026-09-24).
-    mutable std::size_t last_hit_{};
-    std::uint64_t generation_{};
-    std::uint64_t own_code_writes_{};
-    std::uint64_t* code_writes_{&own_code_writes_};
+    mutable std::atomic<std::size_t> last_hit_{};
+    std::atomic<std::uint64_t> generation_{};
+    std::atomic<std::uint64_t> own_code_writes_{};
+    std::atomic<std::uint64_t>* code_writes_{&own_code_writes_};
 };
 
 } // namespace ultraviolent

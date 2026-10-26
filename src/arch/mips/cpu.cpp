@@ -613,15 +613,20 @@ std::optional<Cpu::CodePage> Cpu::code_page(std::uint64_t address) {
 }
 
 void Cpu::claim_code_frame(const CodePage& page) {
-    page.block->mark_code(page.frame);
+    if (page.tlb_index >= 0) {
+        tlb_code_entries_ |= std::uint64_t{1} << page.tlb_index;
+    }
+    // A marked frame is never cached as a writable host page (remember_page), and every CPU
+    // dropped its writable pages when the frame was marked. So only a first mark has more to
+    // do (SMP.adoc "S4.0": a mark per build cost a drop every 2,000 cycles).
+    if (!page.block->mark_code(page.frame)) {
+        return;
+    }
     // Other CPUs may hold the frame as a writable host page; their stores must reach the bus
     // from now on.
     if (coherence_ != nullptr) {
         coherence_->drop_writable_pages();
         seen_coherence_ = coherence_->generation();
-    }
-    if (page.tlb_index >= 0) {
-        tlb_code_entries_ |= std::uint64_t{1} << page.tlb_index;
     }
     for (HostPage& entry : data_pages_) {
         if (entry.writable_bytes == page.bytes) {

@@ -3,10 +3,13 @@
 #include <ultraviolent/core/address_space.hpp>
 #include <ultraviolent/core/memory_block.hpp>
 
+#include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -261,6 +264,76 @@ const test::Registration shared_code_writes{
         t.check_equal(second.code_writes(), std::uint64_t{1});
         t.check(first.write(PhysicalAddress{0x8}, AccessWidth::bits32, 1).has_value());
         t.check_equal(second.code_writes(), std::uint64_t{1}); // not a code frame
+    }};
+
+// Changes made in one update become visible together: one generation step at the end.
+const test::Registration updates{
+    "address_space.updates_publish_together", [](test::Context& t) {
+        MemoryBlock ram{0x1000};
+        AddressSpace space{ByteOrder::big};
+        t.check(space.map_memory({ram_base, 0x1000}, ram, 0, MemoryAccess::read_write).has_value());
+        for (const bool shared : {false, true}) {
+            space.set_shared(shared);
+            const std::uint64_t before = space.generation();
+            space.begin_update();
+            space.clear();
+            t.check(
+                space.map_memory({ram_base, 0x1000}, ram, 0, MemoryAccess::read_write).has_value());
+            t.check_equal(space.generation(), before); // unchanged until the update ends
+            space.end_update();
+            t.check(space.generation() != before, "the update's end advances it");
+            t.check(space.read(ram_base, AccessWidth::bits32).has_value(), "mapped again");
+        }
+    }};
+
+// Shared (host-parallel CPUs, SMP.adoc "S4"): a thread decoding addresses while another
+// replaces the mapping finds the old mapping or the new one, never a torn table.
+const test::Registration shared_versions{
+    "address_space.shared_versions", [](test::Context& t) {
+        MemoryBlock first{0x1000};
+        MemoryBlock second{0x1000};
+        std::ranges::fill(first.bytes(), std::byte{0x11});
+        std::ranges::fill(second.bytes(), std::byte{0x22});
+        AddressSpace space{ByteOrder::big};
+        t.check(
+            space.map_memory({ram_base, 0x1000}, first, 0, MemoryAccess::read_write).has_value());
+        space.set_shared(true);
+        std::atomic<bool> done{false};
+        std::atomic<unsigned> torn{0};
+        std::jthread reader{[&] {
+            while (!done.load()) {
+                const auto value = space.read(ram_base, AccessWidth::bits32);
+                if (!value || (*value != 0x1111'1111 && *value != 0x2222'2222)) {
+                    ++torn;
+                }
+            }
+        }};
+        for (unsigned i = 0; i < 2000; ++i) {
+            space.begin_update();
+            space.clear();
+            (void)space.map_memory({ram_base, 0x1000}, i % 2 == 0 ? second : first, 0,
+                                   MemoryAccess::read_write);
+            space.end_update();
+        }
+        done = true;
+        reader.join();
+        t.check_equal(torn.load(), 0u); // every read decoded a whole mapping
+    }};
+
+// Only a frame's first mark reports itself (Cpu::claim_code_frame tells other CPUs then);
+// a write to a marked frame clears the mark and advances the frame's generation.
+const test::Registration code_marks{
+    "memory_block.code_marks", [](test::Context& t) {
+        MemoryBlock ram{0x2000};
+        const std::uint64_t before = ram.code_generation(0x1000)->load();
+        t.check(ram.mark_code(0x1004), "first mark");
+        t.check(!ram.mark_code(0x1ff0), "same frame again");
+        t.check_equal(ram.marked_frames(), std::size_t{1});
+        t.check(!ram.note_write(0x0, 8), "other frame");
+        t.check(ram.note_write(0x1ff8, 8), "touches the frame");
+        t.check(!ram.holds_code(0x1000), "mark cleared");
+        t.check(ram.code_generation(0x1000)->load() != before, "generation advanced");
+        t.check(ram.mark_code(0x1000), "a new first mark");
     }};
 
 } // namespace

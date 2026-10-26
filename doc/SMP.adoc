@@ -404,6 +404,16 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
   - Speed, four CPUs on one host thread (tier 1, best of 3, all CPUs' cycles): `boot4` 201,
     `cpu4` 173, `reboot4` 199 M cycles/s; 0.24-0.28x real time. The host-parallel stage
     (S4) is what changes this.
+* **S4.0 and S4.1 (2026-10-26): host-parallel CPUs, the shared state.** Plan and
+  measurements: "S4: host-parallel CPUs (plan)". S4.1, still one thread: MemoryBlock's code
+  marks and generations are atomics, and `mark_code` reports a first mark; `claim_code_frame`
+  tells the other CPUs only then; AddressSpace publishes its mappings as versions when
+  shared (`set_shared`), with `begin_update`/`end_update` around each node's view rebuild,
+  and its generation, lookup hint, and code-write count are atomics. Tests:
+  `address_space.updates_publish_together`, `address_space.shared_versions` (a reader thread
+  while another remaps), `memory_block.code_marks`. All eleven benchmark digests unchanged on
+  tier 1, tier 0, and the reference interpreter; tier 1 0.98-1.04x of `p-s53-tier1.json`
+  (`local/bench/r3600/q-s41-tier1.json`).
 * **Deskside default (2026-10-15, with the user; ADR-021 addendum).** One node in deskside
   n1 (slot ID 3, Crossbow port `0xa`, the BaseIO on 15) is the default; `--module rack`
   keeps the rack layout. Snapshots record the module and node slot (`machine.module`,
@@ -564,6 +574,109 @@ slate's QL1040B with the firmware IRIX loads:
 
 The same program's output from the emulator and from slate is the comparison, and stays a
 test of the model.
+
+== S4: host-parallel CPUs (plan)
+
+Status: accepted by the user 2026-10-26 ("sure lets try it"), after S5. Fast mode: one host
+thread per CPU. Not deterministic run to run; accepted against reference-mode results on the
+same workloads (same final outputs, not the same cycles). Reference mode stays one thread,
+deterministic, and the oracle; nothing it does changes.
+
+=== What the CPUs share (S4.0, measured 2026-10-26)
+
+A scratch build counted, per CPU, every interaction with state another CPU can touch
+(`boot4`: 16.7 G cycles each; `cpu4`: 2.9 G each, from the four-CPU shell snapshot):
+
+[cols="2,1,1"]
+|===
+|Per CPU |`boot4` |`cpu4`
+
+|Device reads |418-974 M |11-18 k
+|of which PI_RT_COUNT |359-918 M |-
+|PI_INT_PEND0 reads |52 M |-
+|Device writes |84-247 k |0.4-2.1 k
+|Block builds (`claim_code_frame` calls) |5.1-9.1 M |63-104 k
+|Frames newly marked as code |314-1,271 |123-368
+|LL |1.6-2.4 M |63-144 k
+|Interrupt input changes made by another CPU |0.7-8 k |16-298
+|Address-map rebuilds (`map_views`) |88-169 |0-4
+|Node CPU resets |0-1 |0
+|===
+
+So: device traffic is the firmware's delay loops on PI_RT_COUNT, a pure function of virtual
+time; everything else a CPU shares is rare, except LL. Found on the way: `claim_code_frame`
+tells the other CPUs to drop their writable host pages on every block build, although only
+a frame's first mark needs it; in two-CPU reference runs that is about one drop per 2,000
+cycles.
+
+=== Design
+
+* **Threads and the window.** `--parallel` runs each CPU's engine on its own host thread.
+  A CPU may run at most `--parallel-window` cycles (default to be measured; 10,000 to
+  start) ahead of the slowest CPU: its engine's stop is the lowest cycle count the others
+  have published plus the window, and it waits when it gets there. Each CPU publishes its
+  cycle count when its engine returns. The window bounds the skew the guest sees between
+  CPUs; it is not a barrier, and no thread waits for all.
+* **Device time.** One lock (the device lock) serializes every synchronized device access
+  and every event. Device time is the latest time any CPU has presented: an access first
+  advances the scheduler to the accessing CPU's time if that is later, and runs the events
+  then due. It never goes backwards; a CPU behind sees device time up to one window ahead
+  of its own. A CPU that reaches the next event's cycle takes the lock and advances, as one
+  CPU does today.
+* **PI_RT_COUNT without the lock.** A read computes the count at the later of device time
+  and the reader's own time, from the Hub's base and epoch, which a write changes under the
+  lock (a sequence counter). Each CPU's reads follow its own time, so the PROM's check that
+  the counter advances passes at any window.
+* **Interrupts and resets: a mailbox per CPU.** The machine owns the wiring, so it puts an
+  adapter between each Hub output and its CPU. In reference mode it forwards. In parallel
+  mode it posts the input levels (or a reset) to the CPU's mailbox and raises the CPU's
+  attention, unless the CPU is the caller's own. The CPU applies the mailbox on its own
+  thread at its next boundary.
+* **Attention.** Another thread sets the CPU's `interrupt_check` byte, which every engine
+  tests at block entry, so the CPU leaves native code at its next block and applies its
+  mailbox. The owner recomputes the byte from its own state and may overwrite a remote
+  setting. The mailbox is also read whenever the engine returns, at most a window later,
+  and a thread waiting for an acknowledgment raises attention again.
+* **LL/SC.** In parallel mode LL records the physical address and the value loaded, and SC
+  is a host compare-and-swap of that value, as QEMU does. Reference mode keeps its
+  reservations (`Coherence`). Difference: an SC succeeds after another CPU stored the same
+  value back (ABA), which IRIX's lock and counter code tolerates.
+* **SYNC** is a host fence (`mfence`) in parallel mode. x86-64 already orders everything
+  else MIPS IV leaves unordered.
+* **Code frames.** A CPU that marks a frame as code for the first time raises a coherence
+  generation, then waits until every other CPU has dropped its writable host pages (each
+  acknowledges by publishing the generation it has seen) or is parked. Parked means waiting
+  for the device lock or for the window, and a parked CPU checks the generation before it
+  stores again (check_host_pages runs after every bus access and at engine entry). Only a
+  first mark needs this: in reference mode too.
+* **Address maps.** AddressSpace publishes its mappings as immutable versions: a change
+  builds a new one and swaps a pointer, and old versions live until the space is
+  destroyed (a few hundred per boot). A reader is never left with a table torn out from
+  under it; a CPU's cached pages follow a change at its next bus access, as now. The
+  lookup hint and the code-write count become atomics.
+* **Memory.** Guest memory is shared host memory, read and written without locks, as on
+  the hardware. Frame marks and generations become relaxed atomics.
+* **Stops, snapshots, and observation.** A stop (console script, `--cycles`) sets every
+  CPU's attention; the main thread joins the CPU threads, and snapshots are taken only
+  then. A snapshot from parallel mode loads in either mode. Tracing and `--probe` need
+  reference mode; `--parallel` refuses them.
+
+=== Stages
+
+S4.1. **Shared state ready for threads, one thread.** Atomics in MemoryBlock and
+AddressSpace, versioned mappings, the interrupt and reset adapter, first-mark claims, the
+attention protocol in `Cpu`. Gates: unit tests; every benchmark digest unchanged on all
+three engines; speed within 2% of `p-s53-tier1.json`.
+
+S4.2. **The parallel runner.** `--parallel`, the window, the device lock and device time,
+PI_RT_COUNT without the lock, mailboxes, LL/SC by compare-and-swap, SYNC, code-frame
+acknowledgment, stops and snapshots. Gates: `cpu2`, `cpu4`, `mix2`, `boot2`, `boot4`,
+`reboot2`, and `reboot4` reach the same results as reference mode (the workload's own output
+lines; timing lines such as "Found 2 objects ... in N usec" differ); a parallel snapshot
+resumes in reference mode; the asan preset; reference mode unchanged.
+
+S4.3. **Measure and tune.** Speedup on the two- and four-CPU workloads; the window; the
+lock. Gate: the numbers recorded.
 
 == Evidence
 

@@ -124,7 +124,8 @@ bool BlockInterpreter::install_native(Entry& entry) {
 }
 
 bool BlockInterpreter::valid(const DispatchValidity& v) const {
-    return v.epoch == cpu_.code_epoch() && *v.frame_generation == v.frame_generation_value &&
+    return v.epoch == cpu_.code_epoch() &&
+           v.frame_generation->load(std::memory_order_relaxed) == v.frame_generation_value &&
            (v.tlb_index < 0 ||
             cpu_.tlb_generation(static_cast<std::size_t>(v.tlb_index)) == v.tlb_generation);
 }
@@ -157,7 +158,8 @@ BlockInterpreter::Entry* BlockInterpreter::lookup(std::uint64_t pc) {
         miss = entry.pc == empty_pc ? CacheMiss::cold : CacheMiss::tag;
     } else if (entry.epoch != cpu_.code_epoch()) {
         miss = CacheMiss::epoch;
-    } else if (*entry.frame_generation != entry.frame_generation_value) {
+    } else if (entry.frame_generation->load(std::memory_order_relaxed) !=
+               entry.frame_generation_value) {
         miss = CacheMiss::frame;
     } else if (entry.tlb_index >= 0 && cpu_.tlb_generation(static_cast<std::size_t>(
                                            entry.tlb_index)) != entry.tlb_generation) {
@@ -184,7 +186,7 @@ BlockInterpreter::Entry* BlockInterpreter::lookup(std::uint64_t pc) {
     entry.context = context;
     entry.epoch = cpu_.code_epoch();
     entry.frame_generation = code.block->code_generation(code.frame);
-    entry.frame_generation_value = *entry.frame_generation;
+    entry.frame_generation_value = entry.frame_generation->load(std::memory_order_relaxed);
     entry.tlb_index = code.tlb_index;
     entry.tlb_generation =
         code.tlb_index >= 0 ? cpu_.tlb_generation(static_cast<std::size_t>(code.tlb_index)) : 0;
