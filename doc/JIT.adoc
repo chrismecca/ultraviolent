@@ -492,6 +492,19 @@ J5 and J6 are optional for this personality.
   cycles each, spread over the helper, the CPU's access path, the synchronized target, and
   the Hub: no single cost dominates.
 
+* **PI_RT_COUNT read from the Hub (2026-10-28).** perf of `prom` (release): about half of
+  host time in device reads, nearly all PI_RT_COUNT: `operation_helper` 18%, the
+  synchronized target 15%, `Cpu::load_slow` 10%, `Hub::read` 9% (its stored-register
+  search, BTE check, and switch come before the counter). The synchronized target now
+  returns `Hub::rt_count()` after synchronizing time and leaves the next event alone (the
+  read schedules nothing): `prom` 31.9 to 28.8 s, `boot` 86.7 to 78.3 s, release build,
+  every digest unchanged. What remains (about half of `prom` still) is spread over the slow
+  path itself (write-back, the helper's prologue and dispatch, reload), `load_slow`'s
+  device page, `device_read`, time synchronization, and the counter. A dedicated executor
+  for device loads would save only the operation dispatch (the executor already reaches
+  `ld` through one table); a larger gain needs native code that calls a device page's
+  target itself, with the boundary materialized. Not started.
+
 == Toward host-parallel vCPUs (not built)
 
 The next machine goal after one CPU at its nominal clock is ADR-021's four CPUs, each at the

@@ -447,20 +447,13 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **The cost of a PI_RT_COUNT read (performance; measured in S4.3, SMP.adoc "Progress").**
-  Firmware delay loops read PI_RT_COUNT once every ~15 cycles: about 593 M reads per slave
-  CPU before the PROM menu on four CPUs, and the one-CPU `boot` makes hundreds of millions
-  too. Each read leaves native code (operation helper, `Cpu::load_slow`, the device page,
-  a virtual `mmio_read`, then `Hub::rt_count_at`). Measure first how much of `prom` and of
-  parallel `boot4`'s PROM phase the read takes (a counting or perf build); then, if it is
-  large, a general mechanism (not an IP27 special case in an engine): for example a device
-  page that names a register whose value is a linear function of virtual time, which the
-  CPU computes without the call chain. Gates: every reference digest unchanged on all
-  three engines; the speedup recorded. Keep every background run under an hour (bench.py
-  `--timeout`, and a watchdog).
-. **Then S6, IP31 / R12000 (SMP.adoc "Stages"; its own plan, ADR-022 personality).** slate's
+. **S6, IP31 / R12000 (SMP.adoc "Stages"; its own plan, ADR-022 personality).** slate's
   nodes are IP31 boards with R12000s at 400 MHz (OBS-SLATE-0001, -0004). Write the plan
   first (observe: what IRIX and the PROM read to tell an R12000 and an IP31 apart).
+. **Done: the cost of a PI_RT_COUNT read (2026-10-28, JIT.adoc "Progress").** The
+  synchronized target returns the Hub's count directly (`prom` and `boot` about 11%
+  faster, digests unchanged). The rest of a device read's cost is spread over the slow
+  path; a larger gain needs native code calling device targets (recorded, not started).
 . **Done: S4, host-parallel CPUs (2026-10-26/28, SMP.adoc "S4" and "Progress").** The user
   accepted it on 2026-10-26 ("sure lets try it"). S4.0 measured the shared state, S4.1 made
   it safe for threads, S4.2 added the parallel runner, and S4.3 measured the window (no
@@ -1592,4 +1585,23 @@ Disproven: that the yields at the window cost time (spinning first gained nothin
 Unknowns: the share of a PI_RT_COUNT read in single-CPU runs.
 Best checkpoint: unchanged.
 Next step: the cost of a PI_RT_COUNT read (Next task).
+----
+
+----
+Date: 2026-10-28
+Milestone: performance (after S4): the cost of a PI_RT_COUNT read
+Hypothesis: the PI_RT_COUNT read path, not the delay loops' other work, dominates
+  firmware-heavy runs.
+Evidence: perf of `prom` (release): about half of host time in device reads; annotation of
+  `operation_helper` (cost spread over prologue, dispatch, operand handling).
+Changed: SynchronizedTarget returns Hub::rt_count() directly in reference mode;
+  Hub::rt_count public; test ip27.rt_count_read_by_cpu; JIT.adoc "Progress".
+Tests: dev green; all eleven digests unchanged on tier 1, `prom` on tier 0 and the
+  reference interpreter.
+Newly proven: `prom` 31.9 to 28.8 s and `boot` 86.7 to 78.3 s (release, best of 3).
+Disproven: that a dedicated device-load executor would pay (the dispatch it saves is one
+  table lookup).
+Unknowns: the gain of native code calling device targets.
+Best checkpoint: unchanged.
+Next step: S6's plan (IP31 / R12000).
 ----
