@@ -632,6 +632,34 @@ const test::Registration two_cpu_local_reset{
         }
     }};
 
+// A CPU's reads of PI_RT_COUNT follow virtual time at 1.25 MHz (IP27.adoc "Hub"): two reads
+// 1,000 loop iterations (about 3,000 cycles, 16.7 us at 180 MHz) apart, stored at physical
+// 0x300 and 0x308. The machine answers this read directly from the Hub.
+const test::Registration rt_count_by_cpu{
+    "ip27.rt_count_read_by_cpu", [](test::Context& t) {
+        std::vector<std::uint32_t> words(32, nop());
+        const std::initializer_list<std::uint32_t> code = {
+            // t0 = the Hub's registers, t2 = t0 + 0x30000.
+            lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2),
+            lui(t2, 3), daddu(t2, t0, t2), ld(t1, 0x100, t2),
+            // 1,000 iterations, then the second read.
+            addiu(t7, zero, 1000), addiu(t7, t7, -1), bne(t7, zero, -8), nop(),
+            ld(t3, 0x100, t2),
+            lui(t5, 0xa800), dsll32(t5, t5, 0), sd(t1, 0x300, t5), sd(t3, 0x308, t5),
+            beq(zero, zero, -4), nop()};
+        std::ranges::copy(code, words.begin());
+        std::vector<std::byte> prom(words.size() * 4);
+        for (std::size_t w = 0; w < words.size(); ++w) {
+            store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
+        }
+        Ip27Machine machine{small_config(), prom};
+        machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
+        machine.run(5000);
+        const std::uint64_t first = memory_word(machine, 0x300);
+        const std::uint64_t second = memory_word(machine, 0x308);
+        t.check(second - first >= 20 && second - first <= 21, "about 20.8 ticks apart");
+    }};
+
 // An inter-processor interrupt is an ordinary Hub interrupt level (IP27.adoc "Hub
 // interrupts"; LINUX intr.h CPU_ACTION_B = 11): B unmasks level 11 in INT_MASK0_B and enables
 // IP2; A sets the level through PI_INT_PEND_MOD; B takes the interrupt at its BEV general

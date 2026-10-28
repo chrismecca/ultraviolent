@@ -70,6 +70,8 @@ class Hub final {
     // Host threads, without the device lock (SMP.adoc "S4"): PI_RT_COUNT at `time`, the
     // reader's own time, consistent with a write made meanwhile under the lock.
     [[nodiscard]] std::uint64_t rt_count_at(VirtualTime time) const;
+    // PI_RT_COUNT at device time: what a read returns, which the machine may take directly.
+    [[nodiscard]] std::uint64_t rt_count() const;
     // PI_INT_PEND0 and PI_INT_PEND1's offsets, and on host threads (SMP.adoc "S4") their
     // values without the device lock: IRIX polls PI_INT_PEND0 (S4.0: 52 M reads per CPU in
     // `boot4`). A CPU that sees a level another CPU raised also sees the memory that CPU wrote
@@ -186,7 +188,6 @@ class Hub final {
                                                    AccessWidth width);
     std::expected<void, AccessFault> write(std::uint64_t offset, AccessWidth width,
                                            std::uint64_t value);
-    [[nodiscard]] std::uint64_t rt_count() const;
     void set_rt_count(std::uint64_t value);
     void set_led(unsigned slice, std::uint64_t value);
     void set_memory_config(std::uint64_t value);

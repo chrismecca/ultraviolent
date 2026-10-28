@@ -951,6 +951,12 @@ Ip27Machine::SynchronizedTarget::mmio_read(std::uint64_t offset, AccessWidth wid
     }
     ++machine_.synchronized_accesses_;
     machine_.synchronize_time();
+    // PI_RT_COUNT, most device reads (the firmware's delay loops): a function of device time,
+    // read straight from the Hub. It changes no event, so the next one stays where it was.
+    if (hub_ != nullptr && offset == Hub::rt_count_offset && width == AccessWidth::bits64) {
+        --machine_.synchronized_accesses_;
+        return hub_->rt_count();
+    }
     auto result = target_.mmio_read(offset, width);
     machine_.update_next_event();
     --machine_.synchronized_accesses_;
