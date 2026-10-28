@@ -35,8 +35,9 @@ inline constexpr std::size_t decode_table_size = 240;
 // A processor personality (ADR-022): the guest-visible CPU implementation, as data that the
 // CPU, the decoder, and the semantics consult and that execution engines may query in
 // semantic terms (supports, the decode table), never by identity. Immutable; built by the
-// machine and owned by Cpu. The R10000 is the one implementation today; JIT.adoc "The
-// processor personality today" lists what moves here when the R12000 is added.
+// machine and owned by Cpu. The R10000 and the R12000 differ only in identity so far; JIT.adoc
+// "The processor personality today" lists what moves here when a behavior that differs is
+// observed.
 class ProcessorModel {
   public:
     [[nodiscard]] std::string_view name() const {
@@ -60,6 +61,9 @@ class ProcessorModel {
 
     // The R10000 (UM v2.0): MIPS IV, Count every other cycle.
     friend ProcessorModel r10000(const CpuConfig& identity);
+    // The R12000 (ADR-021, slate's processor; SMP.adoc "S6: IP31 / R12000"): as the R10000 in
+    // everything observed so far.
+    friend ProcessorModel r12000(const CpuConfig& identity);
 
   private:
     ProcessorModel() = default;
@@ -72,5 +76,6 @@ class ProcessorModel {
 };
 
 ProcessorModel r10000(const CpuConfig& identity = {});
+ProcessorModel r12000(const CpuConfig& identity);
 
 } // namespace ultraviolent::mips

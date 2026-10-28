@@ -1,4 +1,4 @@
-// The processor personality (ADR-022): the R10000 model, the one implementation.
+// The processor personalities (ADR-022): the R10000 and R12000 models.
 
 #include "arch/mips/assembler.hpp"
 #include "arch/mips/system.hpp"
@@ -27,6 +27,16 @@ const test::Registration r10000_model{"mips.processor_model.r10000", [](test::Co
     t.check(decode(model, movz(t0, t1, t2)).opcode == DecodedOpcode::movz);
     t.check(decode(model, dadd(t0, t1, t2)).opcode == DecodedOpcode::dadd);
     t.check_equal(model.count_shift(), 1u);
+}};
+
+// The R12000: as the R10000 except its name and identity (SMP.adoc "S6: IP31 / R12000").
+const test::Registration r12000_model{"mips.processor_model.r12000", [](test::Context& t) {
+    const ProcessorModel r12k = r12000(CpuConfig{.processor_id = 0x0e35, .fpu_id = 0x0e35});
+    const ProcessorModel r10k = r10000();
+    t.check(r12k.name() == "R12000");
+    t.check_equal(r12k.identity().processor_id, std::uint32_t{0x0e35});
+    t.check(r12k.operations() == r10k.operations(), "the same instruction set");
+    t.check_equal(r12k.count_shift(), r10k.count_shift());
 }};
 
 const test::Registration count_rate{"mips.processor_model.count_rate", [](test::Context& t) {

@@ -59,6 +59,13 @@ enum class ModuleType : std::uint8_t {
 
 // Configuration of the IP27 (IP27-TARGET.adoc; SMP.adoc). Values marked hypothesis in IP27.adoc
 // are defaults, not constants.
+// The node board's processors (SMP.adoc "S6: IP31 / R12000").
+enum class ProcessorType : std::uint8_t {
+    r10000,
+    // slate's: R12000 revision 3.5 with an R12010 FPU of the same revision (OBS-SLATE-0004).
+    r12000,
+};
+
 struct Ip27Config {
     // Installed memory, filling 512 MB banks from bank 0; a final partial bank must be a power
     // of two of at least 8 MB (memory_bank_sizes).
@@ -74,6 +81,8 @@ struct Ip27Config {
     // IRIX warns "CPU 0 ... is downrev (900)" for revision 0.0; slate's R12000s report the
     // same revision for CPU and FPU).
     mips::CpuConfig cpu{.processor_id = 0x0934, .config = 0x6c01'a603, .fpu_id = 0x0934};
+    // Which processor `cpu` identifies (r12000_identity gives slate's).
+    ProcessorType processor{ProcessorType::r10000};
     // hypothesis: Hub 2.4 (IP27.adoc "Hub").
     unsigned hub_revision{Hub::default_revision};
     // The node board's module slot, n1-n4 (IP27.adoc "Machine type"); n1 like slate's first
@@ -99,6 +108,9 @@ struct Ip27Config {
     // are deterministic: 2026-01-01 00:00:00 UTC.
     std::int64_t clock_epoch{1'767'225'600};
 };
+
+// PRId and FPU implementation of slate's R12000s, revision 3.5 (hinv, OBS-SLATE-0004).
+inline constexpr std::uint32_t r12000_identity = 0x0e35;
 
 // The IOC3 NIC's memory for an Ethernet address (IP27.adoc "NICs").
 std::array<std::uint8_t, devices::Nic::memory_size>

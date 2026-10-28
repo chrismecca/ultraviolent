@@ -45,6 +45,9 @@ interpreter").
 and the `InterruptSink` interface for its five external interrupt inputs. It knows nothing
 about IP27.
 
+Processor personalities (ADR-022): the R10000 and the R12000 (`mips::r12000`, SMP.adoc "S6:
+IP31 / R12000"), which differ only in name and identity until an observed behavior differs.
+
 == Execution and time
 
 * An engine step is one processor cycle. It retires one instruction, or it takes one

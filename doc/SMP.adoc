@@ -255,7 +255,8 @@ host-parallel speedup measured on the two-CPU workload; reference mode unchanged
 
 S5. **Second node** (its plan: "S5: the second node (plan)"; before S4, the user, 2026-10-13).
 
-S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
+S6. **IP31 / R12000** (its plan: "S6: IP31 / R12000 (plan)"; processor personality per
+ADR-022).
 
 == Progress
 
@@ -466,6 +467,15 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
   one thread -> parallel (speedup): `cpu2` 0.64 -> 1.63 (2.55x), `mix2` 0.69 -> 1.36
   (1.97x), `boot2` 0.58 -> 0.99 (1.72x), `reboot2` 0.59 -> 0.98 (1.66x), `cpu4` 0.24 ->
   1.50 (6.25x), `boot4` 0.28 -> 0.89 (3.20x), `reboot4` 0.28 -> 0.81 (2.94x).
+* **S6.0 and S6.1 (2026-10-28): the R12000's identity.** S6.0: what IRIX does on an R12000
+  ("S6: IP31 / R12000 (plan)", from slate's `/unix`), and an experiment showing the boot
+  needs only the PRId and FPU word. S6.1: `--cpu r12000` (`ProcessorType`, `mips::r12000`,
+  `r12000_identity` `0x0e35`); snapshots record the PRId. Tests:
+  `mips.processor_model.r12000`, `ip27.r12000_identity`, the snapshot refusal in
+  `ip27.snapshot_resumes_exactly`. Four R12000s in two nodes (parallel) boot to a root shell;
+  `hinv -c processor` prints "4 180 MHZ IP27 Processors", "CPU: MIPS R12000 Processor Chip
+  Revision: 3.5", "FPU: MIPS R12010 Floating Point Chip Revision: 3.5", slate's lines but
+  the clock. R10000 digests unchanged. S6.2 waits for slate's flash block.
 * **Deskside default (2026-10-15, with the user; ADR-021 addendum).** One node in deskside
   n1 (slot ID 3, Crossbow port `0xa`, the BaseIO on 15) is the default; `--module rack`
   keeps the rack layout. Snapshots record the module and node slot (`machine.module`,
@@ -626,6 +636,101 @@ slate's QL1040B with the firmware IRIX loads:
 
 The same program's output from the emulator and from slate is the comparison, and stays a
 test of the model.
+
+== S6: IP31 / R12000 (plan)
+
+Status: proposed 2026-10-28 (after S4). S6.0 and S6.1 are done (2026-10-28, "Progress").
+S6.2 needs slate's flash configuration block (below), so it waits for slate.
+
+=== Target
+
+slate's node boards as they are (OBS-SLATE-0001, -0004, hinv of 2026-10-25): IP31 boards,
+each with a processor module (`IP31PIMMR12KS`, part 030-1423-002, its own NIC), two R12000
+CPUs at 400 MHz, revision 3.5, with R12010 FPUs (revision 3.5), 32 KB primary caches, an 8
+MB secondary cache at 266 MHz ("Tap 0xa"), and the Hub at 100 MHz (revision 6). The machine
+stays IP27 (ADR-006, ADR-021: "a topology, not a new machine"); the R12000 is a processor
+personality (ADR-022). R10000 configurations stay the default and keep their digests.
+
+=== What is known
+
+* The clocks and the mode word come from the flash's `ip27conf` block (IP27.adoc "Reset
+  mode bits"). The user's image has the R10000's: 180 MHz, Hub 90 MHz, SCSize 1 MB. slate's
+  IP31 flash has its own block, not yet read; IRIX's "400 MHZ" and the Scache line come
+  from what the PROM records from it.
+* IRIX's kernel (slate's `/unix`, names only, as an observation aid) has R12000 paths:
+  `r12k_bdiag`, `branch_prediction_on`, `_off`, `_taken`, `_fwd_not_taken`,
+  `r12k_perf_overflow_intr`, `r10k_r12k_mixed`, `get_r10k_config`. Their call sites tell
+  what the kernel reads and writes when PRId says R12000 (CP0 Diagnostic, register 22;
+  performance counters, register 25).
+* Public: the R12000 is PRId implementation `0x0e` (LINUX `cpu.h`), with two performance
+  counters and a branch-prediction diagnostic register. The R10000 user's manual (UM) is the
+  base; differences need a public source each (AGENTIC-BUILD "Evidence hierarchy").
+
+=== What IRIX does on an R12000 (S6.0, 2026-10-28)
+
+From slate's `/unix` (disassembly of named functions, an observation aid; no source):
+
+* `mlreset` clears performance counters 0 and 1 (`MTC0 $25` selects 0-3: control at even
+  selects, count at odd), reads PRId (`get_cpu_irr`, `MFC0 $15`), and for implementation 14
+  (R12000) or 15 (R14000) clears counters 2 and 3 too (selects 4-7). It then sets the
+  branch prediction mode from a kernel variable on every processor type: CP0 22 bits 17:16
+  (`branch_prediction_on` 0, `_off` 1, `_taken` 2, `_fwd_not_taken` 3).
+* `l2_sbe_init` and `l2_sbe_intr`: on PRId `& 0xfff0 == 0x0e30` (R12000 revision 3.x,
+  slate's 3.5) the kernel counts secondary-cache single-bit errors with a performance
+  counter and its overflow interrupt (`r12k_perf_overflow_intr`, which reads `$25` selects
+  0-3).
+* `init_mfhi_war` applies to R10000 revisions only (PRId `0x0900` class); `prfioctl` (the
+  profiling ioctl), `_debug_sanity`, `coproc_find`, and `sw_cachesynch_patch` are the
+  other PRId tests.
+* `get_r10k_config` reads Config (`MFC0 $16`).
+
+The emulator already stores Diagnostic (22) without modeling its effect (MIPS.adoc), and
+performance counter registers read zero and ignore writes at every select, so none of these
+paths needs new behavior to run; a counter that never counts never overflows. What an
+R12000 boot needs first is identity (PRId, the FPU's implementation) and the flash block.
+
+Experiment (2026-10-28; a temporary build that set PRId and the FPU's implementation word to
+`0x0e35`, R12000 revision 3.5 as on slate; not committed): one CPU from power-on to a root
+shell. The PROM's console output is identical to the R10000's (`0x0926`); IRIX boots and
+`hinv -c processor` prints "MIPS R12000 Processor Chip Revision: 3.5" and "MIPS R12010
+Floating Point Chip Revision: 3.5", slate's lines, and "1 180 MHZ IP27 Processor" (the
+clock is the flash block's). So identity is all the R12000 needs to boot on this model; the
+rest of the personality moves (S6.1) only when a behavior that differs is observed. The PROM
+image's PRId reads are in its promgen segments (one `MFC0 $15` helper); their callers were
+not mapped, since the boot shows no difference.
+
+=== Design (sketch)
+
+* The rest of the personality moves into `ProcessorModel` as JIT.adoc "The processor
+  personality today" lists: TLB geometry, cache geometry and CACHE operations, the CP0
+  register set (register 22 and 25 where the model has them), Config fields, FPU details,
+  the Count rate. Engines keep asking semantic questions.
+* `--cpu r10000|r12000` picks the personality (R10000 default); the clocks keep coming from
+  the flash block, so an R12000 run needs a flash image with an IP31's block.
+* The IP31 board and its processor module are NIC records on the node's MicroLAN, as the
+  IP27's board record is today (IP27.adoc "NICs").
+
+=== Stages
+
+S6.0. **Observe.** From IRIX's R12000 paths (call sites of the names above) and the PROM's
+reads of PRId and Config: which CP0 registers and fields an R12000 boot reads and writes.
+Gate: the list recorded here, each item with its source.
+
+S6.1. **The R12000's identity.** `--cpu r12000`: PRId and the FPU's implementation word
+`0x0e35` (slate's revision; S6.0 showed the boot needs nothing else from the CPU). Gates:
+R10000 digests unchanged; a four-CPU R12000 boot to `login:`; `hinv -c processor` as slate's
+except the clock.
+
+S6.2. **The IP31 board.** The flash block from slate (400 MHz, Hub 100 MHz, 8 MB secondary
+cache), the IP31 and PIMM NICs. Gates: hinv's processor and board lines match slate's.
+Moves into `ProcessorModel` (JIT.adoc's list) happen only where an observed behavior
+differs.
+
+=== Open questions for slate
+
+* The `ip27conf` block of an IP31 board's flash (offsets `0x64`-`0x8b`), read without
+  writing: how IRIX or POD can show it read-only is itself to be checked first.
+* Whether the user has an IP31 flash image to use as the R12000 configuration's PROM.
 
 == S4: host-parallel CPUs (plan)
 

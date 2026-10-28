@@ -212,6 +212,13 @@ word as the R10000 mode bits. Decoded (UM Table 8-1): K0 = 5, PrcReqMax = 3, Sys
 
 The processor clock defaults to 180 MHz, consistent with the block.
 
+`--cpu r12000` (`Ip27Config::processor`) fits R12000s instead: PRId and the FPU's
+implementation word `0x0e35`, revision 3.5 as slate's (OBS-SLATE-0004), the R12000 processor
+model, otherwise the R10000's behavior (SMP.adoc "S6: IP31 / R12000"). The clocks and the
+reset mode word still come from the flash block, so with the user's image the guest reports
+180 MHz. Snapshots record the PRId the guest booted with (`machine.processor_id`; absent, the
+R10000 default) and refuse another.
+
 == Machine loop and time
 
 * Virtual time is `time_at_cycles(cycles, processor clock)` of the CPU's completed cycles.

@@ -41,4 +41,11 @@ ProcessorModel r10000(const CpuConfig& identity) {
     return model;
 }
 
+ProcessorModel r12000(const CpuConfig& identity) {
+    ProcessorModel model = r10000(identity);
+    model.name_ = "R12000";
+    // hypothesis: Count every other cycle, as the R10000 (no public R12000 source yet).
+    return model;
+}
+
 } // namespace ultraviolent::mips

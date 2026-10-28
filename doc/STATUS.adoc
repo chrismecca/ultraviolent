@@ -447,9 +447,18 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **S6, IP31 / R12000 (SMP.adoc "Stages"; its own plan, ADR-022 personality).** slate's
-  nodes are IP31 boards with R12000s at 400 MHz (OBS-SLATE-0001, -0004). Write the plan
-  first (observe: what IRIX and the PROM read to tell an R12000 and an IP31 apart).
+. **IOC3 serial DMA: the PROM diagnostic that fails** ("serial_dma: Timeout on uartA dma",
+  "IOC3 failed diag" in the summary) and stops autoboot at the menu. slate's PROM passes it
+  (OBS-SLATE-0003: no diagnostic output, "ALL DIAGS PASSED"). Observe first what the
+  diagnostic programs and waits for (`--trace ioc3`, the PROM's code), with the public IOC3
+  sources (`local/sources`: ioc3.h, the Linux serial and MFD drivers) for the register
+  meanings; model only what it needs. Gates: the PROM's summary without the IOC3 failure;
+  every digest that changes is explained (the PROM's output changes).
+. **S6.2, the IP31 board (waits for slate).** S6.0 and S6.1 are done (2026-10-28, SMP.adoc
+  "S6: IP31 / R12000 (plan)", "Progress"): `--cpu r12000` boots four R12000s to a shell with
+  slate's hinv processor lines but the clock. S6.2 needs the `ip27conf` block of an IP31
+  board's flash (400 MHz, Hub 100 MHz, 8 MB cache), read without writing, or an IP31 flash
+  image from the user.
 . **Done: the cost of a PI_RT_COUNT read (2026-10-28, JIT.adoc "Progress").** The
   synchronized target returns the Hub's count directly (`prom` and `boot` about 11%
   faster, digests unchanged). The rest of a device read's cost is spread over the slow
@@ -491,7 +500,6 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   direct links (J6).
 . **Inventory ID**: the NICs are on each node's MicroLAN (S5.2), but the BASEIO PROM still
   warns "Inventory table ID value is 0. Check Midplane NIC".
-. **IOC3 serial DMA**: the PROM diagnostic that fails and stops autoboot at the menu.
 . Before any public announcement, rescan the tree and history for private data
   (`git log --all --format='%ae %ce'`; `git grep` over `git rev-list --all` for home paths,
   the LAN prefix, the host name, and board serials).
@@ -1604,4 +1612,28 @@ Disproven: that a dedicated device-load executor would pay (the dispatch it save
 Unknowns: the gain of native code calling device targets.
 Best checkpoint: unchanged.
 Next step: S6's plan (IP31 / R12000).
+----
+
+----
+Date: 2026-10-28
+Milestone: SMP IP27, S6.0 and S6.1 (the R12000's identity)
+Hypothesis: an R12000 differs from the R10000 in what IRIX and the PROM read only through
+  PRId and the FPU implementation word, as far as booting goes.
+Evidence: slate's hinv (2026-10-25); slate's `/unix` (disassembly of named functions:
+  mlreset, branch_prediction_*, r1nkperf_*, l2_sbe_*, get_cpu_irr); the PROM image's single
+  PRId helper; a temporary build with PRId 0x0e35, booted to a shell.
+Changed: ProcessorType and Ip27Config::processor; mips::r12000; `--cpu r10000|r12000`;
+  snapshots record `machine.processor_id`; SMP.adoc "S6: IP31 / R12000 (plan)" and
+  "Progress"; IP27.adoc "Processor"; MIPS.adoc.
+Tests: mips.processor_model.r12000, ip27.r12000_identity, the R12000 refusal in
+  ip27.snapshot_resumes_exactly; dev green. Four R12000s boot to a shell (hinv: "4 180 MHZ
+  IP27 Processors", "MIPS R12000 Processor Chip Revision: 3.5", "MIPS R12010 Floating
+  Point Chip Revision: 3.5"). R10000 digests of all eleven workloads unchanged.
+Newly proven: identity alone boots the PROM and IRIX as an R12000; IRIX's R12000-only paths
+  (performance counters 2 and 3, L2 single-bit-error counting) run on the existing
+  counter model (read zero, writes ignored).
+Disproven: that S6 needs the personality refactor before an R12000 boots.
+Unknowns: slate's flash block; the R12000's Count rate (hypothesis: as the R10000's).
+Best checkpoint: unchanged.
+Next step: the IOC3 serial DMA diagnostic (Next task); S6.2 when slate is on.
 ----

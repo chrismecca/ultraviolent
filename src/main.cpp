@@ -60,7 +60,7 @@ void usage() {
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
         "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
         "                    [--parallel] [--parallel-window CYCLES]\n"
-        "                    [--module rack|deskside] [--nodes 1|2]\n"
+        "                    [--module rack|deskside] [--nodes 1|2] [--cpu r10000|r12000]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
         "from a snapshot. Snapshots are for exploration; checkpoints need a cold run.\n"
@@ -107,6 +107,8 @@ void usage() {
         "--module rack puts the node in a rack module (default deskside, as slate;\n"
         "doc/IP27.adoc \"Machine type\"). --nodes 2 adds a second node board in n2 (deskside\n"
         "only; doc/SMP.adoc); give --flash once per node to keep each node's flash PROM.\n"
+        "--cpu r12000 fits R12000s of slate's revision (default r10000; the clock is the\n"
+        "flash PROM's; doc/SMP.adoc \"S6\").\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
         "scsi ethernet irq scheduler firmware machine all\n",
         stderr);
@@ -227,6 +229,7 @@ struct Options {
     unsigned cpus{1};
     ip27::ModuleType module{ip27::ModuleType::deskside};
     unsigned nodes{1};
+    ip27::ProcessorType processor{ip27::ProcessorType::r10000};
     std::uint64_t cpu_slice{180};
     bool parallel{};
     std::uint64_t parallel_window{ip27::Ip27Machine::default_parallel_window};
@@ -368,6 +371,13 @@ std::optional<Options> parse(std::span<char*> arguments) {
                 return std::nullopt;
             }
             options.module = value == "deskside" ? ip27::ModuleType::deskside : ip27::ModuleType::rack;
+        } else if (flag == "--cpu") {
+            if (value != "r10000" && value != "r12000") {
+                std::fprintf(stderr, "--cpu takes r10000 or r12000\n");
+                return std::nullopt;
+            }
+            options.processor =
+                value == "r12000" ? ip27::ProcessorType::r12000 : ip27::ProcessorType::r10000;
         } else if (flag == "--nodes") {
             if (value != "1" && value != "2") {
                 std::fprintf(stderr, "--nodes takes 1 or 2\n");
@@ -469,6 +479,11 @@ int main(int argc, char** argv) {
     config.cpus = options->cpus;
     config.module = options->module;
     config.nodes = options->nodes;
+    if (options->processor == ip27::ProcessorType::r12000) {
+        config.processor = ip27::ProcessorType::r12000;
+        config.cpu.processor_id = ip27::r12000_identity;
+        config.cpu.fpu_id = ip27::r12000_identity;
+    }
     if (options->flash.size() > options->nodes) {
         std::fprintf(stderr, "--flash is given once per node\n");
         return exit_usage;

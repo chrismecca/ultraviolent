@@ -138,6 +138,12 @@ mips::CpuConfig cpu_config(const Ip27Config& config, std::span<const std::byte> 
     return cpu;
 }
 
+mips::ProcessorModel processor_model(const Ip27Config& config, std::span<const std::byte> prom) {
+    const mips::CpuConfig identity = cpu_config(config, prom);
+    return config.processor == ProcessorType::r12000 ? mips::r12000(identity)
+                                                    : mips::r10000(identity);
+}
+
 } // namespace
 
 std::array<std::byte, devices::I2cEeprom::size> initial_controller_nvram(const Ip27Config& config) {
@@ -258,7 +264,7 @@ Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
           [this] { reset_cpus(ResetKind::cold); },
           event_prefix(node_index)},
       reset_rendezvous{owner},
-      cpu_a{owner, bus, owner.tracer_, mips::r10000(cpu_config(owner.config_, prom)), 0},
+      cpu_a{owner, bus, owner.tracer_, processor_model(owner.config_, prom), 0},
       synchronized_hub{owner, hub.port(0), &hub}, synchronized_hub_b{owner, hub.port(1), &hub},
       synchronized_flash{owner, flash_interface},
       synchronized_flash_commands{owner, flash_commands} {
@@ -276,7 +282,7 @@ Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
     if (owner.config_.cpus == 2) {
         // Slice B: the same processor on the Hub's second port, sharing memory with A
         // (SMP.adoc).
-        cpu_b.emplace(owner, bus, owner.tracer_, mips::r10000(cpu_config(owner.config_, prom)), 1);
+        cpu_b.emplace(owner, bus, owner.tracer_, processor_model(owner.config_, prom), 1);
         hub.connect_cpu(1, cpu_b->pins);
         cpu_b->cpu.set_reset_rendezvous(&reset_rendezvous);
         reset_rendezvous.add(cpu_b->cpu);
@@ -622,6 +628,7 @@ StateImage Ip27Machine::save_state() {
     image.put("machine.baseio_port", std::uint64_t{baseio_port(config_.module)});
     image.put("machine.module", std::uint64_t{std::to_underlying(config_.module)});
     image.put("machine.node_slot", std::uint64_t{config_.node_slot});
+    image.put("machine.processor_id", std::uint64_t{config_.cpu.processor_id});
     Node& node = *nodes_.front();
     if (node.cpu_b) {
         // One-CPU snapshots have no such key and keep their format.
@@ -717,6 +724,12 @@ std::expected<void, std::string> Ip27Machine::load_state(const StateImage& image
     image.get("machine.node_slot", node_slot);
     if (module != std::to_underlying(config_.module) || node_slot != config_.node_slot) {
         return std::unexpected("snapshot was taken in another module type or node slot");
+    }
+    // Snapshots from before this field were taken with the default R10000.
+    std::uint64_t processor_id = Ip27Config{}.cpu.processor_id;
+    image.get("machine.processor_id", processor_id);
+    if (processor_id != config_.cpu.processor_id) {
+        return std::unexpected("snapshot was taken with another processor");
     }
     std::uint64_t cpus = 1;
     image.get("machine.cpus", cpus);

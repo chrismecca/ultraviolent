@@ -430,6 +430,28 @@ const test::Registration snapshot{
         n2_first.run(100);
         Ip27Machine n1{small_config(), prom};
         t.check(!n1.load_state(n2_first.save_state()).has_value(), "another node slot is refused");
+        // And another processor: the guest read its PRId.
+        Ip27Config r12000 = small_config();
+        r12000.processor = ip27::ProcessorType::r12000;
+        r12000.cpu.processor_id = r12000.cpu.fpu_id = ip27::r12000_identity;
+        Ip27Machine r12000_machine{r12000, prom};
+        t.check(!r12000_machine.load_state(*image).has_value(), "an R12000 refuses it");
+    }};
+
+// The R12000 configuration (SMP.adoc "S6: IP31 / R12000"): the CPUs report slate's PRId and
+// FPU implementation, and the model is the R12000.
+const test::Registration r12000_identity{
+    "ip27.r12000_identity", [](test::Context& t) {
+        Ip27Config config = small_config();
+        config.cpus = 2;
+        config.processor = ip27::ProcessorType::r12000;
+        config.cpu.processor_id = config.cpu.fpu_id = ip27::r12000_identity;
+        Ip27Machine machine{config, program({beq(zero, zero, -4), nop()})};
+        for (unsigned i = 0; i < 2; ++i) {
+            t.check_equal(machine.cpu(i).mfc0(mips::cp0::prid), std::uint64_t{0x0e35});
+            t.check_equal(machine.cpu(i).fpu_id(), std::uint32_t{0x0e35});
+            t.check(machine.cpu(i).model().name() == "R12000");
+        }
     }};
 
 const test::Registration back_door{
