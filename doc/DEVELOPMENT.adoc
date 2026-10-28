@@ -108,11 +108,23 @@ cmake --build --preset asan
 ctest --preset asan
 ----
 
-A TSan preset should be enabled when host threading begins.
+The `tsan` preset builds with ThreadSanitizer (optimized, with debug information), for
+host-parallel CPUs (SMP.adoc "S4"). Its tests read `tests/tsan.supp`, which suppresses
+races on guest memory: CPU threads share it without locks, as the hardware's CPUs do. For a
+run of the emulator, pass the same file:
+
+[source,shell]
+----
+cmake --preset tsan
+cmake --build --preset tsan
+ctest --preset tsan
+TSAN_OPTIONS=suppressions=$PWD/tests/tsan.supp build/tsan/ultraviolent --parallel ...
+----
 
 == Compiler policy
 
-Clang is the primary compiler. The `dev`, `asan`, and `release` presets select `clang++`.
+Clang is the primary compiler. The `dev`, `asan`, `tsan`, and `release` presets select
+`clang++`.
 
 GCC is a required secondary compiler. The `gcc` preset builds the dev configuration with
 `g++`. It becomes a CI gate once public CI is established.
@@ -221,6 +233,21 @@ out exceed IRIX's terminal line), and `reboot4`, from a four-CPU shell snapshot
 from the fixture's.
 
 Their rate counts every CPU's cycles; "x real" is virtual time per host second.
+
+`--parallel` runs the multi-CPU workloads with each CPU on its own host thread (SMP.adoc
+"S4"; `--parallel-window N` sets the window). Those runs are not deterministic: digests
+differ run to run and are not checked, `--compare` reports speed as virtual time per host
+second against the saved result, and the outputs kept with `--output` are compared with a
+reference-mode run's (timing lines such as "in N usec", and the order of lines the CPUs
+print at once, may differ). Any run that takes more than `--timeout` host seconds (default
+3600) counts as hung and ends the benchmark:
+
+[source,shell]
+----
+scripts/bench.py run --output local/bench/one cpu2 boot4
+scripts/bench.py run --parallel --output local/bench/par \
+    --compare local/bench/r3600/p-s53-tier1.json cpu2 boot4
+----
 
 Workloads run on the default engine, tier 1 (JIT.adoc, with `--tier1-threshold N`);
 `--engine tier0` runs decoded blocks (IR.adoc) and `--engine reference` the reference

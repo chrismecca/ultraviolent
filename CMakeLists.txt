@@ -16,6 +16,9 @@ include(Ccache)
 include(Warnings)
 include(Sanitizers)
 
+# Host-parallel CPUs (doc/SMP.adoc "S4").
+find_package(Threads REQUIRED)
+
 add_library(ultraviolent_core
     src/core/address_space.cpp
     src/core/interrupt.cpp
@@ -30,6 +33,7 @@ target_include_directories(ultraviolent_core
     PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
+target_link_libraries(ultraviolent_core PUBLIC Threads::Threads)
 
 ultraviolent_enable_warnings(ultraviolent_core)
 ultraviolent_enable_sanitizers(ultraviolent_core)

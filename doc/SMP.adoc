@@ -414,6 +414,36 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
   while another remaps), `memory_block.code_marks`. All eleven benchmark digests unchanged on
   tier 1, tier 0, and the reference interpreter; tier 1 0.98-1.04x of `p-s53-tier1.json`
   (`local/bench/r3600/q-s41-tier1.json`).
+* **S4.2 (2026-10-26/28): the parallel runner.** `--parallel` (and `bench.py run
+  --parallel`) runs each CPU on its own host thread: the window (`--parallel-window`,
+  default 10,000 cycles), the device lock and device time, PI_RT_COUNT read without the
+  lock at the reader's own time, interrupt and reset mailboxes with attention, LL/SC by
+  compare-and-swap, SYNC as a fence, code-frame claims that wait for the other CPUs'
+  acknowledgment, and the node reset rendezvous ("Design"). Defects found by running the
+  workloads, each now in "Design": the CPUs left a node reset at different cycle counts
+  (the PROM: "Other CPU on this node died"; the rendezvous); the PROM's delay loops
+  serialized on the lock (the lock-free PI_RT_COUNT read); a compare value judged at device
+  time was lost (`reboot2` idled forever); a count written from device time put the other
+  node behind (`boot4`: "Failed RTC distribution"); a reset posted twice to one CPU left it
+  waiting at the rendezvous; the interrupt check left set with nothing to take stopped the
+  engines without advancing (both hung runs ignored SIGTERM: device events never ran).
+  ThreadSanitizer (`tsan` preset) found the reference reservation table still updated on
+  threads. Tests: `mips.smp.parallel_llsc_counter`,
+  `.parked_cpu_drops_writable_pages`, `.posted_interrupts_and_reset`,
+  `ip27.parallel.interprocessor_interrupt`, `.local_reset`, `.four_cpus_ll_sc_counter` (a
+  parallel snapshot resumed in reference mode), `ip27.hub.comparators_at_reader_time`; dev,
+  asan, and tsan green. Gates: all seven multi-CPU workloads reach reference mode's output
+  (timing lines masked); the differences are the order of lines CPUs print at once ("CPU n
+  rebooting") and which CPU runs the reboot ("Reboot started from CPU 1"). Ten parallel
+  `reboot2` runs in a row, all complete. Reference-mode digests unchanged
+  (`local/bench/r3600/s42-one.json`).
+  - Speed (PGO, tier 1, best of 3, `local/bench/r3600/s42-parallel.json`; one thread from
+    `p-s53-tier1.json`), as virtual time per host second ("x real"), one thread ->
+    parallel: `cpu2` 0.64 -> 1.65 (2.58x), `mix2` 0.69 -> 1.36 (1.98x), `boot2` 0.58 ->
+    1.06 (1.85x), `reboot2` 0.59 -> 1.05 (1.78x), `cpu4` 0.24 -> 1.48 (6.14x), `boot4` 0.28
+    -> 0.64 (2.28x), `reboot4` 0.28 -> 0.60 (2.16x). More than the thread count on `cpu2`
+    and `cpu4`: one thread also pays for switching CPUs every slice. Two CPUs now run above
+    real time; four do on `cpu4` but not through the PROM (S4.3).
 * **Deskside default (2026-10-15, with the user; ADR-021 addendum).** One node in deskside
   n1 (slot ID 3, Crossbow port `0xa`, the BaseIO on 15) is the default; `--module rack`
   keeps the rack layout. Snapshots record the module and node slot (`machine.module`,
@@ -622,25 +652,42 @@ cycles.
   advances the scheduler to the accessing CPU's time if that is later, and runs the events
   then due. It never goes backwards; a CPU behind sees device time up to one window ahead
   of its own. A CPU that reaches the next event's cycle takes the lock and advances, as one
-  CPU does today.
-* **PI_RT_COUNT without the lock.** A read computes the count at the later of device time
-  and the reader's own time, from the Hub's base and epoch, which a write changes under the
-  lock (a sequence counter). Each CPU's reads follow its own time, so the PROM's check that
-  the counter advances passes at any window.
+  CPU does today. A CPU's own time is the Hub's reader time during its access, so a compare
+  value it writes (PI_RT_COMPARE_A/B, PI_PROFILE_COMPARE) is judged against the count it
+  read: ahead of that count but behind device time's, it fires at once. Judged at device
+  time it was lost, and IRIX idled forever in `reboot2` (S4.2). A count it writes
+  (PI_RT_COUNT) counts from its time too: from device time, the global master's copy to the
+  other node started behind its own, and the PROM disabled that node's CPUs ("Failed RTC
+  distribution due to NUMAlink problems", `boot4`, S4.2).
+* **PI_RT_COUNT without the lock.** A read computes the count at the reader's own time from
+  the Hub's base and epoch, which a write changes under the lock (a sequence counter); a
+  reader behind the last write sees the written value until its time passes it. Each CPU's
+  reads follow its own time, so the PROM's check that the counter advances passes at any
+  window.
 * **Interrupts and resets: a mailbox per CPU.** The machine owns the wiring, so it puts an
   adapter between each Hub output and its CPU. In reference mode it forwards. In parallel
   mode it posts the input levels (or a reset) to the CPU's mailbox and raises the CPU's
   attention, unless the CPU is the caller's own. The CPU applies the mailbox on its own
-  thread at its next boundary.
+  thread at its next boundary. A node reset goes through the node's rendezvous
+  (`NodeReset`): it posts the reset to the node's CPUs, they meet, and they leave it at the
+  latest arrival's cycle count, as reference mode releases them together. A reset asked
+  for while a round is open joins that round, so both CPUs take the same rounds (two
+  posts reaching one CPU left it waiting for a partner that had taken one: S4.2).
 * **Attention.** Another thread sets the CPU's `interrupt_check` byte, which every engine
   tests at block entry, so the CPU leaves native code at its next block and applies its
   mailbox. The owner recomputes the byte from its own state and may overwrite a remote
   setting. The mailbox is also read whenever the engine returns, at most a window later,
-  and a thread waiting for an acknowledgment raises attention again.
+  and a thread waiting for an acknowledgment raises attention again. The race also runs
+  the other way: a remote set can land just after the owner cleared attention and
+  recomputed the byte, leaving it set with nothing to take. A CPU that finds nothing to
+  take recomputes it; left set, every engine stopped at every block without advancing a
+  cycle (S4.2).
 * **LL/SC.** In parallel mode LL records the physical address and the value loaded, and SC
   is a host compare-and-swap of that value, as QEMU does. Reference mode keeps its
-  reservations (`Coherence`). Difference: an SC succeeds after another CPU stored the same
-  value back (ABA), which IRIX's lock and counter code tolerates.
+  reservations (`Coherence`), which parallel mode leaves untouched. An SC at another
+  address than LL's fails, and switching modes drops the reservation (the next SC fails
+  and the guest retries, as after an interrupt). Difference: an SC succeeds after another
+  CPU stored the same value back (ABA), which IRIX's lock and counter code tolerates.
 * **SYNC** is a host fence (`mfence`) in parallel mode. x86-64 already orders everything
   else MIPS IV leaves unordered.
 * **Code frames.** A CPU that marks a frame as code for the first time raises a coherence
@@ -656,10 +703,14 @@ cycles.
   lookup hint and the code-write count become atomics.
 * **Memory.** Guest memory is shared host memory, read and written without locks, as on
   the hardware. Frame marks and generations become relaxed atomics.
-* **Stops, snapshots, and observation.** A stop (console script, `--cycles`) sets every
-  CPU's attention; the main thread joins the CPU threads, and snapshots are taken only
-  then. A snapshot from parallel mode loads in either mode. Tracing and `--probe` need
-  reference mode; `--parallel` refuses them.
+* **Stops, snapshots, and observation.** A stop (console script, host signal) sets a flag
+  each CPU's thread reads whenever its engine returns, at most a window later, and
+  `--cycles` is each thread's own end; the main thread joins the CPU threads, applies what
+  is left posted, and snapshots are taken only then. A snapshot from parallel mode loads in either mode. Tracing and `--probe` need
+  reference mode; `--parallel` refuses them. `bench.py run --timeout` (default an hour of
+  host time) ends a run that hangs.
+* **Checking.** The `tsan` preset builds with ThreadSanitizer; `tests/tsan.supp` suppresses
+  races on guest memory, which CPU threads share without locks as the hardware's CPUs do.
 
 === Stages
 

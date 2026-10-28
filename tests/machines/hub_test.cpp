@@ -9,6 +9,7 @@
 #include <ultraviolent/machines/ip27/hub.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -193,6 +194,38 @@ const test::Registration comparators{
         t.check(b.write(0x030100, 990));
         b.scheduler.advance_by(VirtualDuration{8'000});
         t.check_equal(b.read(0x120), std::uint64_t{1});
+    }};
+
+// Host-parallel CPUs (SMP.adoc "S4"): an access from a CPU behind device time sees the
+// counter at its own time, a compare value ahead of that count fires even though device time
+// has passed it, and a count written starts at the writer's time.
+const test::Registration comparators_at_reader_time{
+    "ip27.hub.comparators_at_reader_time", [](test::Context& t) {
+        Bench b;
+        Pins cpu;
+        b.hub.connect_cpu(0, cpu);
+        t.check(b.write(0x140, 1)); // PI_RT_EN_A
+        b.scheduler.advance_to(VirtualTime{80'000});
+        b.hub.set_reader_time(VirtualTime{40'000});
+        t.check_equal(b.read(0x030100), std::uint64_t{50});
+        // Already passed at the writer's time: does not fire.
+        t.check(b.write(0x108, 45));
+        b.scheduler.advance_to(VirtualTime{80'000});
+        t.check_equal(b.read(0x120), std::uint64_t{0});
+        // Ahead of the writer's count, behind device time's: due at once.
+        t.check(b.write(0x108, 60));
+        b.scheduler.advance_to(VirtualTime{80'000});
+        t.check_equal(b.read(0x120), std::uint64_t{1});
+        t.check(cpu.level[2]);
+        b.hub.set_reader_time(std::nullopt);
+        t.check_equal(b.read(0x030100), std::uint64_t{100});
+        // A count written counts from the writer's time, not device time's.
+        b.hub.set_reader_time(VirtualTime{40'000});
+        t.check(b.write(0x030100, 1'000));
+        b.hub.set_reader_time(VirtualTime{48'000});
+        t.check_equal(b.read(0x030100), std::uint64_t{1'010});
+        t.check_equal(b.hub.rt_count_at(VirtualTime{48'000}), std::uint64_t{1'010});
+        b.hub.set_reader_time(std::nullopt);
     }};
 
 const test::Registration slot_status{

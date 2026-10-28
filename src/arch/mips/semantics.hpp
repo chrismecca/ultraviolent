@@ -422,7 +422,9 @@ class Executor {
     }
     // LLAddr is a scratch register on the R10000 and is not written (UM 14.15).
     s_.ll_bit = true;
-    cpu_.note_load_linked(address_value);
+    // The value is what SC compares on host threads; LL into $zero (which software has no
+    // use for) leaves 0 there.
+    cpu_.note_load_linked(address_value, width, s_.gpr[i_.rt()]);
     return sequential();
 }
 
@@ -436,14 +438,12 @@ class Executor {
     if (!translation) {
         return fail(translation.error());
     }
-    const bool success = s_.ll_bit && cpu_.reservation_intact();
-    if (success) {
-        const std::uint64_t value = width == AccessWidth::bits64 ? rt() : rt() & 0xffff'ffff;
-        if (auto result = cpu_.write(*translation, width, value); !result) {
-            return fail(result.error());
-        }
+    const std::uint64_t value = width == AccessWidth::bits64 ? rt() : rt() & 0xffff'ffff;
+    const auto stored = cpu_.store_conditional(*translation, width, value);
+    if (!stored) {
+        return fail(stored.error());
     }
-    cpu_.set_gpr(i_.rt(), success ? 1 : 0);
+    cpu_.set_gpr(i_.rt(), *stored ? 1 : 0);
     return sequential();
 }
 
@@ -519,7 +519,8 @@ inline constexpr auto needs_64bit_operations = [] {
         return raise(ExceptionCode::syscall);
     case DecodedOpcode::break_:
         return raise(ExceptionCode::breakpoint);
-    case DecodedOpcode::sync: // SYNC: references are already performed in program order.
+    case DecodedOpcode::sync:
+        cpu_.synchronize_memory();
         return sequential();
     case DecodedOpcode::mfhi: {
         auto b = direct();

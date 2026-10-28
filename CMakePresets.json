@@ -38,6 +38,17 @@
       }
     },
     {
+      "name": "tsan",
+      "inherits": "base",
+      "displayName": "ThreadSanitizer, for host-parallel CPUs (SMP.adoc \"S4\")",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ULTRAVIOLENT_ENABLE_ASAN": "OFF",
+        "ULTRAVIOLENT_ENABLE_UBSAN": "OFF",
+        "ULTRAVIOLENT_ENABLE_TSAN": "ON"
+      }
+    },
+    {
       "name": "release",
       "inherits": "base",
       "cacheVariables": {
@@ -51,6 +62,7 @@
     { "name": "dev", "configurePreset": "dev" },
     { "name": "gcc", "configurePreset": "gcc" },
     { "name": "asan", "configurePreset": "asan" },
+    { "name": "tsan", "configurePreset": "tsan" },
     { "name": "release", "configurePreset": "release" }
   ],
   "testPresets": [
@@ -68,6 +80,12 @@
       "name": "asan",
       "configurePreset": "asan",
       "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "output": { "outputOnFailure": true },
+      "environment": { "TSAN_OPTIONS": "suppressions=${sourceDir}/tests/tsan.supp" }
     },
     {
       "name": "release",

@@ -152,6 +152,9 @@ def base_command(args, scratch, cpus=1):
             "--nvram", os.path.join(scratch, "nvram.bin"), "--engine", args.engine] + (
                 topology) + (
                 ["--cpu-slice", str(args.cpu_slice)] if cpus != 1 and args.cpu_slice else []) + (
+                ["--parallel"] if cpus != 1 and args.parallel else []) + (
+                ["--parallel-window", str(args.parallel_window)]
+                if cpus != 1 and args.parallel and args.parallel_window else []) + (
                 ["--tier0-cache-entries", str(args.cache_entries)] if args.cache_entries else []) + (
                 ["--tier1-threshold", str(args.tier1_threshold)]
                 if args.tier1_threshold is not None else [])
@@ -217,7 +220,15 @@ def run_once(args, name, workload):
                    "--"] + command
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     start = time.perf_counter()
-    result = subprocess.run(command, capture_output=True)
+    try:
+        result = subprocess.run(command, capture_output=True, timeout=args.timeout)
+    except subprocess.TimeoutExpired as expired:
+        # A run that hangs (host-parallel CPUs can) must not hold up the rest for hours.
+        if args.output and expired.stdout:
+            os.makedirs(args.output, exist_ok=True)
+            with open(os.path.join(args.output, name + ".txt"), "wb") as f:
+                f.write(expired.stdout)
+        sys.exit(f"{name}: no end after {args.timeout} s of host time")
     wall = time.perf_counter() - start
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     stopped = STOPPED.search(result.stderr)
@@ -300,14 +311,20 @@ def run(args):
             entry["counters"] = best["counters"]
         results[name] = entry
         note = ""
-        if len(digests) > 1:
+        # Host threads are not deterministic: outputs are compared by hand (--output), and
+        # speed as virtual time per host second, since the cycle counts differ a little.
+        threads = args.parallel and WORKLOADS[name].get("cpus", 1) != 1
+        if len(digests) > 1 and not threads:
             note = "NONDETERMINISTIC " + ",".join(sorted(digests))
             failed = True
         for label, baseline in baselines:
             if name not in baseline:
                 continue
             old = baseline[name]
-            if old["digest"] != best["digest"]:
+            if threads:
+                speed = best["virtual_ns"] / best["wall"]
+                note += f" {speed / (old['virtual_ns'] / old['best_wall']):.2f}x"
+            elif old["digest"] != best["digest"]:
                 note += f" DIGEST CHANGED vs {label} (was {old['digest']})"
                 failed = True
             else:
@@ -360,6 +377,11 @@ def main():
                         help="multi-CPU workloads: cycles a CPU may run ahead (default 180)")
     common.add_argument("--tier1-threshold", type=int,
                         help="cache hits before tier 1 translates a block")
+    common.add_argument("--parallel", action="store_true",
+                        help="multi-CPU workloads: each CPU on a host thread (SMP.adoc \"S4\"); "
+                        "not deterministic, so digests differ run to run")
+    common.add_argument("--parallel-window", type=int,
+                        help="with --parallel: cycles a CPU may run ahead of the slowest")
     commands = parser.add_subparsers(dest="command", required=True)
     fixture = commands.add_parser("fixture", parents=[common],
                                   help="build the fixture from an installed system")
@@ -370,6 +392,8 @@ def main():
     bench = commands.add_parser("run", parents=[common], help="run workloads")
     bench.add_argument("workloads", nargs="*", help=", ".join(WORKLOADS))
     bench.add_argument("--repeat", type=int, default=3)
+    bench.add_argument("--timeout", type=int, default=3600, metavar="SECONDS",
+                       help="host seconds a run may take before it counts as hung")
     bench.add_argument("--save")
     bench.add_argument("--compare", action="append",
                        help="a saved result to compare with (repeatable)")

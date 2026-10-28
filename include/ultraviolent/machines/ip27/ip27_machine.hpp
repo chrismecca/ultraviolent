@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -204,6 +205,16 @@ class Ip27Machine {
     [[nodiscard]] const mips::NativeCode* native_code() const {
         return nodes_.front()->cpu_a.native.get();
     }
+    // Host-parallel CPUs (SMP.adoc "S4"): with several CPUs, run() runs each on its own host
+    // thread, at most `window` cycles ahead of the slowest. Not deterministic; accepted
+    // against reference mode by the workloads' results. A host choice, like the engine, and
+    // not part of snapshots. PC probes and instruction tracing need reference mode: with
+    // them run() takes turns as before.
+    static constexpr std::uint64_t default_parallel_window = 10'000;
+    void set_parallel(bool parallel, std::uint64_t window = default_parallel_window) {
+        parallel_ = parallel;
+        parallel_window_ = window;
+    }
     // Tier 0's block cache size, a power of two (IR.adoc "Keeping blocks valid").
     void set_block_cache_entries(std::size_t entries) {
         for (Processor* p : processors_) {
@@ -231,6 +242,10 @@ class Ip27Machine {
     // Ends the current run() at the next cycle boundary (for host backends, such as a console
     // script that has run out).
     void request_stop() {
+        if (parallel_running_) {
+            parallel_stop_.store(true, std::memory_order_relaxed);
+            return;
+        }
         run_end_cycle_ = installed_[running_]->cpu.cycles();
         stop_cycle_ = run_end_cycle_;
         stop_requested_ = true;
@@ -306,8 +321,10 @@ class Ip27Machine {
     // the time at the start of the accessing instruction (IP27.adoc "Machine loop").
     class SynchronizedTarget final : public MmioTarget {
       public:
-        SynchronizedTarget(Ip27Machine& machine, MmioTarget& target)
-            : machine_{machine}, target_{target} {}
+        // `rt_hub`: the Hub whose register window this is; on host threads its PI_RT_COUNT is
+        // read without the device lock (Hub::rt_count_at).
+        SynchronizedTarget(Ip27Machine& machine, MmioTarget& target, Hub* rt_hub = nullptr)
+            : machine_{machine}, target_{target}, rt_hub_{rt_hub} {}
         std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
                                                             AccessWidth width) override;
         std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth width,
@@ -316,17 +333,63 @@ class Ip27Machine {
       private:
         Ip27Machine& machine_;
         MmioTarget& target_;
+        Hub* rt_hub_;
+    };
+
+    struct Processor;
+    // The wires from a Hub's interrupt outputs to its CPU. The machine owns the wiring: in
+    // reference mode they reach the CPU directly; with CPUs on host threads, the levels are
+    // posted to the CPU's mailbox (mips::Cpu::post_interrupt_levels), and set at once too when
+    // the CPU is the caller's own.
+    class CpuPins final : public InterruptSink {
+      public:
+        CpuPins(Ip27Machine& machine, Processor& processor)
+            : machine_{machine}, processor_{processor} {}
+        void set_interrupt_level(std::uint32_t input, bool asserted) override;
+        // Before CPUs run on threads: the levels the CPU has now.
+        void set_levels(std::uint32_t levels) {
+            levels_ = levels;
+        }
+
+      private:
+        Ip27Machine& machine_;
+        Processor& processor_;
+        std::uint32_t levels_{};
     };
 
     // A CPU in a slice of the Hub, and its execution engines.
     struct Processor {
-        Processor(AddressSpace& bus, Tracer& tracer, const mips::ProcessorModel& model,
-                  unsigned slice)
-            : cpu{bus, tracer, model, slice} {}
+        Processor(Ip27Machine& machine, AddressSpace& bus, Tracer& tracer,
+                  const mips::ProcessorModel& model, unsigned slice)
+            : cpu{bus, tracer, model, slice}, pins{machine, *this} {}
         mips::Cpu cpu;
         mips::Interpreter interpreter{cpu};
         mips::BlockInterpreter blocks{cpu};
         std::unique_ptr<mips::NativeCode> native;
+        CpuPins pins;
+        // On host threads: the cycle count where its engine last returned, for the others'
+        // window.
+        std::atomic<std::uint64_t> published{};
+    };
+
+    // A lock for very short critical sections between host threads: device accesses.
+    class SpinLock {
+      public:
+        void lock() {
+            while (locked_.exchange(true, std::memory_order_acquire)) {
+                while (locked_.load(std::memory_order_relaxed)) {
+#if defined(__x86_64__)
+                    __builtin_ia32_pause();
+#endif
+                }
+            }
+        }
+        void unlock() {
+            locked_.store(false, std::memory_order_release);
+        }
+
+      private:
+        std::atomic<bool> locked_{};
     };
 
     // Advances the scheduler to virtual time, the time of the CPU furthest behind (SMP.adoc
@@ -358,6 +421,18 @@ class Ip27Machine {
         }
         return lowest;
     }
+    // Host-parallel CPUs (SMP.adoc "S4"): runs every CPU on its own thread until each has
+    // reached `end` or a stop.
+    void run_parallel(std::uint64_t cycles);
+    void run_thread(Processor& processor, unsigned index, std::uint64_t end);
+    // The lowest cycle count the CPUs other than installed_[index] have published.
+    [[nodiscard]] std::uint64_t lowest_published_other(unsigned index) const;
+    // On host threads, under the device lock: device time moves to the CPU's time if that is
+    // later, and the events due by then run; then the next event's cycle is published.
+    void advance_device_time(std::uint64_t cycles);
+    void publish_next_event();
+    // A device access by the calling thread's CPU, under the device lock.
+    template <typename Access> auto locked_access(Access access);
     // Runs installed_[running_] up to stop_cycle_.
     void run_processor(bool observed);
     void step(Processor& processor);
@@ -389,6 +464,32 @@ class Ip27Machine {
         std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth width,
                                                     std::uint64_t value) override;
         FlashInterface& interface;
+    };
+
+    // Host threads: where a node's CPUs meet to leave a reset together (mips::ResetRendezvous).
+    class NodeReset final : public mips::ResetRendezvous {
+      public:
+        explicit NodeReset(Ip27Machine& machine) : machine_{machine} {}
+        // Adds one of the node's CPUs, which every reset of the node resets.
+        void add(mips::Cpu& cpu);
+        // Under the device lock: posts a `kind` reset to the node's CPUs. A reset asked for
+        // while a round is open (posted, not every CPU arrived) joins it, so every CPU takes
+        // the same rounds (observed: a second request reached one CPU after the other had taken
+        // the first, and it then waited for a round that never came).
+        void post(ResetKind kind);
+        std::uint64_t arrive(mips::Cpu& cpu, std::uint64_t cycles) override;
+        // After the threads, when nothing waits: forgets a round a stop left open.
+        void clear();
+
+      private:
+        Ip27Machine& machine_;
+        std::array<mips::Cpu*, 2> cpus_{};
+        unsigned participants_{};
+        std::atomic<bool> open_{};
+        std::atomic<unsigned> arrived_{};
+        std::atomic<std::uint64_t> latest_{};
+        std::atomic<std::uint64_t> round_{};
+        std::atomic<std::uint64_t> released_{};
     };
 
     // A node board: its Hub, memory, boot PROM, and CPUs, and the node's view of physical
@@ -426,6 +527,7 @@ class Ip27Machine {
         devices::OneWireBus mlan;
         devices::Nic board_nic;
         Hub hub;
+        NodeReset reset_rendezvous;
         Processor cpu_a;
         std::optional<Processor> cpu_b;
         SynchronizedTarget synchronized_hub;
@@ -501,6 +603,18 @@ class Ip27Machine {
     devices::Nic ethernet_nic_{0x91, std::uint64_t{config_.ethernet_address[3]} << 16 |
                                          std::uint64_t{config_.ethernet_address[4]} << 8 |
                                          config_.ethernet_address[5]};
+    // Host-parallel CPUs (SMP.adoc "S4"). parallel_running_ changes only while no CPU thread
+    // runs.
+    bool parallel_{};
+    std::uint64_t parallel_window_{default_parallel_window};
+    bool parallel_running_{};
+    SpinLock device_lock_;
+    std::atomic<std::uint64_t> parallel_next_event_{};
+    std::atomic<bool> parallel_stop_{};
+    // CPU threads that have finished their run.
+    std::atomic<unsigned> parallel_finished_{};
+    // The CPU the calling host thread runs, while CPUs run on threads.
+    static thread_local Processor* current_;
     // First CPU cycle count at which a pending event is due.
     std::uint64_t next_event_cycle_{};
     // Where run() stops; the interpreter runs uninterrupted up to the lesser of the two.

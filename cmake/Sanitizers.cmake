@@ -1,11 +1,16 @@
 option(ULTRAVIOLENT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ULTRAVIOLENT_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+option(ULTRAVIOLENT_ENABLE_TSAN "Enable ThreadSanitizer (host-parallel CPUs)" OFF)
 
 function(ultraviolent_enable_sanitizers target)
     set(sanitizers "")
 
     if(ULTRAVIOLENT_ENABLE_ASAN)
         list(APPEND sanitizers "address")
+    endif()
+
+    if(ULTRAVIOLENT_ENABLE_TSAN)
+        list(APPEND sanitizers "thread")
     endif()
 
     set(no_recover "")

@@ -8,6 +8,7 @@
 #include <ultraviolent/machines/ip27/prom_image.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -635,35 +636,63 @@ const test::Registration two_cpu_local_reset{
 // interrupts"; LINUX intr.h CPU_ACTION_B = 11): B unmasks level 11 in INT_MASK0_B and enables
 // IP2; A sets the level through PI_INT_PEND_MOD; B takes the interrupt at its BEV general
 // exception vector (0xbfc00380), which records it at physical 0x300. A's mask is clear.
+std::vector<std::byte> ipi_prom() {
+    std::vector<std::uint32_t> words(230, nop());
+    const auto at = [&](std::size_t index, std::initializer_list<std::uint32_t> code) {
+        std::ranges::copy(code, words.begin() + static_cast<std::ptrdiff_t>(index));
+    };
+    // Both: t0 = the Hub's registers, t1 = PI_CPU_NUM; B goes to 15.
+    at(0, {lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2),
+           ld(t1, 0x20, t0), bne(t1, zero, 36), nop()});
+    // A: wait 200 iterations, set level 11 (0x100 | 11), loop.
+    at(7, {addiu(t7, zero, 200), addiu(t7, t7, -1), bne(t7, zero, -8), nop(),
+           ori(t3, zero, 0x10b), sd(t3, 0x90, t0), beq(zero, zero, -4), nop()});
+    // B: INT_MASK0_B = bit 11; Status = BEV | IM2 | KX | IE; loop.
+    at(15, {ori(t3, zero, 0x800), sd(t3, 0xb8, t0), lui(t4, 0x40), ori(t4, t4, 0x481),
+            mtc0(t4, mips::cp0::status), beq(zero, zero, -4), nop()});
+    // The BEV general exception vector, offset 0x380.
+    at(0x380 / 4, {lui(t5, 0xa800), dsll32(t5, t5, 0), ori(t6, zero, 0x77),
+                   sd(t6, 0x300, t5), beq(zero, zero, -4), nop()});
+    std::vector<std::byte> prom(words.size() * 4);
+    for (std::size_t w = 0; w < words.size(); ++w) {
+        store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
+    }
+    return prom;
+}
+
 const test::Registration two_cpu_ipi{
     "ip27.two_cpus.interprocessor_interrupt", [](test::Context& t) {
-        std::vector<std::uint32_t> words(230, nop());
-        const auto at = [&](std::size_t index, std::initializer_list<std::uint32_t> code) {
-            std::ranges::copy(code, words.begin() + static_cast<std::ptrdiff_t>(index));
-        };
-        // Both: t0 = the Hub's registers, t1 = PI_CPU_NUM; B goes to 15.
-        at(0, {lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2),
-               ld(t1, 0x20, t0), bne(t1, zero, 36), nop()});
-        // A: wait 200 iterations, set level 11 (0x100 | 11), loop.
-        at(7, {addiu(t7, zero, 200), addiu(t7, t7, -1), bne(t7, zero, -8), nop(),
-               ori(t3, zero, 0x10b), sd(t3, 0x90, t0), beq(zero, zero, -4), nop()});
-        // B: INT_MASK0_B = bit 11; Status = BEV | IM2 | KX | IE; loop.
-        at(15, {ori(t3, zero, 0x800), sd(t3, 0xb8, t0), lui(t4, 0x40), ori(t4, t4, 0x481),
-                mtc0(t4, mips::cp0::status), beq(zero, zero, -4), nop()});
-        // The BEV general exception vector, offset 0x380.
-        at(0x380 / 4, {lui(t5, 0xa800), dsll32(t5, t5, 0), ori(t6, zero, 0x77),
-                       sd(t6, 0x300, t5), beq(zero, zero, -4), nop()});
-        std::vector<std::byte> prom(words.size() * 4);
-        for (std::size_t w = 0; w < words.size(); ++w) {
-            store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
-        }
-        Ip27Machine machine{two_cpu_config(), prom};
+        Ip27Machine machine{two_cpu_config(), ipi_prom()};
         kernel_64(machine);
         machine.run(2000);
         t.check_equal(memory_word(machine, 0x300), std::uint64_t{0x77});
         t.check_equal(machine.cpu(1).mfc0(mips::cp0::cause) >> 2 & 0x1f, std::uint64_t{0});
         t.check((machine.cpu(1).mfc0(mips::cp0::cause) & (1u << 10)) != 0, "B sees IP2");
         t.check((machine.cpu(0).mfc0(mips::cp0::cause) & (1u << 10)) == 0, "A does not");
+    }};
+
+// Host-parallel CPUs (SMP.adoc "S4"): the same guest programs with each CPU on a host thread.
+// Not deterministic, so the checks are the programs' own results.
+const test::Registration parallel_ipi{
+    "ip27.parallel.interprocessor_interrupt", [](test::Context& t) {
+        Ip27Machine machine{two_cpu_config(), ipi_prom()};
+        machine.set_parallel(true, 100);
+        kernel_64(machine);
+        machine.run(20000);
+        t.check_equal(memory_word(machine, 0x300), std::uint64_t{0x77});
+        t.check((machine.cpu(1).mfc0(mips::cp0::cause) & (1u << 10)) != 0, "B sees IP2");
+        t.check((machine.cpu(0).mfc0(mips::cp0::cause) & (1u << 10)) == 0, "A does not");
+    }};
+
+// A local reset requested by one CPU reaches the other through its mailbox; both run again.
+const test::Registration parallel_local_reset{
+    "ip27.parallel.local_reset", [](test::Context& t) {
+        Ip27Machine machine{two_cpu_config(), local_reset_prom};
+        machine.set_parallel(true, 100);
+        machine.run(200000);
+        t.check_equal(memory_word(machine, 0x400), std::uint64_t{1});
+        t.check(machine.cpu(0).state().gpr[t6] > 0 && machine.cpu(1).state().gpr[t6] > 0,
+                "both CPUs run after the reset");
     }};
 
 } // namespace
@@ -899,6 +928,42 @@ const test::Registration four_cpus{
                 t.check(counter >= counted && counter <= counted + 2, "no lost update");
             }
         }
+    }};
+
+// Host-parallel CPUs (SMP.adoc "S4"): four CPUs on four host threads count with LL/SC, and
+// no update is lost; the state then resumes in reference mode, which goes on counting.
+const test::Registration parallel_four_cpus{
+    "ip27.parallel.four_cpus_ll_sc_counter", [](test::Context& t) {
+        Ip27Machine machine{two_node_config(2), counter_prom};
+        machine.set_parallel(true, 1000);
+        kernel_64_all(machine, 4);
+        machine.run(200000);
+        const auto no_lost_update = [&](Ip27Machine& m, std::string_view when) {
+            for (const unsigned node : {0u, 1u}) {
+                const std::uint64_t counted =
+                    m.cpu(node * 2).state().gpr[t6] + m.cpu(node * 2 + 1).state().gpr[t6];
+                const std::uint64_t counter = node_word(m, node * 2, 0x200) >> 32;
+                t.check(counter >= counted && counter <= counted + 2, when);
+            }
+        };
+        for (unsigned cpu = 0; cpu < 4; ++cpu) {
+            t.check(machine.cpu(cpu).state().gpr[t6] > 0, "every CPU makes progress");
+        }
+        no_lost_update(machine, "no lost update on threads");
+        Ip27Config config = two_node_config(2);
+        Ip27Machine resumed{config, counter_prom};
+        if (!t.check(resumed.load_state(machine.save_state()).has_value(), "the snapshot loads")) {
+            return;
+        }
+        std::array<std::uint64_t, 4> before{};
+        for (unsigned cpu = 0; cpu < 4; ++cpu) {
+            before[cpu] = resumed.cpu(cpu).state().gpr[t6];
+        }
+        resumed.run(20000);
+        for (unsigned cpu = 0; cpu < 4; ++cpu) {
+            t.check(resumed.cpu(cpu).state().gpr[t6] > before[cpu], "reference mode goes on");
+        }
+        no_lost_update(resumed, "no lost update in reference mode");
     }};
 
 // A two-node snapshot resumes exactly where the run would have gone.

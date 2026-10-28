@@ -439,12 +439,37 @@ Hub::Hub(Scheduler& scheduler, Tracer& tracer, unsigned revision, unsigned slot_
 }
 
 std::uint64_t Hub::rt_count() const {
-    return (rt_base_ + cycles_at(scheduler_.now(), rtc_clock) - rt_epoch_ticks_) & rt_count_mask;
+    return (rt_base_.load(std::memory_order_relaxed) + cycles_at(scheduler_.now(), rtc_clock) -
+            rt_epoch_ticks_.load(std::memory_order_relaxed)) &
+           rt_count_mask;
+}
+
+std::uint64_t Hub::rt_count_at(VirtualTime time) const {
+    std::uint64_t sequence = 0;
+    std::uint64_t base = 0;
+    std::uint64_t epoch = 0;
+    do {
+        sequence = rt_sequence_.load(std::memory_order_acquire);
+        base = rt_base_.load(std::memory_order_relaxed);
+        epoch = rt_epoch_ticks_.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+    } while ((sequence & 1) != 0 || rt_sequence_.load(std::memory_order_relaxed) != sequence);
+    // A reader behind the last write sees the written value until its time passes it.
+    const std::uint64_t ticks = std::max(cycles_at(time, rtc_clock), epoch);
+    return (base + ticks - epoch) & rt_count_mask;
 }
 
 void Hub::set_rt_count(std::uint64_t value) {
-    rt_base_ = value & rt_count_mask;
-    rt_epoch_ticks_ = cycles_at(scheduler_.now(), rtc_clock);
+    const std::uint64_t sequence = rt_sequence_.load(std::memory_order_relaxed);
+    rt_sequence_.store(sequence + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    rt_base_.store(value & rt_count_mask, std::memory_order_relaxed);
+    // At the writer's own time on host threads (SMP.adoc "S4"), as its reads are: at device
+    // time, a count the global master copies to another node started up to a window behind
+    // its own, and the PROM disabled that node's CPUs ("Failed RTC distribution").
+    rt_epoch_ticks_.store(cycles_at(reader_time_.value_or(scheduler_.now()), rtc_clock),
+                          std::memory_order_relaxed);
+    rt_sequence_.store(sequence + 2, std::memory_order_release);
     schedule_comparators();
 }
 
@@ -454,9 +479,15 @@ void Hub::set_rt_count(std::uint64_t value) {
 // as HUB_IP_RT (IP4) and profile as HUB_IP_PROF (IP5). inferred: a compare value already
 // passed does not fire until the counter comes round again (observed: IRIX writes compare
 // values ahead of the counter).
+//
+// On host threads (SMP.adoc "S4") the writer compares against the count at its own time,
+// which can be behind device time: a value it has not reached yet is ahead of the counter as
+// the writer saw it, and is due at once if device time has passed it. Measured: compared at
+// device time, IRIX's short timeouts were lost and a parallel `reboot2` idled forever.
 void Hub::schedule_comparators() {
-    const std::uint64_t now_ticks = cycles_at(scheduler_.now(), rtc_clock);
-    const std::uint64_t count = rt_count();
+    const VirtualTime now = reader_time_.value_or(scheduler_.now());
+    const std::uint64_t now_ticks = cycles_at(now, rtc_clock);
+    const std::uint64_t count = reader_time_ ? rt_count_at(*reader_time_) : rt_count();
     const auto stored_at = [this](std::uint64_t offset) {
         const std::size_t slot = find_stored(offset);
         invariant(slot < stored_register_count, "comparators are stored registers");
@@ -471,8 +502,9 @@ void Hub::schedule_comparators() {
             scheduler_.cancel(comparator_events_[i]);
             continue;
         }
-        scheduler_.schedule_at(comparator_events_[i],
-                               time_at_cycles(now_ticks + (compare - count), rtc_clock));
+        scheduler_.schedule_at(
+            comparator_events_[i],
+            std::max(scheduler_.now(), time_at_cycles(now_ticks + (compare - count), rtc_clock)));
         tracer_.log(TraceCategory::irq, "{}hub comparator {} at count {:#x} (now {:#x})", trace_name_, i, compare,
                     count);
     }
@@ -762,8 +794,8 @@ void Hub::save_state(StateImage& image) const {
     image.put("hub.vector", std::array{vector_status_, return_vector_, vector_read_data_});
     image.put("hub.pending", pending_);
     image.put("hub.interrupt_mask", interrupt_mask_);
-    image.put("hub.rt_base", rt_base_);
-    image.put("hub.rt_epoch_ticks", rt_epoch_ticks_);
+    image.put("hub.rt_base", rt_base_.load(std::memory_order_relaxed));
+    image.put("hub.rt_epoch_ticks", rt_epoch_ticks_.load(std::memory_order_relaxed));
     const std::uint8_t comparators[] = {rt_pending_[0],   rt_pending_[1], prof_pending_[0],
                                         prof_pending_[1], rt_enable_[0],  rt_enable_[1],
                                         prof_enable_[0],  prof_enable_[1]};
@@ -795,8 +827,12 @@ void Hub::load_state(const StateImage& image) {
     vector_read_data_ = vector[2];
     image.get("hub.pending", pending_);
     image.get("hub.interrupt_mask", interrupt_mask_);
-    image.get("hub.rt_base", rt_base_);
-    image.get("hub.rt_epoch_ticks", rt_epoch_ticks_);
+    std::uint64_t rt_base = 0;
+    std::uint64_t rt_epoch_ticks = 0;
+    image.get("hub.rt_base", rt_base);
+    image.get("hub.rt_epoch_ticks", rt_epoch_ticks);
+    rt_base_.store(rt_base, std::memory_order_relaxed);
+    rt_epoch_ticks_.store(rt_epoch_ticks, std::memory_order_relaxed);
     std::uint8_t comparators[8]{};
     if (image.get("hub.comparators", comparators)) {
         rt_pending_ = {comparators[0] != 0, comparators[1] != 0};
@@ -964,7 +1000,7 @@ std::expected<std::uint64_t, AccessFault> Hub::read(unsigned slice, std::uint64_
         case pi_err_stack_addr_b:
             return err_stack_addr_[1];
         case pi_rt_count:
-            return rt_count();
+            return reader_time_ ? rt_count_at(*reader_time_) : rt_count();
         case pi_rt_pend_a:
         case pi_rt_pend_b:
             return rt_pending_[offset == pi_rt_pend_b] ? 1 : 0;

@@ -59,6 +59,7 @@ void usage() {
         "                    [--engine reference|tier0|tier1] [--engine-statistics]\n"
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
         "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
+        "                    [--parallel] [--parallel-window CYCLES]\n"
         "                    [--module rack|deskside] [--nodes 1|2]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
@@ -100,7 +101,9 @@ void usage() {
         "--cpus 2 puts a second CPU in the node's slice B (default 1, doc/SMP.adoc); the\n"
         "CPUs take turns, the one behind running until it is --cpu-slice cycles ahead\n"
         "(default 180, 1 us at 180 MHz; 1 alternates every cycle). --cycles counts each\n"
-        "CPU's cycles.\n"
+        "CPU's cycles. --parallel runs each CPU on its own host thread instead, at most\n"
+        "--parallel-window cycles ahead of the slowest (default 10000; doc/SMP.adoc \"S4\"):\n"
+        "faster, not deterministic, and without --trace cpu, --probe, or --sample-pc.\n"
         "--module rack puts the node in a rack module (default deskside, as slate;\n"
         "doc/IP27.adoc \"Machine type\"). --nodes 2 adds a second node board in n2 (deskside\n"
         "only; doc/SMP.adoc); give --flash once per node to keep each node's flash PROM.\n"
@@ -225,6 +228,8 @@ struct Options {
     ip27::ModuleType module{ip27::ModuleType::deskside};
     unsigned nodes{1};
     std::uint64_t cpu_slice{180};
+    bool parallel{};
+    std::uint64_t parallel_window{ip27::Ip27Machine::default_parallel_window};
     std::uint64_t cycles{1'000'000};
     std::vector<TraceCategory> trace;
     std::vector<std::uint64_t> probes;
@@ -286,6 +291,10 @@ std::optional<Options> parse(std::span<char*> arguments) {
         }
         if (flag == "--engine-statistics") {
             options.engine_statistics = true;
+            continue;
+        }
+        if (flag == "--parallel") {
+            options.parallel = true;
             continue;
         }
         if (i + 1 >= arguments.size()) {
@@ -378,6 +387,13 @@ std::optional<Options> parse(std::span<char*> arguments) {
                 return std::nullopt;
             }
             options.cpu_slice = *number;
+        } else if (flag == "--parallel-window") {
+            const auto number = parse_number(value);
+            if (!number || *number == 0) {
+                std::fprintf(stderr, "--parallel-window takes a number of cycles, at least 1\n");
+                return std::nullopt;
+            }
+            options.parallel_window = *number;
         } else if (flag == "--tier1-threshold") {
             const auto number = parse_number(value);
             if (!number) {
@@ -487,6 +503,16 @@ int main(int argc, char** argv) {
     }
     machine.set_block_cache_entries(options->block_cache_entries);
     machine.set_native_threshold(options->native_threshold);
+    if (options->parallel) {
+        // Observation needs one thread (doc/SMP.adoc "S4").
+        if (std::ranges::contains(options->trace, TraceCategory::cpu) || !options->probes.empty() ||
+            options->sample_pc_ns != 0) {
+            std::fprintf(stderr, "--parallel does not combine with --trace cpu, --probe, or "
+                                 "--sample-pc\n");
+            return exit_usage;
+        }
+        machine.set_parallel(true, options->parallel_window);
+    }
     backends::StreamTraceSink sink{stderr};
     machine.tracer().set_sink(&sink);
     // The guest console: the IOC3's first serial port, on standard output, with scripted input.

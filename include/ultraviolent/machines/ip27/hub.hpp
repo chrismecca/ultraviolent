@@ -13,6 +13,7 @@
 #include <ultraviolent/xtalk/xtalk.hpp>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -64,6 +65,18 @@ class Hub final {
     // Wires the interrupt outputs for CPU `slice` to the CPU: INT_PEND0 to input 0 (Cause IP2)
     // and INT_PEND1 to input 1 (IP3) (IP27.adoc "Hub interrupts").
     void connect_cpu(unsigned slice, InterruptSink& cpu);
+    // PI_RT_COUNT's offset in the Hub's register window.
+    static constexpr std::uint64_t rt_count_offset = 0x03'0100;
+    // Host threads, without the device lock (SMP.adoc "S4"): PI_RT_COUNT at `time`, the
+    // reader's own time, consistent with a write made meanwhile under the lock.
+    [[nodiscard]] std::uint64_t rt_count_at(VirtualTime time) const;
+    // Host-parallel CPUs (SMP.adoc "S4"): the time of the CPU accessing the Hub, or none.
+    // PI_RT_COUNT reads then follow the reader's own time, not device time, which can be up to
+    // a window ahead of it: the PROM checks that the count advances across a loop of about
+    // 1,000 cycles on each CPU (IP27.adoc "Two CPUs on a Hub").
+    void set_reader_time(std::optional<VirtualTime> time) {
+        reader_time_ = time;
+    }
 
     // The Hub's crosstalk side (IP27.adoc "Xtalk"). PIO to IO small window `widget` becomes a
     // crosstalk request on the link; with no link connected it fails.
@@ -236,8 +249,12 @@ class Hub final {
     void schedule_comparators();
     void comparator_matched(unsigned comparator);
     // PI_RT_COUNT is derived from virtual time: the value written at `rt_epoch_ticks_`.
-    std::uint64_t rt_base_{};
-    std::uint64_t rt_epoch_ticks_{};
+    // Atomics with a sequence count (odd while a write is in progress), so rt_count_at needs
+    // no lock.
+    std::atomic<std::uint64_t> rt_base_{};
+    std::atomic<std::uint64_t> rt_epoch_ticks_{};
+    std::atomic<std::uint64_t> rt_sequence_{};
+    std::optional<VirtualTime> reader_time_;
 };
 
 } // namespace ultraviolent::ip27

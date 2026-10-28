@@ -14,12 +14,13 @@
 #include <ultraviolent/core/trace.hpp>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <string_view>
 #include <expected>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace ultraviolent::mips {
 
@@ -118,6 +119,20 @@ struct FpuState {
 
 // R10000 architectural CPU (ARCHITECTURE "The CPU is not the interpreter").
 //
+class Cpu;
+
+// Host-parallel CPUs (SMP.adoc "S4"): where CPUs that take one reset together meet, so they
+// leave it at one cycle count as in reference mode.
+class ResetRendezvous {
+  public:
+    // `cpu` takes a posted reset having run `cycles`; returns once every CPU of the reset has
+    // arrived, with the cycle count they are released at (the latest of theirs).
+    virtual std::uint64_t arrive(Cpu& cpu, std::uint64_t cycles) = 0;
+
+  protected:
+    ~ResetRendezvous() = default;
+};
+
 // Owns every guest-visible register and implements the semantics that all execution engines
 // share: operating modes, address translation, memory access, CP0, the TLB, exceptions, and
 // interrupts. It does not decode or execute instructions.
@@ -144,18 +159,58 @@ class Cpu final : public InterruptSink {
         coherence_index_ = index.value_or(requester_);
         seen_coherence_ = coherence.generation();
     }
-    // LL at `address` succeeded: with other CPUs, reserve its line.
-    void note_load_linked(std::uint64_t address);
-    // Whether no other CPU has broken this CPU's reservation since its LL.
-    [[nodiscard]] bool reservation_intact() const {
-        return coherence_ == nullptr || coherence_->held(coherence_index_);
+    // LL of `width` at `address` succeeded, loading `value` into its register: with other
+    // CPUs, reserve its line (reference mode) or remember the value (host threads).
+    void note_load_linked(std::uint64_t address, AccessWidth width, std::uint64_t value);
+    // SC through `translation`: stores `value` and returns true when the pair holds: LLbit set
+    // and, with other CPUs, the reservation intact (reference mode) or the memory still
+    // holding the value LL loaded (host threads: a compare-and-swap, SMP.adoc "S4").
+    std::expected<bool, Exception> store_conditional(const Translation& translation,
+                                                     AccessWidth width, std::uint64_t value);
+    // SYNC: on host threads a host fence; otherwise references already complete in program
+    // order.
+    void synchronize_memory() const {
+        if (parallel_) {
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+        }
     }
+
+    // Host-parallel CPUs (SMP.adoc "S4"), each on its own host thread. set_parallel switches
+    // LL/SC to compare-and-swap, SYNC to a fence, and code-frame claims to waiting for the
+    // other CPUs (Coherence); call it between runs, with coherence connected. A reservation
+    // does not carry across the switch: the next SC fails, and the guest retries.
+    void set_parallel(bool parallel);
+    // From any thread: the external interrupt inputs become `levels` (bit n: input n), or the
+    // CPU takes a `kind` reset, at its next instruction boundary on its own thread. A reset
+    // is released at cycle `release` (hold_until) when the CPU has not reached it yet.
+    void post_interrupt_levels(std::uint32_t levels);
+    void post_reset(ResetKind kind, std::uint64_t release);
+    // Where a posted reset meets the other CPUs it resets; it then replaces `release`.
+    void set_reset_rendezvous(ResetRendezvous* rendezvous) {
+        reset_rendezvous_ = rendezvous;
+    }
+    // From any thread: the CPU leaves native code at its next block and attends.
+    void raise_attention();
+    [[nodiscard]] bool attention_raised() const {
+        return attention_.load(std::memory_order_relaxed);
+    }
+    // On the CPU's thread, between instructions: applies what was posted and acknowledges
+    // dropped pages (Coherence). Returns whether the CPU was reset.
+    bool attend();
+    // On the CPU's thread: parked while it waits (Coherence::park); unpark looks at the
+    // generation before the CPU can store again.
+    void park();
+    void unpark();
 
     // power_on and cold take the Cold Reset exception; warm takes the Soft Reset exception.
     void reset(ResetKind kind);
     void nonmaskable_interrupt();
 
     void set_interrupt_level(std::uint32_t input, bool asserted) override;
+    // The external interrupt inputs' levels (bit n: input n).
+    [[nodiscard]] std::uint32_t external_interrupt_levels() const {
+        return external_interrupts_ >> 2;
+    }
 
     [[nodiscard]] IntegerState& state() {
         return state_;
@@ -426,9 +481,11 @@ class Cpu final : public InterruptSink {
     // Returns true when one was taken.
     bool service_pending_exceptions() {
 #ifndef NDEBUG
-        invariant(exception_pending() == interrupt_check_, "stale interrupt check");
+        invariant(interrupt_check_.load(std::memory_order_relaxed) == exception_pending() ||
+                      attention_.load(std::memory_order_relaxed),
+                  "stale interrupt check");
 #endif
-        if (!interrupt_check_) [[likely]] {
+        if (!interrupt_check_.load(std::memory_order_relaxed)) [[likely]] {
             return false;
         }
         return take_pending_exception();
@@ -596,7 +653,9 @@ class Cpu final : public InterruptSink {
     // Recomputes what the per-instruction paths cache from Status, Cause, EntryHi, and the
     // interrupt inputs. Every change to those calls it.
     void update_derived_state() {
-        interrupt_check_ = exception_pending();
+        // Attention asked by another thread also stops the engines at the next boundary.
+        interrupt_check_.store(exception_pending() || attention_.load(std::memory_order_relaxed),
+                               std::memory_order_relaxed);
         context_ = compute_translation_context();
     }
     [[nodiscard]] std::uint32_t cause_value() const {
@@ -698,12 +757,27 @@ class Cpu final : public InterruptSink {
 
     // Another CPU claimed a code frame or took a reservation (Coherence).
     void drop_writable_pages();
+    // Host threads: waits until every other CPU has acknowledged `generation`.
+    void await_acknowledgments(std::uint64_t generation);
 
     AddressSpace& bus_;
     unsigned requester_;
     Coherence* coherence_{};
     unsigned coherence_index_{};
     std::uint64_t seen_coherence_{};
+    // Host threads (SMP.adoc "S4"): LL's physical address and loaded value, and the mailbox
+    // other threads post to.
+    bool parallel_{};
+    // No LL since the last switch: an SC fails.
+    static constexpr PhysicalAddress no_ll_address{~std::uint64_t{0}};
+    PhysicalAddress ll_address_{no_ll_address};
+    std::uint64_t ll_value_{};
+    std::atomic<bool> attention_{};
+    std::atomic<std::uint32_t> posted_levels_{};
+    std::atomic<bool> levels_posted_{};
+    std::atomic<int> posted_reset_{-1};
+    std::atomic<std::uint64_t> posted_release_{};
+    ResetRendezvous* reset_rendezvous_{};
     Tracer& tracer_;
     ProcessorModel model_;
     IntegerState state_;
@@ -736,7 +810,9 @@ class Cpu final : public InterruptSink {
     std::uint64_t unretired_cycles_{};
     std::uint64_t random_base_{};
     std::uint64_t timer_cycle_{};
-    bool interrupt_check_{};
+    // Written by another thread too (raise_attention), so an atomic; one byte, as tier 1
+    // tests it.
+    std::atomic<bool> interrupt_check_{};
     std::uint64_t context_{};
 
     // Host page caches: the host bytes of recently used 4 KiB virtual pages that translate

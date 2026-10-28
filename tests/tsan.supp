@@ -1,0 +1,7 @@
+# ThreadSanitizer suppressions for host-parallel CPUs (SMP.adoc "S4").
+# Guest memory is shared host memory that CPU threads read and write without locks, as the
+# hardware's CPUs do; races there are the guest's to order (with LL/SC and SYNC).
+race:ultraviolent::detail::load_word
+race:ultraviolent::detail::store_word
+race:ultraviolent::load_unsigned
+race:ultraviolent::store_unsigned

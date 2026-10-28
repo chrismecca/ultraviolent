@@ -9,6 +9,7 @@
 #include <format>
 #include <limits>
 #include <span>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -256,11 +257,14 @@ Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
           bus,
           [this] { reset_cpus(ResetKind::cold); },
           event_prefix(node_index)},
-      cpu_a{bus, owner.tracer_, mips::r10000(cpu_config(owner.config_, prom)), 0},
-      synchronized_hub{owner, hub.port(0)}, synchronized_hub_b{owner, hub.port(1)},
+      reset_rendezvous{owner},
+      cpu_a{owner, bus, owner.tracer_, mips::r10000(cpu_config(owner.config_, prom)), 0},
+      synchronized_hub{owner, hub.port(0), &hub}, synchronized_hub_b{owner, hub.port(1), &hub},
       synchronized_flash{owner, flash_interface},
       synchronized_flash_commands{owner, flash_commands} {
-    hub.connect_cpu(0, cpu_a.cpu);
+    hub.connect_cpu(0, cpu_a.pins);
+    cpu_a.cpu.set_reset_rendezvous(&reset_rendezvous);
+    reset_rendezvous.add(cpu_a.cpu);
     // hypothesis: an IP27 node board's record is named "IP27", like slate's IP31 boards'
     // "IP31" (OBS-SLATE-0004); its part number is not known, so it is left blank. The
     // barcode is synthetic.
@@ -272,8 +276,10 @@ Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
     if (owner.config_.cpus == 2) {
         // Slice B: the same processor on the Hub's second port, sharing memory with A
         // (SMP.adoc).
-        cpu_b.emplace(bus, owner.tracer_, mips::r10000(cpu_config(owner.config_, prom)), 1);
-        hub.connect_cpu(1, cpu_b->cpu);
+        cpu_b.emplace(owner, bus, owner.tracer_, mips::r10000(cpu_config(owner.config_, prom)), 1);
+        hub.connect_cpu(1, cpu_b->pins);
+        cpu_b->cpu.set_reset_rendezvous(&reset_rendezvous);
+        reset_rendezvous.add(cpu_b->cpu);
     }
     for (unsigned widget = 0; widget < xtalk::widget_count; ++widget) {
         if (widget != hub_widget) {
@@ -317,6 +323,7 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
         for (unsigned i = 0; i < processors_.size(); ++i) {
             if (processors_[i] != nullptr) {
                 processors_[i]->cpu.connect_coherence(coherence_, i);
+                coherence_.attach(i, processors_[i]->cpu);
             }
         }
     }
@@ -776,6 +783,13 @@ void Ip27Machine::reset(ResetKind kind) {
 }
 
 void Ip27Machine::Node::reset_cpus(ResetKind kind) {
+    // On host threads each CPU takes the reset on its own thread at its next boundary, the
+    // caller's own too, and they meet there (NodeReset) to leave it at one cycle count, as
+    // below (SMP.adoc "S4").
+    if (machine.parallel_running_) {
+        reset_rendezvous.post(kind);
+        return;
+    }
     // hypothesis: a reset reaches both CPUs of the node together and releases them together
     // (IP27.adoc "Two CPUs on a Hub"). The CPUs' own times differ by up to a slice here, so
     // the one behind is held until the other's cycle, as if in reset, and both leave reset at
@@ -847,7 +861,8 @@ std::uint64_t Ip27Machine::lowest_of_several() const {
 [[gnu::always_inline]] inline void Ip27Machine::synchronize_time() {
     invariant(!executing_ || synchronized_accesses_ != 0,
               "events run only between instructions or inside a synchronized access");
-    scheduler_.advance_to(cpu_time_.time_at(lowest_cycles()));
+    // Device time may be ahead of every CPU after a run on host threads (SMP.adoc "S4").
+    scheduler_.advance_to(std::max(cpu_time_.time_at(lowest_cycles()), scheduler_.now()));
     update_next_event();
 }
 
@@ -881,8 +896,49 @@ void Ip27Machine::update_next_event() {
     stop_cycle_ = std::min({event_stop, run_end, slice_end_cycle_});
 }
 
+void Ip27Machine::CpuPins::set_interrupt_level(std::uint32_t input, bool asserted) {
+    levels_ = asserted ? levels_ | 1u << input : levels_ & ~(1u << input);
+    if (!machine_.parallel_running_ || current_ == &processor_) {
+        processor_.cpu.set_interrupt_level(input, asserted);
+    }
+    // Posted also from the CPU's own thread, so an older posting cannot undo this change.
+    if (machine_.parallel_running_) {
+        processor_.cpu.post_interrupt_levels(levels_);
+    }
+}
+
+thread_local Ip27Machine::Processor* Ip27Machine::current_ = nullptr;
+
+template <typename Access> auto Ip27Machine::locked_access(Access access) {
+    Processor& self = *current_;
+    // Waiting for the lock, the CPU is parked: it stores nothing until it has looked at the
+    // coherence generation again (mips::Coherence).
+    self.cpu.park();
+    device_lock_.lock();
+    self.cpu.unpark();
+    advance_device_time(self.cpu.cycles());
+    const VirtualTime own_time = cpu_time_.time_at(self.cpu.cycles());
+    for (auto& node : nodes_) {
+        node->hub.set_reader_time(own_time);
+    }
+    auto result = access();
+    for (auto& node : nodes_) {
+        node->hub.set_reader_time(std::nullopt);
+    }
+    publish_next_event();
+    device_lock_.unlock();
+    return result;
+}
+
 std::expected<std::uint64_t, AccessFault>
 Ip27Machine::SynchronizedTarget::mmio_read(std::uint64_t offset, AccessWidth width) {
+    if (machine_.parallel_running_) [[unlikely]] {
+        // The firmware's delay loops: most device reads (SMP.adoc "S4.0").
+        if (rt_hub_ != nullptr && offset == Hub::rt_count_offset && width == AccessWidth::bits64) {
+            return rt_hub_->rt_count_at(machine_.cpu_time_.time_at(current_->cpu.cycles()));
+        }
+        return machine_.locked_access([&] { return target_.mmio_read(offset, width); });
+    }
     ++machine_.synchronized_accesses_;
     machine_.synchronize_time();
     auto result = target_.mmio_read(offset, width);
@@ -894,6 +950,9 @@ Ip27Machine::SynchronizedTarget::mmio_read(std::uint64_t offset, AccessWidth wid
 std::expected<void, AccessFault> Ip27Machine::SynchronizedTarget::mmio_write(std::uint64_t offset,
                                                                              AccessWidth width,
                                                                              std::uint64_t value) {
+    if (machine_.parallel_running_) [[unlikely]] {
+        return machine_.locked_access([&] { return target_.mmio_write(offset, width, value); });
+    }
     ++machine_.synchronized_accesses_;
     machine_.synchronize_time();
     auto result = target_.mmio_write(offset, width, value);
@@ -904,7 +963,12 @@ std::expected<void, AccessFault> Ip27Machine::SynchronizedTarget::mmio_write(std
 
 void Ip27Machine::run(std::uint64_t cycles) {
     if (cpu_count() > 1) {
-        run_many(cycles);
+        const bool observed = !pc_probes_.empty() || tracer_.enabled(TraceCategory::cpu);
+        if (parallel_ && !observed) {
+            run_parallel(cycles);
+        } else {
+            run_many(cycles);
+        }
         return;
     }
     Processor& cpu_a = *processors_[0];
@@ -978,6 +1042,176 @@ void Ip27Machine::run_many(std::uint64_t cycles) {
     run_end_cycle_ = 0;
     stop_requested_ = false;
     synchronize_time();
+}
+
+void Ip27Machine::run_parallel(std::uint64_t cycles) {
+    // SMP.adoc "S4". Everything the threads share is made safe for them here, before they
+    // start: the views publish versions, and the CPUs switch to compare-and-swap LL/SC.
+    const std::uint64_t end = lowest_cycles() + cycles;
+    for (auto& node : nodes_) {
+        node->bus.set_shared(true);
+    }
+    for (unsigned i = 0; i < cpu_count_; ++i) {
+        Processor& p = *installed_[i];
+        p.cpu.set_parallel(true);
+        p.pins.set_levels(p.cpu.external_interrupt_levels());
+        p.published.store(p.cpu.cycles(), std::memory_order_relaxed);
+        // Until its thread runs, a CPU stores nothing.
+        p.cpu.park();
+    }
+    parallel_stop_.store(false, std::memory_order_relaxed);
+    parallel_finished_.store(0, std::memory_order_relaxed);
+    parallel_running_ = true;
+    publish_next_event();
+    {
+        std::vector<std::jthread> threads;
+        for (unsigned i = 1; i < cpu_count_; ++i) {
+            threads.emplace_back([this, i, end] { run_thread(*installed_[i], i, end); });
+        }
+        run_thread(*installed_[0], 0, end);
+    }
+    parallel_running_ = false;
+    // What other threads posted at the end is applied now, on this one.
+    for (unsigned i = 0; i < cpu_count_; ++i) {
+        Processor& p = *installed_[i];
+        p.cpu.attend();
+        p.cpu.unpark();
+        p.cpu.set_parallel(false);
+    }
+    for (auto& node : nodes_) {
+        node->reset_rendezvous.clear();
+    }
+    stop_requested_ = false;
+    update_next_event();
+}
+
+void Ip27Machine::run_thread(Processor& processor, unsigned index, std::uint64_t end) {
+    current_ = &processor;
+    mips::Cpu& cpu = processor.cpu;
+    cpu.unpark();
+    std::uint64_t limit = 0;
+    while (true) {
+        if (cpu.attention_raised()) {
+            cpu.attend();
+        }
+        const std::uint64_t cycles = cpu.cycles();
+        processor.published.store(cycles, std::memory_order_release);
+        if (cycles >= end || parallel_stop_.load(std::memory_order_relaxed)) {
+            break;
+        }
+        const std::uint64_t next_event = parallel_next_event_.load(std::memory_order_acquire);
+        if (cycles >= next_event) {
+            cpu.park();
+            device_lock_.lock();
+            cpu.unpark();
+            advance_device_time(cycles);
+            publish_next_event();
+            device_lock_.unlock();
+            continue;
+        }
+        // The window: at most parallel_window_ cycles ahead of the slowest other CPU.
+        const std::uint64_t window_end = lowest_published_other(index) + parallel_window_;
+        if (cycles >= window_end) {
+            cpu.park();
+            // Attention (a reset to meet, a level to apply) goes to the loop's top.
+            while (cycles >= lowest_published_other(index) + parallel_window_ &&
+                   !parallel_stop_.load(std::memory_order_relaxed) && !cpu.attention_raised()) {
+                std::this_thread::yield();
+            }
+            cpu.unpark();
+            continue;
+        }
+        limit = std::min({end, next_event, window_end});
+        if (engine_ != mips::ExecutionEngine::reference) {
+            processor.blocks.run_until(limit);
+        } else {
+            processor.interpreter.run_until(limit);
+        }
+    }
+    processor.published.store(cpu.cycles(), std::memory_order_release);
+    cpu.park();
+    parallel_finished_.fetch_add(1, std::memory_order_relaxed);
+    current_ = nullptr;
+}
+
+void Ip27Machine::NodeReset::add(mips::Cpu& cpu) {
+    invariant(participants_ < cpus_.size(), "two CPUs per node");
+    cpus_[participants_++] = &cpu;
+}
+
+void Ip27Machine::NodeReset::post(ResetKind kind) {
+    if (open_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    for (unsigned i = 0; i < participants_; ++i) {
+        cpus_[i]->post_reset(kind, 0);
+    }
+}
+
+void Ip27Machine::NodeReset::clear() {
+    open_.store(false, std::memory_order_relaxed);
+    arrived_.store(0, std::memory_order_relaxed);
+    latest_.store(0, std::memory_order_relaxed);
+}
+
+std::uint64_t Ip27Machine::NodeReset::arrive(mips::Cpu& cpu, std::uint64_t cycles) {
+    // After the threads (run_parallel applies what is left posted): at once.
+    if (!machine_.parallel_running_ || participants_ == 1) {
+        open_.store(false, std::memory_order_release);
+        return cycles;
+    }
+    const std::uint64_t round = round_.load(std::memory_order_acquire);
+    std::uint64_t latest = latest_.load(std::memory_order_relaxed);
+    while (latest < cycles && !latest_.compare_exchange_weak(latest, cycles)) {
+    }
+    if (arrived_.fetch_add(1, std::memory_order_acq_rel) + 1 == participants_) {
+        released_.store(latest_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        latest_.store(0, std::memory_order_relaxed);
+        arrived_.store(0, std::memory_order_relaxed);
+        // A reset asked for from here on is a new round.
+        open_.store(false, std::memory_order_release);
+        round_.store(round + 1, std::memory_order_release);
+        return released_.load(std::memory_order_relaxed);
+    }
+    // Waiting, the CPU is parked. A run that ends meanwhile releases it where it is.
+    cpu.park();
+    while (round_.load(std::memory_order_acquire) == round) {
+        if (machine_.parallel_stop_.load(std::memory_order_relaxed) ||
+            machine_.parallel_finished_.load(std::memory_order_relaxed) != 0) {
+            cpu.unpark();
+            return cycles;
+        }
+        std::this_thread::yield();
+    }
+    cpu.unpark();
+    return released_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t Ip27Machine::lowest_published_other(unsigned index) const {
+    std::uint64_t lowest = std::numeric_limits<std::uint64_t>::max();
+    for (unsigned i = 0; i < cpu_count_; ++i) {
+        if (i != index) {
+            lowest = std::min(lowest, installed_[i]->published.load(std::memory_order_acquire));
+        }
+    }
+    return lowest;
+}
+
+void Ip27Machine::advance_device_time(std::uint64_t cycles) {
+    // Device time is the latest time any CPU has presented: it never moves back, and a CPU
+    // behind sees it up to a window ahead of its own (SMP.adoc "S4").
+    scheduler_.advance_to(std::max(cpu_time_.time_at(cycles), scheduler_.now()));
+}
+
+void Ip27Machine::publish_next_event() {
+    std::uint64_t cycle = std::numeric_limits<std::uint64_t>::max();
+    if (const auto deadline = scheduler_.next_deadline()) {
+        cycle = cycles_at(*deadline, config_.cpu_clock);
+        if (cpu_time_.time_at(cycle) < *deadline) {
+            ++cycle;
+        }
+    }
+    parallel_next_event_.store(cycle, std::memory_order_release);
 }
 
 } // namespace ultraviolent::ip27

@@ -1,10 +1,15 @@
 #include <ultraviolent/arch/mips/cpu.hpp>
 
+#include <ultraviolent/core/byte_order.hpp>
 #include <ultraviolent/core/invariant.hpp>
 
+#include <array>
+#include <atomic>
 #include <bit>
 #include <cstddef>
+#include <cstring>
 #include <string>
+#include <thread>
 #include <utility>
 
 // Section references are to the MIPS R10000 Microprocessor User's Manual, Version 2.0 (UM).
@@ -76,6 +81,8 @@ Cpu::Cpu(AddressSpace& bus, Tracer& tracer, const ProcessorModel& model, unsigne
 
 Cpu::NativeLayout Cpu::native_layout() const {
     static_assert(sizeof(HostPage) == 64, "tier 1 scales a host page slot by a shift");
+    static_assert(sizeof(interrupt_check_) == 1 && std::atomic<bool>::is_always_lock_free,
+                  "tier 1 tests the interrupt check as a byte");
     static_assert(std::has_single_bit(host_page_count), "tier 1 masks the host page slot");
     const auto at = [this](const void* field) {
         return static_cast<std::int32_t>(static_cast<const std::byte*>(field) -
@@ -426,7 +433,8 @@ std::expected<void, Exception> Cpu::write(const Translation& translation, Access
     last_bus_access_ = classify_bus_access(address, width, translation.uncached);
     const std::uint64_t code_writes = bus_.code_writes();
     auto result = bus_.write(address, width, value, requester_);
-    if (coherence_ != nullptr && result) {
+    // Host threads use no reservations (store_conditional).
+    if (coherence_ != nullptr && !parallel_ && result) {
         coherence_->store(coherence_index_, address, byte_count(width));
     }
     if (bus_.code_writes() != code_writes) {
@@ -466,7 +474,7 @@ void Cpu::write_back(const CacheArrays::Writeback& line) {
         const PhysicalAddress at{line.address + 4 * i};
         const std::uint64_t value = (std::uint64_t{line.words[i]} << 32) | line.words[i + 1];
         const auto result = bus_.write(at, AccessWidth::bits64, value, requester_);
-        if (coherence_ != nullptr && result) {
+        if (coherence_ != nullptr && !parallel_ && result) {
             coherence_->store(coherence_index_, at, 8);
         }
     }
@@ -625,8 +633,15 @@ void Cpu::claim_code_frame(const CodePage& page) {
     // Other CPUs may hold the frame as a writable host page; their stores must reach the bus
     // from now on.
     if (coherence_ != nullptr) {
-        coherence_->drop_writable_pages();
-        seen_coherence_ = coherence_->generation();
+        const std::uint64_t generation = coherence_->drop_writable_pages();
+        if (parallel_) {
+            // They run now, so wait until each has dropped its pages (SMP.adoc "S4"). Other
+            // CPUs may have advanced the generation since this one last looked: drop all.
+            drop_writable_pages();
+            await_acknowledgments(generation);
+            return;
+        }
+        seen_coherence_ = generation;
     }
     for (HostPage& entry : data_pages_) {
         if (entry.writable_bytes == page.bytes) {
@@ -635,16 +650,167 @@ void Cpu::claim_code_frame(const CodePage& page) {
     }
 }
 
-void Cpu::note_load_linked(std::uint64_t address) {
+void Cpu::await_acknowledgments(std::uint64_t generation) {
+    for (unsigned other = 0; other < Coherence::max_cpus; ++other) {
+        if (other == coherence_index_) {
+            continue;
+        }
+        for (unsigned spins = 0; !coherence_->acknowledged(other, generation); ++spins) {
+            // Attention can be lost when the other CPU recomputes its check at that moment;
+            // asking again bounds the wait.
+            if (spins % 64 == 0) {
+                coherence_->cpu(other)->raise_attention();
+            }
+            // The other CPU may be waiting for this one in the same way.
+            if (coherence_->generation() != seen_coherence_) {
+                drop_writable_pages();
+            }
+            std::this_thread::yield();
+        }
+    }
+}
+
+void Cpu::set_parallel(bool parallel) {
+    parallel_ = parallel;
+    ll_address_ = no_ll_address;
+    if (coherence_ != nullptr) {
+        coherence_->release(coherence_index_);
+    }
+}
+
+void Cpu::post_interrupt_levels(std::uint32_t levels) {
+    posted_levels_.store(levels, std::memory_order_relaxed);
+    levels_posted_.store(true, std::memory_order_release);
+    raise_attention();
+}
+
+void Cpu::post_reset(ResetKind kind, std::uint64_t release) {
+    posted_release_.store(release, std::memory_order_relaxed);
+    posted_reset_.store(static_cast<int>(kind), std::memory_order_release);
+    raise_attention();
+}
+
+void Cpu::raise_attention() {
+    attention_.store(true, std::memory_order_seq_cst);
+    interrupt_check_.store(true, std::memory_order_relaxed);
+}
+
+bool Cpu::attend() {
+    attention_.store(false, std::memory_order_seq_cst);
+    bool reset_taken = false;
+    if (const int kind = posted_reset_.exchange(-1, std::memory_order_acq_rel); kind >= 0) {
+        hold_until(reset_rendezvous_ != nullptr ? reset_rendezvous_->arrive(*this, cycles_)
+                                                : posted_release_.load(std::memory_order_relaxed));
+        reset(static_cast<ResetKind>(kind));
+        reset_taken = true;
+    }
+    if (levels_posted_.exchange(false, std::memory_order_acq_rel)) {
+        constexpr std::uint32_t inputs = (1u << external_interrupt_count) - 1;
+        external_interrupts_ = (posted_levels_.load(std::memory_order_relaxed) & inputs) << 2;
+    }
+    if (coherence_ != nullptr && coherence_->generation() != seen_coherence_) {
+        drop_writable_pages();
+    }
+    update_derived_state();
+    return reset_taken;
+}
+
+void Cpu::park() {
+    coherence_->park(coherence_index_);
+}
+
+void Cpu::unpark() {
+    coherence_->unpark(coherence_index_);
+    if (coherence_->generation_after_unpark() != seen_coherence_) {
+        drop_writable_pages();
+    }
+}
+
+void Cpu::note_load_linked(std::uint64_t address, AccessWidth width, std::uint64_t value) {
     if (coherence_ == nullptr) {
         return;
     }
     // The load has just translated `address`, so this cannot fault.
     if (const auto translation = translate(address, AccessKind::load)) {
+        if (parallel_) {
+            ll_address_ = bus_address(*translation, width);
+            ll_value_ = value;
+            return;
+        }
         coherence_->reserve(coherence_index_, translation->address);
         // Our own reservation leaves our pages alone.
         seen_coherence_ = coherence_->generation();
     }
+}
+
+std::expected<bool, Exception> Cpu::store_conditional(const Translation& translation,
+                                                      AccessWidth width, std::uint64_t value) {
+    if (!state_.ll_bit) {
+        return false;
+    }
+    const auto plain_store = [&]() -> std::expected<bool, Exception> {
+        if (auto result = write(translation, width, value); !result) {
+            return std::unexpected(result.error());
+        }
+        return true;
+    };
+    if (!parallel_) {
+        if (coherence_ != nullptr && !coherence_->held(coherence_index_)) {
+            return false;
+        }
+        return plain_store();
+    }
+    // Host threads: SC succeeds when memory still holds what LL loaded, as one host
+    // compare-and-swap; at another address than LL's it fails (the reservation is LL's). Where
+    // the swap cannot apply (uncached or device space, lines only this CPU's cache holds), an
+    // ordinary store, as when no other CPU wrote the line.
+    const PhysicalAddress address = bus_address(translation, width);
+    const std::uint64_t size = byte_count(width);
+    if (address != ll_address_) {
+        return false;
+    }
+    if (translation.uncached || caches_.holds_data_lines()) {
+        return plain_store();
+    }
+    if (auto watch = check_watch(translation, AccessKind::store); !watch) {
+        return std::unexpected(watch.error());
+    }
+    const std::uint64_t code_writes = bus_.code_writes();
+    const std::span<std::byte> bytes = bus_.writable_memory_bytes(address, size);
+    if (bytes.size() != size) {
+        return plain_store();
+    }
+    std::array<std::byte, 8> old_bytes{};
+    std::array<std::byte, 8> new_bytes{};
+    const std::uint64_t mask = width == AccessWidth::bits64 ? ~std::uint64_t{0} : 0xffff'ffff;
+    store_unsigned(std::span{old_bytes}.first(size), ll_value_ & mask, bus_.byte_order());
+    store_unsigned(std::span{new_bytes}.first(size), value & mask, bus_.byte_order());
+    bool stored = false;
+    // The access is aligned to its size (SC checked), and so are the host bytes behind it.
+    if (width == AccessWidth::bits64) {
+        std::uint64_t expected{};
+        std::uint64_t desired{};
+        std::memcpy(&expected, old_bytes.data(), 8);
+        std::memcpy(&desired, new_bytes.data(), 8);
+        stored = std::atomic_ref{*reinterpret_cast<std::uint64_t*>(bytes.data())}
+                     .compare_exchange_strong(expected, desired);
+    } else {
+        std::uint32_t expected{};
+        std::uint32_t desired{};
+        std::memcpy(&expected, old_bytes.data(), 4);
+        std::memcpy(&desired, new_bytes.data(), 4);
+        stored = std::atomic_ref{*reinterpret_cast<std::uint32_t*>(bytes.data())}
+                     .compare_exchange_strong(expected, desired);
+    }
+    left_host_path_ = true;
+    last_bus_access_ = BusAccess::other;
+    if (bus_.code_writes() != code_writes) {
+        last_bus_access_ = BusAccess::code_store;
+        ++code_frame_stores_;
+        synchronize_code();
+    }
+    check_host_pages();
+    return stored;
 }
 
 void Cpu::drop_writable_pages() {
@@ -653,6 +819,9 @@ void Cpu::drop_writable_pages() {
         if (entry.writable_bytes != nullptr) {
             entry = {};
         }
+    }
+    if (parallel_) {
+        coherence_->acknowledge(coherence_index_, seen_coherence_);
     }
 }
 
@@ -1010,7 +1179,7 @@ std::uint64_t Cpu::exception_return() {
     }
     update_derived_state();
     state_.ll_bit = false;
-    if (coherence_ != nullptr) {
+    if (coherence_ != nullptr && !parallel_) {
         coherence_->release(coherence_index_);
     }
     return target;
@@ -1058,20 +1227,30 @@ void Cpu::take_exception(const Exception& exception) {
 }
 
 bool Cpu::take_pending_exception() {
-    if ((cp0_.status & (status::exl | status::erl)) != 0) {
-        return false;
+    // Another thread asked for attention (host-parallel CPUs): a reset takes the place of the
+    // next instruction; otherwise go on with what is now pending.
+    if (attention_.load(std::memory_order_relaxed)) [[unlikely]] {
+        if (attend()) {
+            return true;
+        }
     }
-    if (watch_pending_) {
-        watch_pending_ = false;
-        take_exception(Exception{.code = ExceptionCode::watch}); // updates the derived state
-        return true;
+    if ((cp0_.status & (status::exl | status::erl)) == 0) {
+        if (watch_pending_) {
+            watch_pending_ = false;
+            take_exception(Exception{.code = ExceptionCode::watch}); // updates the derived state
+            return true;
+        }
+        const std::uint32_t pending = (cause_value() >> cause::ip_shift) & 0xff;
+        const std::uint32_t enabled = (cp0_.status >> status::im_shift) & 0xff;
+        if ((cp0_.status & status::ie) != 0 && (pending & enabled) != 0) {
+            take_exception(Exception{.code = ExceptionCode::interrupt});
+            return true;
+        }
     }
-    const std::uint32_t pending = (cause_value() >> cause::ip_shift) & 0xff;
-    const std::uint32_t enabled = (cp0_.status >> status::im_shift) & 0xff;
-    if ((cp0_.status & status::ie) != 0 && (pending & enabled) != 0) {
-        take_exception(Exception{.code = ExceptionCode::interrupt});
-        return true;
-    }
+    // Nothing to take, yet the check was set: on host threads another thread's attention can
+    // set it after attend() recomputed it, and left set, every engine would stop at every
+    // block without advancing (measured: a parallel `reboot2` spun for hours). Recompute it.
+    update_derived_state();
     return false;
 }
 
