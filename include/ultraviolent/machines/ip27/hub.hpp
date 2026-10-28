@@ -70,6 +70,15 @@ class Hub final {
     // Host threads, without the device lock (SMP.adoc "S4"): PI_RT_COUNT at `time`, the
     // reader's own time, consistent with a write made meanwhile under the lock.
     [[nodiscard]] std::uint64_t rt_count_at(VirtualTime time) const;
+    // PI_INT_PEND0 and PI_INT_PEND1's offsets, and on host threads (SMP.adoc "S4") their
+    // values without the device lock: IRIX polls PI_INT_PEND0 (S4.0: 52 M reads per CPU in
+    // `boot4`). A CPU that sees a level another CPU raised also sees the memory that CPU wrote
+    // before raising it.
+    static constexpr std::uint64_t int_pend0_offset = 0x00'0098;
+    static constexpr std::uint64_t int_pend1_offset = 0x00'00a0;
+    [[nodiscard]] std::uint64_t interrupt_pending(std::size_t word) const {
+        return pending_[word].load(std::memory_order_acquire);
+    }
     // Host-parallel CPUs (SMP.adoc "S4"): the time of the CPU accessing the Hub, or none.
     // PI_RT_COUNT reads then follow the reader's own time, not device time, which can be up to
     // a window ahead of it: the PROM checks that the count advances across a loop of about
@@ -235,8 +244,12 @@ class Hub final {
     // IBLS, IBSA, IBDA, IBCT, IBNA, IBIA for BTE 0 and 1.
     std::array<std::array<std::uint64_t, 6>, 2> bte_{};
     std::uint64_t nsri_settings_{};
-    // PI_INT_PEND0/1 and PI_INT_MASK0/1 per CPU slice.
-    std::array<std::uint64_t, 2> pending_{};
+    // PI_INT_PEND0/1 and PI_INT_MASK0/1 per CPU slice. The pending words are written under
+    // the device lock and, on host threads, read without it (interrupt_pending).
+    std::array<std::atomic<std::uint64_t>, 2> pending_{};
+    void set_pending(std::size_t word, std::uint64_t value) {
+        pending_[word].store(value, std::memory_order_release);
+    }
     std::array<std::array<std::uint64_t, 2>, 2> interrupt_mask_{};
     // Per CPU slice: HUB_IP_PEND0, HUB_IP_PEND1_CC, HUB_IP_RT, HUB_IP_PROF.
     std::array<std::array<InterruptLine, 4>, 2> cpu_lines_;

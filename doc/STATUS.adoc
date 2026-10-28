@@ -18,9 +18,10 @@ is the default (with the user, 2026-10-15; ADR-021 addendum). S5.2 and S5.3 are 
 (2026-10-16/17): the NUMAlink link, vector PIO, and node NICs; the PROM discovers two
 nodes as slate does, IRIX boots on four CPUs in two nodes, and the four-CPU workloads give
 identical digests and same-cycle snapshots on all three engines. S5 is complete. S4,
-host-parallel CPUs (accepted by the user 2026-10-26): S4.0-S4.2 are done (2026-10-28);
-`--parallel` runs each CPU on its own host thread, and the seven multi-CPU workloads reach
-reference mode's output 1.78-6.14x faster.** Next: see Next task.
+host-parallel CPUs (accepted by the user 2026-10-26), is complete (2026-10-28): `--parallel`
+runs each CPU on its own host thread, and the seven multi-CPU workloads reach reference
+mode's output 1.66-6.25x faster (two CPUs at about real time, four at 0.81-1.50x).** Next:
+see Next task.
 
 Before it, the performance baseline (ROADMAP "After RC-IP27"; started 2026-09-28). The repository is public
 at RC-IP27 (the user chose no tag or release). Tier 0 stages A-H are done (2026-10-08): tier
@@ -446,17 +447,24 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **S4.3: measure and tune host-parallel CPUs (SMP.adoc "S4: host-parallel CPUs").** The
-  user accepted S4 on 2026-10-26 ("sure lets try it"). S4.0-S4.2 are done (2026-10-26/28,
-  SMP.adoc "Progress"): `--parallel` runs each CPU on a host thread, and all seven
-  multi-CPU workloads reach reference mode's output, 1.78-2.58x faster on two CPUs and
-  2.16-6.14x on four (PGO, best of 3). To do: sweep the window (`bench.py run --parallel
-  --parallel-window N`, 1,000 to 100,000) on `boot2`, `cpu4`, and `boot4`; the waits (the
-  window wait yields: a two-CPU reboot spends about a fifth of its host time in the
-  kernel); device accesses under the lock (S4.0 counted 52 M PI_INT_PEND0 reads per CPU in
-  `boot4`); `boot4` and `reboot4` are still below real time (0.64x, 0.60x). Record the
-  numbers in SMP.adoc. Keep every background run under an hour (bench.py `--timeout`, and
-  a watchdog): two hangs found in S4.2 spun silently for hours.
+. **The cost of a PI_RT_COUNT read (performance; measured in S4.3, SMP.adoc "Progress").**
+  Firmware delay loops read PI_RT_COUNT once every ~15 cycles: about 593 M reads per slave
+  CPU before the PROM menu on four CPUs, and the one-CPU `boot` makes hundreds of millions
+  too. Each read leaves native code (operation helper, `Cpu::load_slow`, the device page,
+  a virtual `mmio_read`, then `Hub::rt_count_at`). Measure first how much of `prom` and of
+  parallel `boot4`'s PROM phase the read takes (a counting or perf build); then, if it is
+  large, a general mechanism (not an IP27 special case in an engine): for example a device
+  page that names a register whose value is a linear function of virtual time, which the
+  CPU computes without the call chain. Gates: every reference digest unchanged on all
+  three engines; the speedup recorded. Keep every background run under an hour (bench.py
+  `--timeout`, and a watchdog).
+. **Then S6, IP31 / R12000 (SMP.adoc "Stages"; its own plan, ADR-022 personality).** slate's
+  nodes are IP31 boards with R12000s at 400 MHz (OBS-SLATE-0001, -0004). Write the plan
+  first (observe: what IRIX and the PROM read to tell an R12000 and an IP31 apart).
+. **Done: S4, host-parallel CPUs (2026-10-26/28, SMP.adoc "S4" and "Progress").** The user
+  accepted it on 2026-10-26 ("sure lets try it"). S4.0 measured the shared state, S4.1 made
+  it safe for threads, S4.2 added the parallel runner, and S4.3 measured the window (no
+  better setting than 10,000) and read PI_INT_PEND0/1 without the lock.
 . **Slate, when the user is at its console (not blocking).** POD reads of NI_STATUS_REV_ID,
   NI_PORT_PARMS, and IIO_ILCSR on each node (SMP.adoc "Open questions for slate"; POD is
   entered with `pod` at the Command Monitor, checked on the emulator 2026-10-27); with the
@@ -1561,4 +1569,27 @@ Best checkpoint: unchanged (the four-CPU fixture); `bench.py run --parallel` for
 Next step: S4.3 (tune and record).
 Housekeeping: two hangs spun for hours unnoticed (one about 20 h) because nothing woke
   the session; the user's rule since 2026-10-28: anything past 60 minutes is broken.
+----
+
+----
+Date: 2026-10-28
+Milestone: SMP IP27, S4.3 (measure and tune)
+Hypothesis: the window and the device lock set parallel speed.
+Evidence: a window sweep (1,000-100,000) on boot2, cpu4, boot4; perf of parallel boot4 and
+  of its PROM phase per thread; a temporary build counting device reads by CPU, target,
+  and offset; release A/B runs of reboot2.
+Changed: Hub PI_INT_PEND0/1 atomics, read without the device lock on host threads
+  (Hub::interrupt_pending); SynchronizedTarget's `hub_`; SMP.adoc "Design" and "Progress".
+Tests: dev green; all seven multi-CPU workloads reach reference mode's output (only "Reboot
+  started from CPU n" differs). PGO best of 3 (`local/bench/r3600/s43-parallel.json`), x
+  real: cpu2 1.63, mix2 1.36, boot2 0.99, reboot2 0.98, cpu4 1.50, boot4 0.89, reboot4
+  0.81.
+Newly proven: the window between 3,000 and 30,000 cycles does not matter; the four CPUs
+  are paced by PI_RT_COUNT reads in the PROM's delay loops (about 593 M per slave CPU).
+Disproven: that the yields at the window cost time (spinning first gained nothing); that
+  the boot2/reboot2 PGO difference between S4.2 and S4.3 was the change (identical release
+  builds agree).
+Unknowns: the share of a PI_RT_COUNT read in single-CPU runs.
+Best checkpoint: unchanged.
+Next step: the cost of a PI_RT_COUNT read (Next task).
 ----

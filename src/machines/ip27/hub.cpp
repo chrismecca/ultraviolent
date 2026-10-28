@@ -25,8 +25,8 @@ constexpr std::uint64_t pi_cpu_present_b = 0x00'0048;
 constexpr std::uint64_t pi_cpu_enable_a = 0x00'0050;
 constexpr std::uint64_t pi_cpu_enable_b = 0x00'0058;
 constexpr std::uint64_t pi_int_pend_mod = 0x00'0090;
-constexpr std::uint64_t pi_int_pend0 = 0x00'0098;
-constexpr std::uint64_t pi_int_pend1 = 0x00'00a0;
+constexpr std::uint64_t pi_int_pend0 = Hub::int_pend0_offset;
+constexpr std::uint64_t pi_int_pend1 = Hub::int_pend1_offset;
 constexpr std::uint64_t pi_int_mask0_a = 0x00'00a8;
 constexpr std::uint64_t pi_int_mask1_a = 0x00'00b0;
 constexpr std::uint64_t pi_int_mask0_b = 0x00'00b8;
@@ -535,7 +535,8 @@ void Hub::set_memory_config(std::uint64_t value) {
 }
 
 void Hub::raise_interrupt(unsigned level) {
-    pending_[level / 64 % 2] |= std::uint64_t{1} << (level % 64);
+    const std::size_t word = level / 64 % 2;
+    set_pending(word, interrupt_pending(word) | std::uint64_t{1} << (level % 64));
     update_interrupts();
 }
 
@@ -754,7 +755,8 @@ void Hub::Widget::xtalk_interrupt_clear(std::uint64_t address, std::uint8_t vect
     constexpr std::uint64_t register_mask = 0x7f'ffff;
     if ((address & widget_mask) == (std::uint64_t{1} << 24) &&
         (address & register_mask) == pi_int_pend_mod) {
-        hub->pending_[vector / 64] &= ~(std::uint64_t{1} << (vector % 64));
+        const std::size_t word = vector / 64;
+        hub->set_pending(word, hub->interrupt_pending(word) & ~(std::uint64_t{1} << (vector % 64)));
         hub->update_interrupts();
     }
 }
@@ -769,7 +771,8 @@ void Hub::connect_cpu(unsigned slice, InterruptSink& cpu) {
 void Hub::update_interrupts() {
     for (std::size_t slice = 0; slice < 2; ++slice) {
         for (std::size_t word = 0; word < 2; ++word) {
-            cpu_lines_[slice][word].set_level((pending_[word] & interrupt_mask_[slice][word]) != 0);
+            cpu_lines_[slice][word].set_level(
+                (interrupt_pending(word) & interrupt_mask_[slice][word]) != 0);
         }
         cpu_lines_[slice][2].set_level(rt_pending_[slice] && rt_enable_[slice]);
         cpu_lines_[slice][3].set_level(prof_pending_[slice] && prof_enable_[slice]);
@@ -792,7 +795,7 @@ void Hub::save_state(StateImage& image) const {
     image.put("hub.mlan_line", std::uint8_t{mlan_line_});
     image.put("hub.routing_tables", routing_tables_);
     image.put("hub.vector", std::array{vector_status_, return_vector_, vector_read_data_});
-    image.put("hub.pending", pending_);
+    image.put("hub.pending", std::array{interrupt_pending(0), interrupt_pending(1)});
     image.put("hub.interrupt_mask", interrupt_mask_);
     image.put("hub.rt_base", rt_base_.load(std::memory_order_relaxed));
     image.put("hub.rt_epoch_ticks", rt_epoch_ticks_.load(std::memory_order_relaxed));
@@ -825,7 +828,10 @@ void Hub::load_state(const StateImage& image) {
     vector_status_ = vector[0];
     return_vector_ = vector[1];
     vector_read_data_ = vector[2];
-    image.get("hub.pending", pending_);
+    std::array<std::uint64_t, 2> pending{};
+    image.get("hub.pending", pending);
+    set_pending(0, pending[0]);
+    set_pending(1, pending[1]);
     image.get("hub.interrupt_mask", interrupt_mask_);
     std::uint64_t rt_base = 0;
     std::uint64_t rt_epoch_ticks = 0;
@@ -939,7 +945,8 @@ void Hub::reset(ResetKind kind) {
     vector_read_data_ = 0;
     bte_ = {};
     set_nsri_settings(0);
-    pending_ = {};
+    set_pending(0, 0);
+    set_pending(1, 0);
     interrupt_mask_ = {};
     update_interrupts();
     cpu_enable_ = cpu_present_;
@@ -977,9 +984,9 @@ std::expected<std::uint64_t, AccessFault> Hub::read(unsigned slice, std::uint64_
         case pi_cpu_present_b:
             return cpu_present_[1];
         case pi_int_pend0:
-            return pending_[0];
+            return interrupt_pending(0);
         case pi_int_pend1:
-            return pending_[1];
+            return interrupt_pending(1);
         case pi_int_mask0_a:
             return interrupt_mask_[0][0];
         case pi_int_mask1_a:
@@ -1110,8 +1117,9 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
         case pi_int_pend_mod: {
             const std::uint64_t level = value & pend_mod_level;
             const std::uint64_t bit = std::uint64_t{1} << (level % 64);
-            std::uint64_t& word = pending_[level / 64];
-            word = (value & pend_mod_set) != 0 ? word | bit : word & ~bit;
+            const std::size_t word = level / 64;
+            const std::uint64_t old = interrupt_pending(word);
+            set_pending(word, (value & pend_mod_set) != 0 ? old | bit : old & ~bit);
             update_interrupts();
             return {};
         }

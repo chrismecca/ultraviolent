@@ -321,10 +321,10 @@ class Ip27Machine {
     // the time at the start of the accessing instruction (IP27.adoc "Machine loop").
     class SynchronizedTarget final : public MmioTarget {
       public:
-        // `rt_hub`: the Hub whose register window this is; on host threads its PI_RT_COUNT is
-        // read without the device lock (Hub::rt_count_at).
-        SynchronizedTarget(Ip27Machine& machine, MmioTarget& target, Hub* rt_hub = nullptr)
-            : machine_{machine}, target_{target}, rt_hub_{rt_hub} {}
+        // `hub`: the Hub whose register window this is; on host threads its PI_RT_COUNT and
+        // PI_INT_PEND0/1 are read without the device lock.
+        SynchronizedTarget(Ip27Machine& machine, MmioTarget& target, Hub* hub = nullptr)
+            : machine_{machine}, target_{target}, hub_{hub} {}
         std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
                                                             AccessWidth width) override;
         std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth width,
@@ -333,7 +333,7 @@ class Ip27Machine {
       private:
         Ip27Machine& machine_;
         MmioTarget& target_;
-        Hub* rt_hub_;
+        Hub* hub_;
     };
 
     struct Processor;

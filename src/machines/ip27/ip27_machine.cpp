@@ -933,9 +933,19 @@ template <typename Access> auto Ip27Machine::locked_access(Access access) {
 std::expected<std::uint64_t, AccessFault>
 Ip27Machine::SynchronizedTarget::mmio_read(std::uint64_t offset, AccessWidth width) {
     if (machine_.parallel_running_) [[unlikely]] {
-        // The firmware's delay loops: most device reads (SMP.adoc "S4.0").
-        if (rt_hub_ != nullptr && offset == Hub::rt_count_offset && width == AccessWidth::bits64) {
-            return rt_hub_->rt_count_at(machine_.cpu_time_.time_at(current_->cpu.cycles()));
+        // Without the lock: the firmware's delay loops, most device reads, and IRIX's polling
+        // of PI_INT_PEND0 (SMP.adoc "S4.0").
+        if (hub_ != nullptr && width == AccessWidth::bits64) {
+            switch (offset) {
+            case Hub::rt_count_offset:
+                return hub_->rt_count_at(machine_.cpu_time_.time_at(current_->cpu.cycles()));
+            case Hub::int_pend0_offset:
+                return hub_->interrupt_pending(0);
+            case Hub::int_pend1_offset:
+                return hub_->interrupt_pending(1);
+            default:
+                break;
+            }
         }
         return machine_.locked_access([&] { return target_.mmio_read(offset, width); });
     }

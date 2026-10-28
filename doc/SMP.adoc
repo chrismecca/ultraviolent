@@ -444,6 +444,28 @@ S6. **IP31 / R12000** (own plan; processor personality per ADR-022).
     -> 0.64 (2.28x), `reboot4` 0.28 -> 0.60 (2.16x). More than the thread count on `cpu2`
     and `cpu4`: one thread also pays for switching CPUs every slice. Two CPUs now run above
     real time; four do on `cpu4` but not through the PROM (S4.3).
+* **S4.3 (2026-10-28): measured and tuned.** The window (one run each, PGO, `boot2` /
+  `cpu4` / `boot4` host seconds): 1,000: 113.6 / 14.0 / 158.4; 3,000: 103.1 / 11.6 / 154.0;
+  10,000: 101.9 / 10.7 / 157.7; 30,000: 100.9 / 10.3 / 140.8; 100,000: 113.0 / 10.3 /
+  161.7, outputs all equal to reference mode's. Between 3,000 and 30,000 the differences
+  are within run-to-run variation (`boot2` at 10,000 took 86-103 s in S4.2's three runs),
+  so the default stays 10,000. Profile of parallel `boot4` (perf): about a quarter of each
+  thread's time in the kernel, yielding at the window; spinning before yielding gained
+  nothing (56.6 s to the PROM menu before, 58.1 and 61.9 s after) and was dropped. Locked
+  device reads per CPU (a counting build): PI_INT_PEND0 about 18 M per CPU in the PROM
+  phase alone, which S4.3 reads without the lock (above): `boot4` 0.64 -> 0.89x real,
+  `reboot4` 0.60 -> 0.81x (PGO, best of 3, `local/bench/r3600/s43-parallel.json`); two-CPU
+  workloads unchanged (`reboot2` on identical release builds: 0.997 and 0.981x real). Other
+  locked reads: the PCF8584 behind MD_UREG0 (29 M on the CPU talking to the system
+  controller) and the IOC3 UART status in the BaseIO PROM (9 M), both real device timing.
+  What now sets the pace is PI_RT_COUNT itself: the slave CPUs' PROM delay loops read it
+  about 593 M times each before the menu (one read per 15 cycles), and the read, though
+  lock-free, still leaves native code through the operation helper, the device page, and
+  a virtual call. Four CPUs reach the PROM menu in 56.6 s in parallel against 224.3 s on one
+  thread, but at 0.85x real time where one CPU alone runs its PROM at 1.6x. Final, x real
+  one thread -> parallel (speedup): `cpu2` 0.64 -> 1.63 (2.55x), `mix2` 0.69 -> 1.36
+  (1.97x), `boot2` 0.58 -> 0.99 (1.72x), `reboot2` 0.59 -> 0.98 (1.66x), `cpu4` 0.24 ->
+  1.50 (6.25x), `boot4` 0.28 -> 0.89 (3.20x), `reboot4` 0.28 -> 0.81 (2.94x).
 * **Deskside default (2026-10-15, with the user; ADR-021 addendum).** One node in deskside
   n1 (slot ID 3, Crossbow port `0xa`, the BaseIO on 15) is the default; `--module rack`
   keeps the rack layout. Snapshots record the module and node slot (`machine.module`,
@@ -663,7 +685,9 @@ cycles.
   the Hub's base and epoch, which a write changes under the lock (a sequence counter); a
   reader behind the last write sees the written value until its time passes it. Each CPU's
   reads follow its own time, so the PROM's check that the counter advances passes at any
-  window.
+  window. PI_INT_PEND0 and PI_INT_PEND1, which IRIX polls, are read without the lock too
+  (S4.3): atomics written under the lock with release order and read with acquire, so a
+  CPU that sees a level another CPU raised also sees what that CPU wrote before.
 * **Interrupts and resets: a mailbox per CPU.** The machine owns the wiring, so it puts an
   adapter between each Hub output and its CPU. In reference mode it forwards. In parallel
   mode it posts the input levels (or a reset) to the CPU's mailbox and raises the CPU's
