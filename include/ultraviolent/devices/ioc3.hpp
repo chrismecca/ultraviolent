@@ -90,12 +90,21 @@ class Ioc3 final : public pci::Device {
         std::uint32_t srcir{};
         std::uint32_t srtr{};
         std::uint32_t shadow{};
+        // The RX packer: bytes received, not yet in the ring.
+        std::array<std::uint8_t, 4> packer{};
+        std::uint8_t packed{};
+        // Armed (SRCIR_ARM written) and not yet started by a byte.
+        bool timer_armed{};
     };
     [[nodiscard]] std::optional<std::uint32_t> read_serial(std::uint32_t offset);
     bool write_serial(std::uint32_t offset, std::uint32_t value);
     void start_serial(unsigned port);
     void transmit_entry(unsigned port);
     void receive_entry(unsigned port);
+    // Writes the packer to the RX ring as one entry; false when the ring has no room.
+    bool flush_packer(unsigned port);
+    void rx_timer_expired(unsigned port);
+    [[nodiscard]] std::uint32_t rx_entries(unsigned port) const;
     [[nodiscard]] std::uint64_t ring_address(unsigned ring) const;
     [[nodiscard]] std::uint32_t ring_mask() const;
     // SIO_IR with the TX-empty levels.
@@ -114,6 +123,7 @@ class Ioc3 final : public pci::Device {
     std::array<SerialDma, 2> serial_{};
     std::array<EventId, 2> tx_events_;
     std::array<EventId, 2> rx_events_;
+    std::array<EventId, 2> rx_timer_events_;
     std::uint32_t sbbr_h_{};
     std::uint32_t sbbr_l_{};
     std::uint32_t sio_ir_{};

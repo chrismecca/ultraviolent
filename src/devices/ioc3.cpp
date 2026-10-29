@@ -32,8 +32,9 @@ constexpr std::uint32_t uart_a_base = 0x2'0178;
 constexpr std::uint32_t mcr_done = 0x2;
 constexpr std::uint32_t mcr_data = 0x1;
 // SIO_CR (ioc3.h 0x28): bits 22:19 are read-only PCI arbiter status, ARB_DIAG (the current
-// serial DMA request) and ARB_DIAG_IDLE ("0 -> active request"). Serial DMA is not modeled,
-// so the arbiter is always idle (observed: IRIX waits for IDLE after "Setting rbaud").
+// serial DMA request) and ARB_DIAG_IDLE ("0 -> active request"). The model's serial DMA moves
+// whole entries between accesses, so the arbiter reads idle (observed: IRIX waits for IDLE
+// after "Setting rbaud").
 constexpr std::uint32_t sio_cr = 0x28;
 constexpr std::uint32_t sio_cr_arbiter_status = 0x0078'0000;
 constexpr std::uint32_t sio_cr_arb_diag_idle = 0x0040'0000;
@@ -54,8 +55,16 @@ constexpr std::uint32_t sscr_pause_state = 0x4000'0000;
 constexpr std::uint32_t sscr_rx_drain = 0x0800'0000;
 constexpr std::uint32_t sscr_reset = 0x8000'0000;
 constexpr std::uint32_t srcir_arm = 0x8000'0000;
+// SRPIR_BYTE_CNT: bytes in the RX packer.
+constexpr unsigned srpir_byte_count_shift = 24;
+// SSCR_RX_THRESHOLD: RX_HIGH when the ring holds this many entries.
+constexpr std::uint32_t sscr_rx_threshold = 0x1ff;
+// SRTR_CNT, the RX timer's reload value, counted at SRTR_HZ (16 kHz).
+constexpr std::uint32_t srtr_count = 0xfff;
+constexpr VirtualDuration srtr_tick{62'500};
 // SIO_IR bits for port A; port B's are the same shifted left 9.
 constexpr std::uint32_t sio_ir_tx_mt = 0x001;
+constexpr std::uint32_t sio_ir_rx_high = 0x004;
 constexpr std::uint32_t sio_ir_rx_timer = 0x008;
 constexpr std::uint32_t sio_ir_tx_explicit = 0x080;
 constexpr std::uint32_t sio_ir_memerr = 0x100;
@@ -109,6 +118,8 @@ Ioc3::Ioc3(Scheduler& scheduler, Tracer& tracer)
                  scheduler.add_event("ioc3.tx_b", [this] { transmit_entry(1); })},
       rx_events_{scheduler.add_event("ioc3.rx_a", [this] { receive_entry(0); }),
                  scheduler.add_event("ioc3.rx_b", [this] { receive_entry(1); })},
+      rx_timer_events_{scheduler.add_event("ioc3.rx_timer_a", [this] { rx_timer_expired(0); }),
+                       scheduler.add_event("ioc3.rx_timer_b", [this] { rx_timer_expired(1); })},
       ethernet_{scheduler, tracer} {}
 
 // The serial DMA rings (struct ring_buffer): TX A, RX A, TX B, RX B, each one ring size, at
@@ -125,16 +136,28 @@ std::uint32_t Ioc3::ring_mask() const {
 }
 
 // hypothesis: TX_MT is a level, set while a port's TX ring is empty (the driver disables the
-// interrupt once output drains rather than clearing it); the others latch until software
-// writes them to SIO_IR.
+// interrupt once output drains rather than clearing it), and RX_HIGH one while the RX ring
+// holds at least SSCR_RX_THRESHOLD entries; the others latch until software writes them to
+// SIO_IR.
 std::uint32_t Ioc3::sio_ir() const {
     std::uint32_t value = sio_ir_;
     for (unsigned port = 0; port < 2; ++port) {
-        if (serial_[port].stcir == serial_[port].stpir) {
+        const SerialDma& s = serial_[port];
+        if (s.stcir == s.stpir) {
             value |= sio_ir_tx_mt << (port * sio_ir_port_shift);
+        }
+        const std::uint32_t threshold = s.sscr & sscr_rx_threshold;
+        if (threshold != 0 && rx_entries(port) >= threshold) {
+            value |= sio_ir_rx_high << (port * sio_ir_port_shift);
         }
     }
     return value;
+}
+
+// Entries in a port's RX ring that software has not consumed.
+std::uint32_t Ioc3::rx_entries(unsigned port) const {
+    const SerialDma& s = serial_[port];
+    return ((s.srpir - s.srcir) & ring_mask()) / ring_entry;
 }
 
 void Ioc3::update_interrupt() {
@@ -163,7 +186,9 @@ std::optional<std::uint32_t> Ioc3::read_serial(std::uint32_t offset) {
     // moves a whole ring entry in one step (observed: IRIX pauses and waits for it).
     const std::uint32_t sscr =
         (s.sscr & ~sscr_pause_state) | ((s.sscr & sscr_dma_pause) != 0 ? sscr_pause_state : 0);
-    const std::uint32_t registers[] = {sscr, s.stpir, s.stcir, s.srpir, s.srcir, s.srtr, s.shadow};
+    // SRPIR_BYTE_CNT: the bytes in the packer.
+    const std::uint32_t srpir = s.srpir | std::uint32_t{s.packed} << srpir_byte_count_shift;
+    const std::uint32_t registers[] = {sscr, s.stpir, s.stcir, srpir, s.srcir, s.srtr, s.shadow};
     return registers[((offset - port_a_offset) % port_stride) / 4];
 }
 
@@ -183,9 +208,11 @@ bool Ioc3::write_serial(std::uint32_t offset, std::uint32_t value) {
         return true;
     case sbbr_h_offset:
         sbbr_h_ = value;
+        tracer_.log(TraceCategory::ioc3, "serial sbbr_h {:#x}", value);
         return true;
     case sbbr_l_offset:
         sbbr_l_ = value;
+        tracer_.log(TraceCategory::ioc3, "serial sbbr_l {:#x}", value);
         return true;
     default:
         break;
@@ -199,30 +226,47 @@ bool Ioc3::write_serial(std::uint32_t offset, std::uint32_t value) {
     switch (((offset - port_a_offset) % port_stride) / 4) {
     case 0:
         if ((value & sscr_reset) != 0) {
-            // SSCR_RESET: the DMA channels restart with empty rings.
+            // SSCR_RESET: the DMA channels restart with empty rings and an empty packer.
             s.stpir = s.stcir = s.srpir = s.srcir = 0;
+            s.packed = 0;
+            s.timer_armed = false;
+            scheduler_.cancel(rx_timer_events_[port]);
         }
-        // RX_DRAIN completes at once: nothing waits in the model's packer.
         s.sscr = value & ~(sscr_reset | sscr_rx_drain | sscr_pause_state);
+        // RX_DRAIN: the packer goes to the ring now. hypothesis: at once, so the bit never
+        // reads back set (Linux ioc3_serial.c waits for it to clear).
+        if ((value & sscr_rx_drain) != 0) {
+            flush_packer(port);
+        }
         tracer_.log(TraceCategory::ioc3, "serial {} sscr {:#x}", port, value);
         break;
     case 1:
         s.stpir = value & mask;
+        tracer_.log(TraceCategory::ioc3, "serial {} stpir {:#x}", port, value);
         break;
     case 2:
         s.stcir = value & mask;
+        tracer_.log(TraceCategory::ioc3, "serial {} stcir {:#x}", port, value);
         break;
     case 3:
         s.srpir = value & mask;
+        tracer_.log(TraceCategory::ioc3, "serial {} srpir {:#x}", port, value);
         break;
     case 4:
         s.srcir = value & (mask | srcir_arm);
+        // SRCIR_ARM: the RX timer starts at the next byte received (Linux ioc3_serial.c).
+        if ((value & srcir_arm) != 0) {
+            s.timer_armed = true;
+        }
+        tracer_.log(TraceCategory::ioc3, "serial {} srcir {:#x}", port, value);
         break;
     case 5:
         s.srtr = value;
+        tracer_.log(TraceCategory::ioc3, "serial {} srtr {:#x}", port, value);
         break;
     default:
         s.shadow = value;
+        tracer_.log(TraceCategory::ioc3, "serial {} shadow {:#x}", port, value);
         break;
     }
     start_serial(port);
@@ -279,31 +323,68 @@ void Ioc3::transmit_entry(unsigned port) {
     }
 }
 
-// hypothesis: each received byte is written at once as its own RX ring entry (data valid,
-// modem status valid), and raises RX_TIMER; the IOC3's four-byte packer and its timer are not
-// modeled. A full ring (one entry short of the consumer) leaves input waiting.
+// One received byte per character time into the packer. Linux ioc3_serial.c (v2.6.16): bytes
+// "are not drained to memory until either there are 4 bytes available or the rx_timer
+// expires", and the timer "is not started until the first byte is received *after* it is
+// armed". Each byte's status is data valid and modem status valid. A packer that cannot drain
+// (the ring is one entry short of the consumer) leaves input waiting. Measured: with one byte
+// per entry, the PROM's serial_dma diagnostic, which loops 127 TX entries of four bytes back
+// into a 127-entry RX ring, timed out on both ports.
 void Ioc3::receive_entry(unsigned port) {
     SerialDma& s = serial_[port];
     if ((s.sscr & sscr_dma_en) == 0 || (s.sscr & sscr_dma_pause) != 0) {
         return;
     }
     scheduler_.schedule_after(rx_events_[port], character_time);
-    const std::uint32_t next = (s.srpir + ring_entry) & ring_mask();
-    if (next == (s.srcir & ring_mask())) {
+    if (s.packed == s.packer.size() && !flush_packer(port)) {
         return;
     }
     const auto byte = uart(port).take_input();
     if (!byte) {
         return;
     }
+    s.packer[s.packed++] = *byte;
+    if (s.timer_armed && !scheduler_.is_pending(rx_timer_events_[port])) {
+        s.timer_armed = false;
+        scheduler_.schedule_after(
+            rx_timer_events_[port],
+            VirtualDuration{srtr_tick.nanoseconds * std::max(s.srtr & srtr_count, 1u)});
+    }
+    if (s.packed == s.packer.size()) {
+        flush_packer(port);
+    }
+}
+
+bool Ioc3::flush_packer(unsigned port) {
+    SerialDma& s = serial_[port];
+    if (s.packed == 0) {
+        return true;
+    }
+    const std::uint32_t next = (s.srpir + ring_entry) & ring_mask();
+    if (next == (s.srcir & ring_mask())) {
+        return false;
+    }
+    // inferred: byte k at entry byte 3 - k and its status at 7 - k, as the TX side reads them.
     std::array<std::byte, ring_entry> entry{};
-    entry[3] = static_cast<std::byte>(*byte);
-    entry[7] = static_cast<std::byte>(rxsb_data_valid | rxsb_modem_valid);
+    for (unsigned k = 0; k < s.packed; ++k) {
+        entry[3 - k] = static_cast<std::byte>(s.packer[k]);
+        entry[7 - k] = static_cast<std::byte>(rxsb_data_valid | rxsb_modem_valid);
+    }
     if (dma_ == nullptr || !dma_->dma_write(ring_address(2 * port + 1) + s.srpir, entry)) {
         tracer_.log(TraceCategory::ioc3, "serial {} RX DMA failed", port);
-        return;
+        return false;
     }
+    tracer_.log(TraceCategory::ioc3, "serial {} RX entry of {} at {:#x}", port, s.packed, s.srpir);
     s.srpir = next;
+    s.packed = 0;
+    update_interrupt();
+    return true;
+}
+
+// The RX timer ran out: what the packer holds goes to the ring, and RX_TIMER latches.
+void Ioc3::rx_timer_expired(unsigned port) {
+    tracer_.log(TraceCategory::ioc3, "serial {} RX timer", port);
+    flush_packer(port);
     sio_ir_ |= sio_ir_rx_timer << (port * sio_ir_port_shift);
     update_interrupt();
 }
@@ -317,6 +398,9 @@ void Ioc3::pci_reset() {
     sio_ir_ = 0;
     sio_enable_ = 0;
     for (const EventId event : tx_events_) {
+        scheduler_.cancel(event);
+    }
+    for (const EventId event : rx_timer_events_) {
         scheduler_.cancel(event);
     }
     for (const EventId event : rx_events_) {
@@ -463,6 +547,12 @@ void Ioc3::save_state(StateImage& image) const {
         serial.insert(serial.end(), {s.sscr, s.stpir, s.stcir, s.srpir, s.srcir, s.srtr, s.shadow});
     }
     image.put_bytes("ioc3.serial", std::as_bytes(std::span{serial}));
+    std::vector<std::uint8_t> packers;
+    for (const SerialDma& s : serial_) {
+        packers.insert(packers.end(), {s.packed, static_cast<std::uint8_t>(s.timer_armed)});
+        packers.insert(packers.end(), s.packer.begin(), s.packer.end());
+    }
+    image.put_bytes("ioc3.serial_packers", std::as_bytes(std::span{packers}));
     ethernet_.save_state(image);
     image.put("ioc3.gpio_levels", gpio_levels_);
 }
@@ -492,6 +582,25 @@ void Ioc3::load_state(const StateImage& image) {
         for (std::size_t port = 0; port < 2; ++port) {
             const std::size_t b = 4 + 7 * port;
             serial_[port] = {v[b], v[b + 1], v[b + 2], v[b + 3], v[b + 4], v[b + 5], v[b + 6]};
+        }
+    }
+    // Snapshots from before the packer was modeled have it empty and the timer armed: their
+    // guest armed it when it last read input (observed: IRIX writes SRCIR with ARM, then the
+    // consumer pointer without it, so the saved SRCIR does not show it).
+    for (SerialDma& s : serial_) {
+        s.timer_armed = true;
+    }
+    if (const auto bytes = image.get_bytes("ioc3.serial_packers"); bytes && bytes->size() == 12) {
+        for (std::size_t port = 0; port < 2; ++port) {
+            const auto at = [&](std::size_t i) {
+                return std::to_integer<std::uint8_t>((*bytes)[6 * port + i]);
+            };
+            SerialDma& s = serial_[port];
+            s.packed = std::min<std::uint8_t>(at(0), 4);
+            s.timer_armed = at(1) != 0;
+            for (std::size_t k = 0; k < 4; ++k) {
+                s.packer[k] = at(2 + k);
+            }
         }
     }
     ethernet_.load_state(image);

@@ -308,9 +308,8 @@ M7 - Multiuser system (acceptance met, 2026-09-28)
 * M4 - Storage path: acceptance met (2026-09-27). The PROM discovers the SCSI devices, sash
   reads the installation CD, and the kernel image loads without modification.
 
-M3 - Stable PROM environment: met except the IOC3 diagnostics (serial DMA diagnostic,
-Ethernet SSRAM, PHY, MAC NIC) the BASEIO PROM reports; the PROM reaches its System
-Maintenance Menu.
+M3 - Stable PROM environment: met; since 2026-10-29 the diagnostics summary reads "ALL DIAGS
+PASSED", as slate's, and with `AutoLoad=Yes` the PROM starts the system without the menu.
 
 * Done: the system controller's I²C arbitration and NVRAM (module number), the node's slot,
   the Xtalk seam, the Crossbow, the BaseIO Bridge (registers, configuration space, device
@@ -405,10 +404,10 @@ IRIX reports these and carries on:
 * With two nodes: "Error in ust_change: Addressed slave not responding" twice (a system
   controller command, IP27.adoc "Junk bus").
 * "Some CPUs have old firmware. Please update node board flash proms."
-* The PROM's IOC3 diagnostics (serial DMA timeout, Ethernet PHY/SSRAM/NIC). Because the
-  IOC3 fails its diagnostic, a cold boot stops at the System Maintenance Menu (`Option?`)
-  instead of autobooting; `1` starts the system (the demonstration and benchmark scripts
-  answer it).
+* Resolved 2026-10-29: the PROM's IOC3 serial DMA diagnostic passes (the RX packer), and
+  with `AutoLoad=Yes` (`local/state/nvram-installed.bin`) a cold boot starts the system
+  ("Starting up the system... To perform system maintenance instead, press <Esc>"). The
+  benchmark fixture's NVRAM still stops at `Option?`, which its scripts answer.
 * The ESP event manager's profiles fail on first boot ("EMGR: System Error"); not examined.
 * CP0 register 25 (performance counters) is read by IRIX and not modeled (traced under `cpu`).
 * `hinv -mvv` prints two spaces before "rev" where slate prints one. The last 6 bytes of our
@@ -447,13 +446,18 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **IOC3 serial DMA: the PROM diagnostic that fails** ("serial_dma: Timeout on uartA dma",
-  "IOC3 failed diag" in the summary) and stops autoboot at the menu. slate's PROM passes it
-  (OBS-SLATE-0003: no diagnostic output, "ALL DIAGS PASSED"). Observe first what the
-  diagnostic programs and waits for (`--trace ioc3`, the PROM's code), with the public IOC3
-  sources (`local/sources`: ioc3.h, the Linux serial and MFD drivers) for the register
-  meanings; model only what it needs. Gates: the PROM's summary without the IOC3 failure;
-  every digest that changes is explained (the PROM's output changes).
+. **The inventory ID warning.** Every configuration's BASEIO PROM prints "Warning: Inventory
+  table ID value is 0. Check Midplane NIC"; slate's never does (OBS-SLATE-0003). The NICs
+  are on each node's MicroLAN and the module's MODULEID and midplane records exist (S5.2).
+  Observe which NIC or record the BASEIO PROM reads for the ID (`--trace` of its MicroLAN
+  and the midplane NIC reads, the PROM's code) before modeling anything. Not to be
+  confused with "update_klcfg_cpuinfo: Couldn't find my structure.", which appears only
+  with one CPU per node (no slate counterpart: slate has two).
+. **Done: the IOC3 serial DMA diagnostic (2026-10-29, IP27.adoc "IOC3").** The RX packer and
+  RX timer (Linux `ioc3_serial.c`): the PROM's serial_dma diagnostic passes and the summary
+  says "ALL DIAGS PASSED", as slate's. Every digest changed (the PROM no longer waits out
+  two 10 s timeouts; console input now waits in the packer for the RX timer); new tier-1
+  digests in `local/bench/s7/tier1.json`.
 . **S6.2, the IP31 board (waits for slate).** S6.0 and S6.1 are done (2026-10-28, SMP.adoc
   "S6: IP31 / R12000 (plan)", "Progress"): `--cpu r12000` boots four R12000s to a shell with
   slate's hinv processor lines but the clock. S6.2 needs the `ip27conf` block of an IP31
@@ -473,8 +477,7 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   user's agreement the ISP1020 experiment. The user's cold-boot capture of 2026-09-21
   already exists (OBS-SLATE-0003). Unexplained differences
   from slate: the "1A 000:" prefix on n1's early lines, "ust_change: Addressed slave not
-  responding", what elects the global master, and the PROM's serial_dma diagnostic, which
-  fails on the emulator ("IOC3 failed diag") and not on slate.
+  responding", and what elects the global master.
 . **Done: S5 (2026-10-16/17) and the review before S4 (2026-10-26).** S5.2 and S5.3
   (SMP.adoc "Progress"): the link, vector PIO, the Hub over crosstalk, and the node NICs;
   the PROM's discovery as slate's ("2 hubs, 0 routers", global master n2, "4 CPUs on 2
@@ -498,8 +501,6 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   device accesses in `boot` (about 140 host cycles each, spread over four layers); tier 0
   and translation for lukewarm code (`boot` 13% in the engine loop); then dispatch and
   direct links (J6).
-. **Inventory ID**: the NICs are on each node's MicroLAN (S5.2), but the BASEIO PROM still
-  warns "Inventory table ID value is 0. Check Midplane NIC".
 . Before any public announcement, rescan the tree and history for private data
   (`git log --all --format='%ae %ce'`; `git grep` over `git rev-list --all` for home paths,
   the LAN prefix, the host name, and board serials).
@@ -1636,4 +1637,31 @@ Disproven: that S6 needs the personality refactor before an R12000 boots.
 Unknowns: slate's flash block; the R12000's Count rate (hypothesis: as the R10000's).
 Best checkpoint: unchanged.
 Next step: the IOC3 serial DMA diagnostic (Next task); S6.2 when slate is on.
+----
+
+----
+Date: 2026-10-28/29
+Milestone: fidelity: the IOC3 serial DMA diagnostic
+Hypothesis: the PROM's serial_dma diagnostic needs the IOC3's RX packer, which the model
+  replaced with one byte per RX entry.
+Evidence: `--trace ioc3` (with new trace lines for every serial DMA register write) and
+  `--trace bridge` of the diagnostic: resets, SHADOW loopback and MCR LOOP, 1 KB rings,
+  SRTR 0xfff, DMA_EN, STPIR 0x3f8 (127 four-byte entries), then no register reads until a
+  10 s timeout on each port (it polls the ring in memory); Linux ioc3.h (SRPIR_BYTE_CNT,
+  SRTR_HZ, SRCIR_ARM) and ioc3_serial.c (the packer and timer); slate's capture ("ALL
+  DIAGS PASSED"); IRIX's SRCIR/RX_DRAIN pattern traced on a cold boot.
+Changed: Ioc3 RX packer, RX timer events (`ioc3.rx_timer_a/b`), RX_HIGH as a level,
+  SRPIR_BYTE_CNT, RX_DRAIN flushes; snapshots keep the packers (`ioc3.serial_packers`;
+  older ones load with the timer armed); IP27.adoc "IOC3".
+Tests: ioc3.serial_rx_packer; dev and asan green. Eleven workloads complete on tier 1
+  (`local/bench/s7/tier1.json`); tier 0 and the reference interpreter agree on prom, cpu,
+  cpu2. Console text unchanged except the diagnostic's lines and the summary (and, on one
+  thread, the order of reboot4's "CPU n rebooting" lines).
+Newly proven: with the packer the diagnostic passes on both ports; the PROM reaches its menu
+  in 6.50 G cycles instead of 8.20 G.
+Disproven: one RX entry per byte (the old hypothesis).
+Unknowns: RX_HIGH's exact semantics (level or latch); the timer's behavior when re-armed
+  while running.
+Best checkpoint: unchanged (fixtures still load: old snapshots get an empty, armed packer).
+Next step: the inventory ID warning (Next task).
 ----

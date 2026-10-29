@@ -785,28 +785,39 @@ ISPs and `0x0280` for the IOC3 after reset.
   (PC16550D): divisor latch, FIFOs, loopback, LSR/MSR. `hypothesis`: transmission takes no
   time and interrupts are not modeled. UART A is the console (see "Console").
 * MCR (`0x30`) is a MicroLAN master on the Ethernet-address NIC (see "NICs").
-* SIO_CR (`0x28`) bits 22:19 are read-only arbiter status; with serial DMA unmodeled they read
-  ARB_DIAG_IDLE (`observed`: IRIX waits for it after "Setting rbaud to 19200").
+* SIO_CR (`0x28`) bits 22:19 are read-only arbiter status; the model's DMA moves whole
+  entries between accesses, so they read ARB_DIAG_IDLE (`observed`: IRIX waits for it after "Setting rbaud to 19200").
 * Every other register is traced storage (the PROM's register tests pass on storage).
 * Serial DMA (Linux `ioc3.h`, `drivers/serial/ioc3_serial.c` v2.6.16): SBBR_H/L hold the ring
   buffer's PCI address (SBBR_L bit 0: 4 KB rings, else 1 KB), rings TX A, RX A, TX B, RX B;
   each port has SSCR, STPIR, STCIR, SRPIR, SRCIR, SRTR, SHADOW (port A at `0xb8`, B at
   `0xd4`). With SSCR DMA_EN and not PAUSE, the engine sends TX entries (8 bytes: 4 data, 4
   status/control; TXCB_VALID bytes go out, TXCB_INT_WHEN_DONE raises TX_EXPLICIT) from STCIR
-  to STPIR, one entry per character time (`hypothesis`: 9600 baud), and writes each console
-  input byte as its own RX entry (RXSB_DATA_VALID | MODEM_VALID) at SRPIR, raising RX_TIMER
-  (`hypothesis`: the four-byte packer and RX timer are not modeled). `inferred`: entry bytes
-  are in memory order, most significant byte first in each PCI dword through the
-  lane-preserving Bridge. PAUSE reads back PAUSE_STATE at once (`observed`: IRIX pauses the
-  ring and waits for it). SSCR_RESET empties the rings; RX_DRAIN completes at once.
+  to STPIR, one entry per character time (`hypothesis`: 9600 baud). Received bytes, one per
+  character time, collect in a four-byte packer (`ioc3_serial.c`: they "are not drained to
+  memory until either there are 4 bytes available or the rx_timer expires"); a full packer
+  becomes one RX entry at SRPIR (each byte RXSB_DATA_VALID | MODEM_VALID), and SRPIR's
+  SRPIR_BYTE_CNT reads the bytes waiting. The RX timer starts at the first byte after
+  SRCIR_ARM and runs SRTR ticks of 16 kHz (SRTR_HZ); when it runs out the packer drains as a
+  partial entry and RX_TIMER latches. RX_HIGH is a level while the ring holds at least
+  SSCR_RX_THRESHOLD entries (`hypothesis`). RX_DRAIN drains the packer at once.
+  `observed`: the PROM's serial_dma diagnostic loops 127 four-byte TX entries back (SHADOW
+  loopback and MCR LOOP) into a 127-entry RX ring and passes only with the packer: with one
+  byte per entry it timed out on both ports ("Timeout on uartA dma") and the summary
+  reported "IOC3 failed diag", where slate reports "ALL DIAGS PASSED" (OBS-SLATE-0003).
+  `observed`: IRIX writes SRCIR with ARM and then the consumer pointer without it each time
+  it reads, and drains; the model keeps the timer armed until a byte starts it (snapshots
+  from before the packer load with it armed). `inferred`: entry bytes are in memory order,
+  most significant byte first in each PCI dword through the lane-preserving Bridge. PAUSE
+  reads back PAUSE_STATE at once (`observed`: IRIX pauses the ring and waits for it).
+  SSCR_RESET empties the rings and the packer.
 * SIO interrupts: SIO_IR (TX_MT a level while a TX ring is empty, `hypothesis`; other bits
   latch until written back), SIO_IES/SIO_IEC set and clear the enables; any pending enabled
   bit asserts the IOC3's INTB, Bridge pin 4. `observed`: IRIX chooses the pin by board. While
   the BaseIO's NICs carried no manufacturing record, IRIX knew the board only as a generic
   widget and enabled pin 6 (slot ^ 4). With the records it names the board BASEIO and
   enables pin 4, and an IOC3 still on pin 6 left the console without input.
-* Not modeled: the parallel port and keyboard/mouse. The PROM's serial_dma diagnostic still
-  fails ("Timeout on uartA dma").
+* Not modeled: the parallel port and keyboard/mouse.
 * Bytebus device 0 (`0x80000`) is an M48T35 timekeeper (`devices::M48t35`; Linux `ioc3.c`
   ip27_baseio_setup adds an "m48t35"): 32 KB of NVRAM with a BCD clock at `0x7ff8`, device
   byte n at PCI byte n ^ 3 (`observed`: IRIX writes the control byte at PCI `0x87ffb`). The
