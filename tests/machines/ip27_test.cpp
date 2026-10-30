@@ -721,6 +721,42 @@ const test::Registration two_cpu_ipi{
         t.check((machine.cpu(0).mfc0(mips::cp0::cause) & (1u << 10)) == 0, "A does not");
     }};
 
+// A PIO read of an absent crosstalk widget is a bus error for the CPU and a PIO error in its
+// own slice's PI_ERR_STATUS0 (IP27.adoc "PIO errors"): the PROM's own signature read, widget
+// 2 at 0x9200000002400208, made by CPU B. A records nothing.
+const test::Registration pio_error_by_slice{
+    "ip27.two_cpus.pio_error_status", [](test::Context& t) {
+        std::vector<std::uint32_t> words(230, nop());
+        const auto at = [&](std::size_t index, std::initializer_list<std::uint32_t> code) {
+            std::ranges::copy(code, words.begin() + static_cast<std::ptrdiff_t>(index));
+        };
+        // Both: t0 = the Hub's registers, t1 = PI_CPU_NUM; A loops at 7, B goes on at 9.
+        at(0, {lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2),
+               ld(t1, 0x20, t0), bne(t1, zero, 8), nop(), beq(zero, zero, -4), nop()});
+        // B: read widget 2's small window at 0x400208.
+        at(9, {lui(t5, 0x9200), dsll32(t5, t5, 0), lui(t6, 0x0240), ori(t6, t6, 0x208),
+               daddu(t5, t5, t6), ld(t7, 0, t5), beq(zero, zero, -4), nop()});
+        // The BEV general exception vector: loop.
+        at(0x380 / 4, {beq(zero, zero, -4), nop()});
+        std::vector<std::byte> prom(words.size() * 4);
+        for (std::size_t w = 0; w < words.size(); ++w) {
+            store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
+        }
+        Ip27Machine machine{two_cpu_config(), prom};
+        kernel_64(machine);
+        machine.run(2000);
+        t.check_equal(machine.cpu(1).mfc0(mips::cp0::cause) >> 2 & 0x1f, std::uint64_t{7}); // DBE
+        const auto hub = [&](std::uint64_t offset) {
+            return machine.cpu(0)
+                .load(0x9200'0000'0100'0000 + offset, AccessWidth::bits64)
+                .value_or(~std::uint64_t{0});
+        };
+        t.check_equal((hub(0x450) >> 25) & ((std::uint64_t{1} << 37) - 1),
+                      std::uint64_t{0x48'0041});
+        t.check(hub(0x450) >> 63 == 1, "valid");
+        t.check_equal(hub(0x430), std::uint64_t{0});
+    }};
+
 // Host-parallel CPUs (SMP.adoc "S4"): the same guest programs with each CPU on a host thread.
 // Not deterministic, so the checks are the programs' own results.
 const test::Registration parallel_ipi{

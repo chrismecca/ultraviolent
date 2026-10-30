@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <expected>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -348,6 +349,25 @@ class Ip27Machine {
         Hub* hub_;
     };
 
+    // A crosstalk small window as one CPU slice of a node sees it: an access that no widget
+    // answers is a PIO error, which the requesting CPU's own Hub records whichever node the
+    // address reaches (Hub::record_pio_error; IP27.adoc "PIO errors").
+    class PioErrorWindow final : public MmioTarget {
+      public:
+        PioErrorWindow(MmioTarget& target, Hub& requester, unsigned slice, std::uint64_t base)
+            : target_{target}, requester_{requester}, slice_{slice}, base_{base} {}
+        std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
+                                                            AccessWidth width) override;
+        std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth width,
+                                                    std::uint64_t value) override;
+
+      private:
+        MmioTarget& target_;
+        Hub& requester_;
+        unsigned slice_;
+        std::uint64_t base_;
+    };
+
     struct Processor;
     // The wires from a Hub's interrupt outputs to its CPU. The machine owns the wiring: in
     // reference mode they reach the CPU directly; with CPUs on host threads, the levels are
@@ -546,8 +566,16 @@ class Ip27Machine {
         SynchronizedTarget synchronized_hub_b;
         SynchronizedTarget synchronized_flash;
         SynchronizedTarget synchronized_flash_commands;
-        std::array<std::optional<SynchronizedTarget>, xtalk::widget_count> xtalk_windows;
         std::array<std::optional<SynchronizedTarget>, 7> big_windows;
+        // Every node's crosstalk small windows as this node's CPUs see them, by target node and
+        // window base, per slice. Kept once made: an address map's older versions may still
+        // point at them (AddressSpace::set_shared).
+        struct PioWindows {
+            std::array<std::unique_ptr<PioErrorWindow>, 2> windows;
+            std::array<std::unique_ptr<SynchronizedTarget>, 2> synchronized;
+        };
+        std::map<std::pair<unsigned, std::uint64_t>, PioWindows> pio_windows;
+        AddressSpace::Ports pio_ports(Node& node, unsigned widget, std::uint64_t base);
     };
 
     Ip27Config config_;

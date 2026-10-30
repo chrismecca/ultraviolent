@@ -65,6 +65,9 @@ class Hub final {
     // Wires the interrupt outputs for CPU `slice` to the CPU: INT_PEND0 to input 0 (Cause IP2)
     // and INT_PEND1 to input 1 (IP3) (IP27.adoc "Hub interrupts").
     void connect_cpu(unsigned slice, InterruptSink& cpu);
+    // A PIO by the CPU in `slice` of this node that no crosstalk widget answered, at physical
+    // `address`: PI_ERR_STATUS0 of that slice records it (IP27.adoc "PIO errors").
+    void record_pio_error(unsigned slice, std::uint64_t address, bool write);
     // PI_RT_COUNT's offset in the Hub's register window.
     static constexpr std::uint64_t rt_count_offset = 0x03'0100;
     // Host threads, without the device lock (SMP.adoc "S4"): PI_RT_COUNT at `time`, the
@@ -227,6 +230,8 @@ class Hub final {
     std::array<std::uint64_t, stored_register_count> stored_{};
     std::array<std::uint64_t, 2> cpu_enable_{};
     std::array<std::uint64_t, 2> err_stack_addr_{};
+    // PI_ERR_STATUS0_A/B.
+    std::array<std::uint64_t, 2> err_status0_{};
     std::array<std::uint64_t, 2> leds_{};
     std::uint64_t ilcsr_{};
     std::uint64_t memory_config_{};

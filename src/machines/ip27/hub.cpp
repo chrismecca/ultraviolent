@@ -436,6 +436,7 @@ Hub::Hub(Scheduler& scheduler, Tracer& tracer, unsigned revision, unsigned slot_
     reset(ResetKind::power_on);
     // Nothing survives power-on.
     err_stack_addr_ = {};
+    err_status0_ = {};
 }
 
 std::uint64_t Hub::rt_count() const {
@@ -508,6 +509,29 @@ void Hub::schedule_comparators() {
         tracer_.log(TraceCategory::irq, "{}hub comparator {} at count {:#x} (now {:#x})", trace_name_, i, compare,
                     count);
     }
+}
+
+// PI_ERR_STATUS0 (LINUX sn0/hubpi.h): VALID (63), ADDR (61:25, address bits 39:3), and the
+// error type (2:0), here PI_ERR_RD_PRERR or PI_ERR_WR_PWERR (a PIO read or write error).
+// hypothesis: CMD, SUPPL, and the T5 request number read zero. Not modeled: OVERRUN and the
+// error stack in memory a second error spools to; the model keeps the first error (observed:
+// with OVERRUN set and no stack, IRIX panics "Invalid RRB in error stack"). observed: the PROM clears ERR_STATUS0 and reads an absent
+// widget's small window (`0x9200000002400208`, widget 2), and IRIX deems the CPU's firmware
+// current only if ERR_STATUS0 records exactly that address ("Some CPUs have old firmware"
+// otherwise; slate's IRIX does not print it).
+void Hub::record_pio_error(unsigned slice, std::uint64_t address, bool write) {
+    constexpr std::uint64_t valid = std::uint64_t{1} << 63;
+    constexpr std::uint64_t address_field = (std::uint64_t{1} << 37) - 1;
+    constexpr std::uint64_t pio_read_error = 1;  // PI_ERR_RD_PRERR
+    constexpr std::uint64_t pio_write_error = 1; // PI_ERR_WR_PWERR
+    std::uint64_t& status = err_status0_[slice];
+    if ((status & valid) != 0) {
+        return;
+    }
+    status = valid | ((address >> 3) & address_field) << 25 |
+             (write ? pio_write_error : pio_read_error);
+    tracer_.log(TraceCategory::hub, "{}PIO error at {:#x}: ERR_STATUS0_{} {:#x}", trace_name_,
+                address, slice == 0 ? 'A' : 'B', status);
 }
 
 void Hub::comparator_matched(unsigned comparator) {
@@ -785,6 +809,7 @@ void Hub::save_state(StateImage& image) const {
     }
     image.put("hub.cpu_enable", cpu_enable_);
     image.put("hub.err_stack_addr", err_stack_addr_);
+    image.put("hub.err_status0", err_status0_);
     image.put("hub.leds", leds_);
     image.put("hub.ilcsr", ilcsr_);
     image.put("hub.memory_config", memory_config_);
@@ -811,6 +836,7 @@ void Hub::load_state(const StateImage& image) {
     }
     image.get("hub.cpu_enable", cpu_enable_);
     image.get("hub.err_stack_addr", err_stack_addr_);
+    image.get("hub.err_status0", err_status0_);
     image.get("hub.leds", leds_);
     image.get("hub.ilcsr", ilcsr_);
     image.get("hub.memory_config", memory_config_);
@@ -1066,8 +1092,17 @@ std::expected<std::uint64_t, AccessFault> Hub::read(unsigned slice, std::uint64_
         }
         default:
             if (offset >= pi_err_status_first && offset <= pi_err_status_last && offset % 8 == 0) {
-                // ERR_STATUS0/1_A/B and their clear-on-read forms: no errors recorded.
-                return 0;
+                // ERR_STATUS0_A/B hold what record_pio_write_error recorded, and their
+                // clear-on-read forms clear it; ERR_STATUS1: nothing recorded.
+                const std::uint64_t index = (offset - pi_err_status_first) / 8;
+                if (index % 4 >= 2) {
+                    return 0;
+                }
+                const std::uint64_t status = err_status0_[index / 4];
+                if (index % 2 != 0) {
+                    err_status0_[index / 4] = 0;
+                }
+                return status;
             }
             if (offset >= ni_routing_first && offset <= ni_routing_last && offset % 8 == 0) {
                 return routing_tables_[(offset - ni_routing_first) / 8];
@@ -1237,8 +1272,12 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
             return {};
         default:
             if (offset >= pi_err_status_first && offset <= pi_err_status_last && offset % 8 == 0) {
-                // hypothesis: writes to the error status registers clear them; they hold
-                // nothing.
+                // A write to any of a slice's four status addresses clears its error.
+                // observed: the PROM writes zero to ERR_STATUS0_A_RCLR before provoking its
+                // own; IRIX, after reading ERR_STATUS0 for the firmware check and after each
+                // address probe, writes zero to ERR_STATUS1_A/B_RCLR. hypothesis: the pair
+                // (status 0 and 1) is one error, cleared together.
+                err_status0_[(offset - pi_err_status_first) / 32] = 0;
                 return {};
             }
             if (offset >= ni_routing_first && offset <= ni_routing_last && offset % 8 == 0) {

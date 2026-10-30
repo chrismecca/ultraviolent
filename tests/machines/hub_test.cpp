@@ -280,6 +280,27 @@ const test::Registration error_block{
         t.check_equal(b.read(0x608000), std::uint64_t{7});
     }};
 
+// PI_ERR_STATUS0 records a PIO error (IP27.adoc "PIO errors"): valid, address bits 39:3 at
+// 61:25, the PIO read or write error type; the first error stays; a write to any of the
+// slice's status addresses clears it, and so does a read of ERR_STATUS0's clear-on-read form.
+const test::Registration pio_errors{
+    "ip27.hub.pio_error_status", [](test::Context& t) {
+        Bench b;
+        b.hub.record_pio_error(0, 0xa00'0000'0240'0208, false);
+        t.check_equal(b.read(0x430), std::uint64_t{0x8000'9000'8200'0001});
+        t.check_equal((b.read(0x430) >> 25) & ((std::uint64_t{1} << 37) - 1),
+                      std::uint64_t{0x48'0041}); // the PROM's signature address
+        t.check_equal(b.read(0x450), std::uint64_t{0});  // slice B: nothing
+        t.check_equal(b.read(0x440), std::uint64_t{0});  // ERR_STATUS1: nothing recorded
+        b.hub.record_pio_error(0, 0x2000, true);           // the first error stays
+        t.check_equal(b.read(0x430), std::uint64_t{0x8000'9000'8200'0001});
+        t.check(b.write(0x448, 0)); // IRIX clears with ERR_STATUS1_A_RCLR
+        t.check_equal(b.read(0x430), std::uint64_t{0});
+        b.hub.record_pio_error(1, 0x2000, true);
+        t.check_equal(b.read(0x458), std::uint64_t{0x8000'0008'0000'0001}); // clear on read
+        t.check_equal(b.read(0x450), std::uint64_t{0});
+    }};
+
 const test::Registration dimm_init{
     "ip27.hub.md_dimm_init", [](test::Context& t) {
         Bench b;

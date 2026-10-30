@@ -1047,6 +1047,34 @@ read or write-1 slot, longer a write-0 slot, 0 a wait.
   both Hubs of a two-node machine the BaseIO's NIC as their identity), and two-node
   discovery still elects n2, as slate does.
 
+=== PIO errors
+
+A CPU access to a crosstalk small window that no widget answers (an absent widget; a
+Bridge master abort) is a bus error for a read and a PIO error the requesting CPU's own Hub
+records in PI_ERR_STATUS0 of its slice (LINUX sn0/hubpi.h): VALID (63), the address bits
+39:3 at 61:25, and the error type, PI_ERR_RD_PRERR or PI_ERR_WR_PWERR (`hypothesis` for the
+type; CMD, SUPPL, and the T5 request number read zero). The requester, not the node the
+address reaches, records it: the machine maps each node's view of every node's small
+windows per CPU slice (`Ip27Machine::PioErrorWindow`).
+
+* `observed` (disassembly of the PROM and of IRIX, 2026-10-30): the PROM clears ERR_STATUS0
+  (a write to ERR_STATUS0_A_RCLR) and reads `0x9200000002400208`, widget 2's small window,
+  which no widget answers; a boot-time IRIX check then deems a CPU's firmware current
+  only if its ERR_STATUS0 is valid with address field `0x480041` (that address), and
+  prints "Some CPUs have old firmware. Please update node board flash proms." otherwise.
+  slate's IRIX does not print it (OBS-SLATE-0003).
+* `observed`: right after that check IRIX writes PI_ERR_INT_PEND and zero to
+  ERR_STATUS1_A/B_RCLR, and after each address probe (`_badaddr_val`, the BaseIO Bridge's
+  PCI configuration space slot by slot) it reads ERR_STATUS0 and 1 and writes
+  ERR_STATUS1_A_RCLR. So a write to any of a slice's status addresses clears the slice's
+  error (`hypothesis`: status 0 and 1 are one error); a read of ERR_STATUS0's clear-on-read
+  form clears it too. Measured: without IRIX's clear, its probe handler blamed the PROM's
+  signature for the next probe's bus error and panicked ("Partial read error").
+* Not modeled: OVERRUN and the PI error stack in memory that a second error spools to; the
+  first error stays until cleared (with OVERRUN set and no stack, IRIX panicked "Invalid RRB
+  in error stack"); PI_ERR_INT_PEND bits for these errors; ERR_STATUS1; errors through the
+  big windows.
+
 === Hardware inventory
 
 The BASEIO PROM keeps a hardware inventory in the BaseIO NVRAM ("Checking hardware

@@ -446,10 +446,21 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **"WARNING: Some CPUs have old firmware. Please update node board flash proms."** IRIX
-  prints it on every emulator boot and never on slate (OBS-SLATE-0003), whose PROMs are
-  the same 6.156. Observe what IRIX compares (the message's call site in slate's `/unix`,
-  names only, and the klconfig or flash fields it reads) before modeling anything.
+. **Blocked on evidence: "Error in ust_change: Addressed slave not responding"** (twice,
+  two-node boots only; never on slate, OBS-SLATE-0003). Already observed (IP27.adoc "System
+  controller"): the PROM reads one byte at the controller's command address `0x20`, flips
+  bits 6 and 7, and writes it back; the model's controller does not answer there. What the
+  real controller returns is unknown (no public ELSC command-protocol source is on hand;
+  a guessed PCF8574-style port was tried and withdrawn). Needs the protocol (the Linux
+  history tree's `ksys/elsc.h`) or a read of slate's controller.
+. **Not started: the other node's console output.** slate's capture interleaves the
+  non-console node's PROM lines, prefixed "1A 000:"; the emulator's second node prints
+  nothing. Observe where that node's PROM writes its console output before modeling.
+. **Done: "Some CPUs have old firmware" (2026-10-30, IP27.adoc "PIO errors").** The PROM
+  reads an absent widget's small window so that the Hub records a PIO error in the CPU's
+  PI_ERR_STATUS0, and IRIX deems the firmware current only if that record is there. The
+  Hub now records PIO errors per requesting slice and clears them on a status write, as
+  IRIX's own clears show; the warning is gone and the console is otherwise unchanged.
 . **Done: the inventory ID warning (2026-10-29, IP27.adoc "Hardware inventory").** No model
   change: the BASEIO PROM takes the inventory ID from the MODULEID NIC's laser serial and
   warns only when the NVRAM's stored ID is 0, which the benchmark fixture's NVRAM (from
@@ -1694,4 +1705,27 @@ Disproven: that the midplane or module NIC was missing or unreadable.
 Unknowns: none for this item.
 Best checkpoint: the fixture with settled NVRAM.
 Next step: the "old firmware" warning (Next task).
+----
+
+----
+Date: 2026-10-30
+Milestone: fidelity: "Some CPUs have old firmware"
+Hypothesis: IRIX compares a PROM version with something the emulator presents differently.
+Evidence: a run stopped at the message with a snapshot; the stack (cmn_err from an unnamed
+  boot-time function, kname.py names via slate's `/unix`); its per-CPU check reads the CPU's
+  PI_ERR_STATUS0 and wants VALID with address field 0x480041; LINUX hubpi.h for the
+  fields; the PROM's constant pool and code (it clears ERR_STATUS0 and reads widget 2 at
+  0x9200000002400208); `--trace xbow` (91 reads of widget 2, rejected); a temporary trace of
+  IRIX's error register accesses (clears through ERR_STATUS1_A/B_RCLR and PI_ERR_INT_PEND);
+  `--probe` of `_badaddr_val` (BaseIO Bridge configuration probes).
+Changed: Hub PI_ERR_STATUS0_A/B (record_pio_error, clear on any status write, clear on the
+  clear-on-read read; snapshots `hub.err_status0`); Ip27Machine::PioErrorWindow and per-slice
+  small-window ports (`Node::pio_ports`) replace `xtalk_windows`; IP27.adoc "PIO errors".
+Tests: ip27.hub.pio_error_status, ip27.two_cpus.pio_error_status; dev and asan green.
+Newly proven: the PROM leaves a deliberate PIO error as IRIX's firmware signature; IRIX
+  clears error status through ERR_STATUS1_*_RCLR.
+Disproven: a version comparison (the PROM version is not involved).
+Unknowns: the exact error type on hardware; OVERRUN and the error stack.
+Best checkpoint: unchanged.
+Next step: Next task (the ust_change errors need evidence first).
 ----

@@ -287,11 +287,6 @@ Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
         cpu_b->cpu.set_reset_rendezvous(&reset_rendezvous);
         reset_rendezvous.add(cpu_b->cpu);
     }
-    for (unsigned widget = 0; widget < xtalk::widget_count; ++widget) {
-        if (widget != hub_widget) {
-            xtalk_windows[widget].emplace(owner, hub.io_window(widget));
-        }
-    }
     for (unsigned window = 0; window < big_window_count; ++window) {
         big_windows[window].emplace(owner, hub.big_window(window + 1));
     }
@@ -527,10 +522,10 @@ void Ip27Machine::Node::map_resources(Node& node, std::uint64_t base) {
         if (widget == hub_widget) {
             continue;
         }
-        must_map(bus.map_mmio({PhysicalAddress{uncached_window(io_attribute) + base +
-                                               (std::uint64_t{widget} << small_window_shift)},
-                               xtalk::small_window_size},
-                              *node.xtalk_windows[widget]),
+        const std::uint64_t window =
+            uncached_window(io_attribute) + base + (std::uint64_t{widget} << small_window_shift);
+        must_map(bus.map_ports({PhysicalAddress{window}, xtalk::small_window_size},
+                               pio_ports(node, widget, window)),
                  "crosstalk window");
     }
     // IO: the big windows (M mode: seven of 512 MB from IO + 512 MB, LINUX sn0/addrs.h
@@ -544,6 +539,39 @@ void Ip27Machine::Node::map_resources(Node& node, std::uint64_t base) {
                               *node.big_windows[window]),
                  "crosstalk big window");
     }
+}
+
+AddressSpace::Ports Ip27Machine::Node::pio_ports(Node& node, unsigned widget,
+                                                 std::uint64_t base) {
+    PioWindows& entry = pio_windows[{node.index, base}];
+    if (entry.windows[0] == nullptr) {
+        for (unsigned slice = 0; slice < 2; ++slice) {
+            entry.windows[slice] =
+                std::make_unique<PioErrorWindow>(node.hub.io_window(widget), hub, slice, base);
+            entry.synchronized[slice] =
+                std::make_unique<SynchronizedTarget>(machine, *entry.windows[slice]);
+        }
+    }
+    return {entry.synchronized[0].get(), entry.synchronized[1].get()};
+}
+
+std::expected<std::uint64_t, AccessFault>
+Ip27Machine::PioErrorWindow::mmio_read(std::uint64_t offset, AccessWidth width) {
+    auto result = target_.mmio_read(offset, width);
+    if (!result) {
+        requester_.record_pio_error(slice_, base_ + offset, false);
+    }
+    return result;
+}
+
+std::expected<void, AccessFault>
+Ip27Machine::PioErrorWindow::mmio_write(std::uint64_t offset, AccessWidth width,
+                                        std::uint64_t value) {
+    auto result = target_.mmio_write(offset, width, value);
+    if (!result) {
+        requester_.record_pio_error(slice_, base_ + offset, true);
+    }
+    return result;
 }
 
 std::expected<std::uint64_t, AccessFault>
