@@ -453,9 +453,13 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   real controller returns is unknown (no public ELSC command-protocol source is on hand;
   a guessed PCF8574-style port was tried and withdrawn). Needs the protocol (the Linux
   history tree's `ksys/elsc.h`) or a read of slate's controller.
-. **Not started: the other node's console output.** slate's capture interleaves the
-  non-console node's PROM lines, prefixed "1A 000:"; the emulator's second node prints
-  nothing. Observe where that node's PROM writes its console output before modeling.
+. **Observed, not modeled: the other node's console output.** slate's capture interleaves
+  the non-master node's PROM lines, prefixed "1A 000:" (the PROM's format `%d%C %03d: `);
+  the emulator's second node prints nothing. Observed 2026-10-30 (a temporary trace of
+  BaseIO UART writes by requesting Hub and slice, four CPUs): only one Hub's slice A writes
+  the console UART, although both nodes' PROMs progress alike (LEDs). So the second node's
+  PROM decides not to print; what it reads to decide is the next thing to find (its
+  console selection code).
 . **Done: "Some CPUs have old firmware" (2026-10-30, IP27.adoc "PIO errors").** The PROM
   reads an absent widget's small window so that the Hub records a PIO error in the CPU's
   PI_ERR_STATUS0, and IRIX deems the firmware current only if that record is there. The
