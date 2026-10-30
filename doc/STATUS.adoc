@@ -1721,7 +1721,10 @@ Evidence: a run stopped at the message with a snapshot; the stack (cmn_err from 
 Changed: Hub PI_ERR_STATUS0_A/B (record_pio_error, clear on any status write, clear on the
   clear-on-read read; snapshots `hub.err_status0`); Ip27Machine::PioErrorWindow and per-slice
   small-window ports (`Node::pio_ports`) replace `xtalk_windows`; IP27.adoc "PIO errors".
-Tests: ip27.hub.pio_error_status, ip27.two_cpus.pio_error_status; dev and asan green.
+Tests: ip27.hub.pio_error_status, ip27.two_cpus.pio_error_status; dev and asan green;
+  prom and boot digests equal on tier 1, tier 0, and the reference interpreter. Baselines
+  (PGO, best of 3): `local/bench/r3600/v-tier1.json` (M cycles/s: prom 350.9, boot 233.9,
+  boot2 237.6, reboot2 228.2, boot4 220.8, reboot4 214.1; the others as u-tier1.json).
 Newly proven: the PROM leaves a deliberate PIO error as IRIX's firmware signature; IRIX
   clears error status through ERR_STATUS1_*_RCLR.
 Disproven: a version comparison (the PROM version is not involved).
