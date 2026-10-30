@@ -226,6 +226,12 @@ scripts/bench.py run --repeat 2 boot2 cpu2 mix2 reboot2
 scripts/bench.py run --cpu-slice 1 --output local/runs/slice1 cpu2 mix2
 ----
 
+Cold boots start from NVRAM already settled in their own configuration: `fixture` boots each
+configuration once to the PROM menu, runs the Command Monitor's `update`, and keeps the NVRAM
+(`nvram.bin`, `nvram2.bin`, `nvram4.bin`), so the BASEIO PROM finds its hardware inventory
+as on a long-installed system (IP27.adoc "Hardware inventory"). `fixture --nvram-only --cpus N` redoes only that step;
+without the settled file, a cold boot uses `nvram.bin`.
+
 Four-CPU workloads (two nodes of two, `--nodes 2 --cpus 2`, SMP.adoc "S5") run the same
 way: `boot4`, `cpu4` (four awk loops at once, started by a shell loop: four copies written
 out exceed IRIX's terminal line), and `reboot4`, from a four-CPU shell snapshot

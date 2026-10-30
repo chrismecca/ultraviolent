@@ -116,6 +116,12 @@ def fixture_paths(work, cpus=1):
     paths = {name: os.path.join(fixture, name) for name in ("disk.img", "nvram.bin", "flash.bin")}
     for name in ("disk.img", "nvram.bin", "flash.bin"):
         paths["shell-" + name] = os.path.join(fixture, f"{shell}-{name}")
+    # The PROM environment and hardware inventory a cold boot starts from, settled for this
+    # many CPUs (settle_nvram); fixtures from before 2026-10-29 have only the one-CPU file.
+    paths["boot-nvram.bin"] = paths["nvram.bin"] if cpus == 1 else os.path.join(
+        fixture, f"nvram{cpus}.bin")
+    if not os.path.exists(paths["boot-nvram.bin"]):
+        paths["boot-nvram.bin"] = paths["nvram.bin"]
     # The second node's flash PROM: the fixture's to boot, its own in a snapshot.
     paths["flash1.bin"] = paths["flash.bin"]
     paths["shell-flash1.bin"] = os.path.join(fixture, f"{shell}-flash1.bin")
@@ -160,19 +166,50 @@ def base_command(args, scratch, cpus=1):
                 if args.tier1_threshold is not None else [])
 
 
+def settle_nvram(args, paths):
+    # One power-on to the PROM menu in this configuration, and `update`: the BASEIO PROM records the
+    # hardware inventory and its ID (the MODULEID NIC's laser serial) in NVRAM. Without it,
+    # every cold boot repeats a first boot's "Inventory table ID value is 0" and inventory
+    # rewrite, or another configuration's new-board warnings (measured 2026-10-29; slate,
+    # long installed, prints neither).
+    scratch = os.path.join(args.work, "scratch")
+    shutil.rmtree(scratch, ignore_errors=True)
+    os.makedirs(scratch)
+    for name in ["nvram.bin"] + flash_files(args.cpus):
+        copy(paths[name], os.path.join(scratch, name))
+    # The Command Monitor's `update` records new boards and components, which the PROM only
+    # reports ("Please use the 'update' command"), as slate's capture shows.
+    command = base_command(args, scratch, args.cpus) + ["--cycles", CAP]
+    for line in ["@expect Option?", "5", "@expect >>", "update", "@expect >>", "@stop"]:
+        command += ["--console", line]
+    result = subprocess.run(command, capture_output=True)
+    if b"Updated new configuration" not in result.stdout:
+        sys.stdout.buffer.write(result.stdout[-2000:] + result.stderr[-2000:])
+        sys.exit("fixture: the inventory update failed")
+    destination = paths["nvram.bin"] if args.cpus == 1 else os.path.join(
+        os.path.dirname(paths["nvram.bin"]), f"nvram{args.cpus}.bin")
+    copy(os.path.join(scratch, "nvram.bin"), destination)
+    print(f"settled {destination}")
+
+
 def make_fixture(args):
     paths = fixture_paths(args.work, args.cpus)
-    if args.cpus == 1:
+    if args.cpus == 1 and not args.nvram_only:
         os.makedirs(os.path.dirname(paths["disk.img"]), exist_ok=True)
         for name in ("disk.img", "nvram.bin", "flash.bin"):
             copy(os.path.join(args.source, name), paths[name])
     elif not os.path.exists(paths["disk.img"]):
         sys.exit(f"fixture --cpus {args.cpus}: make the one-CPU fixture first")
+    settle_nvram(args, paths)
+    if args.nvram_only:
+        return
+    paths = fixture_paths(args.work, args.cpus)
     # The shell snapshot: boot a copy of the disk, log in as root, stop at the prompt.
     scratch = os.path.join(args.work, "scratch")
     os.makedirs(scratch, exist_ok=True)
-    for name in ["disk.img", "nvram.bin"] + flash_files(args.cpus):
+    for name in ["disk.img"] + flash_files(args.cpus):
         copy(paths[name], os.path.join(scratch, name))
+    copy(paths["boot-nvram.bin"], os.path.join(scratch, "nvram.bin"))
     console = LOGIN + ["root", "@expect TERM", "vt100", "@expect # ", "@stop"]
     command = base_command(args, scratch, args.cpus) + ["--disk", os.path.join(scratch, "disk.img"),
                                              "--save-state", paths["shell.uvstate"],
@@ -199,8 +236,10 @@ def run_once(args, name, workload):
     shutil.rmtree(scratch, ignore_errors=True)
     os.makedirs(scratch)
     prefix = "shell-" if workload.get("snapshot") else ""
-    for state in ["nvram.bin"] + flash_files(cpus):
+    for state in flash_files(cpus):
         copy(paths[prefix + state], os.path.join(scratch, state))
+    copy(paths["shell-nvram.bin" if prefix else "boot-nvram.bin"],
+         os.path.join(scratch, "nvram.bin"))
     command = base_command(args, scratch, cpus)
     if workload.get("snapshot"):
         copy(paths["shell-disk.img"], os.path.join(scratch, "disk.img"))
@@ -387,6 +426,8 @@ def main():
                                   help="build the fixture from an installed system")
     fixture.add_argument("--from", dest="source", default="local/rc",
                          help="directory with disk.img, nvram.bin, flash.bin after a clean shutdown")
+    fixture.add_argument("--nvram-only", action="store_true",
+                         help="only settle the cold boots' NVRAM, keeping the snapshots")
     fixture.add_argument("--cpus", type=int, choices=[1, 2, 4], default=1,
                          help="2 or 4: only that shell snapshot, from the existing fixture")
     bench = commands.add_parser("run", parents=[common], help="run workloads")

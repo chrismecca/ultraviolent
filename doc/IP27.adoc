@@ -1047,6 +1047,27 @@ read or write-1 slot, longer a write-0 slot, 0 a wait.
   both Hubs of a two-node machine the BaseIO's NIC as their identity), and two-node
   discovery still elects n2, as slate does.
 
+=== Hardware inventory
+
+The BASEIO PROM keeps a hardware inventory in the BaseIO NVRAM ("Checking hardware
+inventory"), observed from its code (disassembly of the running BASEIO PROM, 2026-10-29):
+
+* A 24-byte header at NVRAM offset `0x14bf` (5311), behind a validity byte `0x4a` at `0x4bd`
+  (1213); bytes 8-15 of the header are the table's ID.
+* The ID is the MODULEID NIC's laser serial: the PROM walks klconfig for the IP27 board,
+  takes its Hub's manufacturing NIC text, finds "MODULEID" (else "MPLN", the midplane) and
+  parses the hex after the next "Laser:". On an SN00 (the flash block's `mach_type`, offset
+  `0x90` of `ip27config_t`, LINUX `sn0/ip27config.h`, is 1) the ID is 1.
+* A header whose ID is 0 on an SN0 (`mach_type` 0) prints "Warning: Inventory table ID
+  value is 0. Check Midplane NIC" and is rewritten with the ID ("Writing N records..
+  DONE", "Updated new configuration"). So the warning appears once, on the first boot
+  after the NVRAM was created without a MODULEID NIC (as the fixtures' were, before S5.2):
+  `observed`, the next boot with the same NVRAM is clean. A different configuration
+  reports its new boards and components instead ("Found new or re-enabled component CPU
+  B", "Found a new IP27 board in module 1, slot n2") and asks for the Command Monitor's
+  `update`, which writes the records (`observed`; slate's capture shows the same request
+  for its graphics and MENET boards).
+
 === Console
 
 The guest console is the IOC3's UART A. `backends::ScriptedConsole` writes its output to
