@@ -458,8 +458,11 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   the emulator's second node prints nothing. Observed 2026-10-30 (a temporary trace of
   BaseIO UART writes by requesting Hub and slice, four CPUs): only one Hub's slice A writes
   the console UART, although both nodes' PROMs progress alike (LEDs). So the second node's
-  PROM decides not to print; what it reads to decide is the next thing to find (its
-  console selection code).
+  PROM's output does not reach the console. In the PROM (image offsets): the prefix path
+  at `0x39d0c` prints `%d%C %03d: ` through the same printf (`0xfc57844`) when the CPU's
+  value from `0xfc58b30(0)` differs from a global plus 240 (`0x39840`); `--trace xtalk`
+  shows no big-window writes and the UART trace no small-window writes from the second
+  node. Next: where that node's printf sends its output (its console device selection).
 . **Done: "Some CPUs have old firmware" (2026-10-30, IP27.adoc "PIO errors").** The PROM
   reads an absent widget's small window so that the Hub records a PIO error in the CPU's
   PI_ERR_STATUS0, and IRIX deems the firmware current only if that record is there. The
