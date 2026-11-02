@@ -347,6 +347,19 @@ class Ip27Machine {
         Ip27Machine& machine_;
         MmioTarget& target_;
         Hub* hub_;
+        // One CPU's PI_RT_COUNT reads (JIT.adoc "Device time"): the count, remembered for the
+        // cycles before it changes, while the counter's base and epoch and device time are
+        // those it was computed from. Reads at those cycles return the same count; the
+        // delay loops read many times per tick.
+        struct RtReads {
+            std::uint64_t from{1};
+            std::uint64_t until{0};
+            std::uint64_t base{};
+            std::uint64_t epoch{};
+            VirtualTime now{};
+            std::uint64_t count{};
+        };
+        RtReads rt_reads_;
     };
 
     // A crosstalk small window as one CPU slice of a node sees it: an access that no widget

@@ -997,8 +997,24 @@ Ip27Machine::SynchronizedTarget::mmio_read(std::uint64_t offset, AccessWidth wid
     // this is (JIT.adoc "Device time").
     if (hub_ != nullptr && offset == Hub::rt_count_offset && width == AccessWidth::bits64 &&
         machine_.cpu_count() == 1) {
-        return hub_->rt_count_at(
-            std::max(machine_.cpu_time_.time_at(machine_.lowest_cycles()), machine_.scheduler_.now()));
+        const std::uint64_t cycles = machine_.lowest_cycles();
+        const auto [base, epoch] = hub_->rt_origin();
+        const VirtualTime now = machine_.scheduler_.now();
+        RtReads& r = rt_reads_;
+        if (cycles >= r.from && cycles < r.until && base == r.base && epoch == r.epoch &&
+            now == r.now) {
+            return r.count;
+        }
+        const Hub::RtWindow window =
+            hub_->rt_window(std::max(machine_.cpu_time_.time_at(cycles), now));
+        // The first cycle whose time is at or after the change (as update_next_event).
+        std::uint64_t until = cycles_at(window.until, machine_.config_.cpu_clock);
+        if (machine_.cpu_time_.time_at(until) < window.until) {
+            ++until;
+        }
+        r = {.from = cycles, .until = until, .base = base, .epoch = epoch, .now = now,
+             .count = window.count};
+        return window.count;
     }
     ++machine_.synchronized_accesses_;
     machine_.synchronize_time();

@@ -355,6 +355,15 @@ the time conversion itself (`CycleTime::time_at` and `cycles_at`, dependent mult
 a tenth of `prom`), the helper path of the load (`operation_helper`, the load's builder,
 `load_slow`, `device_read`), and the checks after it.
 
+The conversion is now remembered: `Hub::rt_window` gives the count at a time and the time of
+the next tick (or of the first after the last write's epoch), and the synchronized target
+keeps the count for the cycles before that tick, keyed on the counter's base and epoch
+(`Hub::rt_origin`) and device time. It is a memo of a pure function whose every input is in
+the key, so a read in the window returns what the conversion would. Test
+`ip27.rt_count_back_to_back` (400 reads a few cycles apart, a write halfway; a window 1,000
+cycles too long fails it). Three runs, release, M cycles/s: `boot` 238.2 to 249.5, `prom`
+374.8 and 373.2 (unchanged: its reads are further apart).
+
 == FPU
 
 FPU operations are one decoded opcode (`cop1`) executed by `FpuExecutor` (fpu.cpp), whose

@@ -75,6 +75,18 @@ class Hub final {
     [[nodiscard]] std::uint64_t rt_count_at(VirtualTime time) const;
     // PI_RT_COUNT at device time: what a read returns, which the machine may take directly.
     [[nodiscard]] std::uint64_t rt_count() const;
+    // PI_RT_COUNT at `time`, and the first time after it when the count changes (the next
+    // RTC tick, or the first after the epoch of the last write). With the base and epoch
+    // (rt_origin) unchanged, a read at any time in between returns the same count.
+    struct RtWindow {
+        std::uint64_t count;
+        VirtualTime until;
+    };
+    [[nodiscard]] RtWindow rt_window(VirtualTime time) const;
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> rt_origin() const {
+        return {rt_base_.load(std::memory_order_relaxed),
+                rt_epoch_ticks_.load(std::memory_order_relaxed)};
+    }
     // PI_INT_PEND0 and PI_INT_PEND1's offsets, and on host threads (SMP.adoc "S4") their
     // values without the device lock: IRIX polls PI_INT_PEND0 (S4.0: 52 M reads per CPU in
     // `boot4`). A CPU that sees a level another CPU raised also sees the memory that CPU wrote

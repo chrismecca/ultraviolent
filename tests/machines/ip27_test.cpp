@@ -682,6 +682,49 @@ const test::Registration rt_count_by_cpu{
         t.check(second - first >= 20 && second - first <= 21, "about 20.8 ticks apart");
     }};
 
+// Back-to-back reads of PI_RT_COUNT, which one CPU's machine answers from a count it
+// remembers until the next tick (JIT.adoc "Device time"): 400 reads into memory at physical
+// 0x1000, with PI_RT_COUNT written to 5,000 after the 200th. Between reads the count moves by
+// 0 or 1, at the 1.25 MHz rate, and the write takes effect at once.
+const test::Registration rt_count_back_to_back{
+    "ip27.rt_count_back_to_back", [](test::Context& t) {
+        std::vector<std::uint32_t> words(48, nop());
+        const std::initializer_list<std::uint32_t> code = {
+            // t2 = the Hub's registers + 0x30000; t5 = physical 0x1000 (uncached); t7 = 400.
+            lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2),
+            lui(t2, 3), daddu(t2, t0, t2), lui(t5, 0xa800), dsll32(t5, t5, 0),
+            ori(t5, t5, 0x1000), addiu(t7, zero, 400), addiu(t6, zero, 5000),
+            // Loop (index 11): read, store, step; at 200 left, write the count.
+            ld(t1, 0x100, t2), sd(t1, 0, t5), daddiu(t5, t5, 8), addiu(t7, t7, -1),
+            addiu(t3, t7, -200), bne(t3, zero, 8), nop(), sd(t6, 0x100, t2),
+            bne(t7, zero, -36), nop(),
+            beq(zero, zero, -4), nop()};
+        std::ranges::copy(code, words.begin());
+        std::vector<std::byte> prom(words.size() * 4);
+        for (std::size_t w = 0; w < words.size(); ++w) {
+            store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
+        }
+        Ip27Machine machine{small_config(), prom};
+        machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
+        machine.run(20000);
+        std::vector<std::uint64_t> reads;
+        for (unsigned i = 0; i < 400; ++i) {
+            reads.push_back(memory_word(machine, 0x1000 + 8 * i));
+        }
+        bool steps = true;
+        for (unsigned i = 1; i < 400; ++i) {
+            if (i != 200 && reads[i] - reads[i - 1] > 1) {
+                steps = false;
+            }
+        }
+        t.check(steps, "the count moves by 0 or 1 between reads");
+        t.check(reads[200] >= 5000 && reads[200] <= 5001, "the write takes effect at once");
+        // About 7 cycles per iteration: 200 reads span about 1,400 cycles, 9.7 ticks.
+        t.check(reads[199] - reads[0] >= 6 && reads[199] - reads[0] <= 14, "ticks at 1.25 MHz");
+        t.check(reads[399] - reads[200] >= 6 && reads[399] - reads[200] <= 14,
+                "ticks at 1.25 MHz after the write");
+    }};
+
 // An inter-processor interrupt is an ordinary Hub interrupt level (IP27.adoc "Hub
 // interrupts"; LINUX intr.h CPU_ACTION_B = 11): B unmasks level 11 in INT_MASK0_B and enables
 // IP2; A sets the level through PI_INT_PEND_MOD; B takes the interrupt at its BEV general

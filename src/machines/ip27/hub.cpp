@@ -460,6 +460,13 @@ std::uint64_t Hub::rt_count_at(VirtualTime time) const {
     return (base + ticks - epoch) & rt_count_mask;
 }
 
+Hub::RtWindow Hub::rt_window(VirtualTime time) const {
+    const auto [base, epoch] = rt_origin();
+    const std::uint64_t ticks = std::max(cycles_at(time, rtc_clock), epoch);
+    return {.count = (base + ticks - epoch) & rt_count_mask,
+            .until = time_at_cycles(ticks + 1, rtc_clock)};
+}
+
 void Hub::set_rt_count(std::uint64_t value) {
     const std::uint64_t sequence = rt_sequence_.load(std::memory_order_relaxed);
     rt_sequence_.store(sequence + 1, std::memory_order_relaxed);
