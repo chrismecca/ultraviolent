@@ -30,6 +30,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -764,16 +766,21 @@ class X86_64NativeCode final : public NativeCode {
         }
     }
 
-    const void* translate(const Block& block) override {
+    const void* translate(const Block& block, BlockSource& more,
+                          std::vector<RegionEntry>& entries) override {
         const auto start = std::chrono::steady_clock::now();
-        const void* code = emit_block(block);
+        const void* code = emit_region(block, more, entries, max_region_blocks);
         if (code == nullptr) {
-            // The region is full: discard every block and start again (between blocks, so
-            // nothing discarded is running).
+            // The code region is full: discard every block and start again (between blocks,
+            // so nothing discarded is running), with the block alone if the region still does
+            // not fit.
             memory_.discard();
             ++epoch_;
             ++statistics_.discards;
-            code = emit_block(block);
+            code = emit_region(block, more, entries, max_region_blocks);
+            if (code == nullptr) {
+                code = emit_region(block, more, entries, 1);
+            }
         }
         statistics_.translation_nanoseconds += static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
@@ -952,11 +959,51 @@ class X86_64NativeCode final : public NativeCode {
         next_pc,   // in the CPU's next pc (the delay slot ran natively after a branch)
         cpu,       // in the CPU's pc, exact (a helper ran last)
     };
+    // Regions (JIT.adoc "Regions"): a translation joins blocks of its first block's code page
+    // that a block's end reaches at a known pc, and jumps to them without dispatch.
+    static constexpr std::size_t max_region_blocks = 16;
+    struct RegionBlock {
+        const Block* block;
+        Label label;
+    };
+    struct Region {
+        Assembler& a;
+        BlockSource& more;
+        std::size_t max_blocks;
+        std::vector<RegionBlock> blocks;
+        // pcs `more` had no block for.
+        std::vector<std::uint64_t> refused;
+
+        // The label of the region's block at pc, joining it when it can be.
+        std::optional<Label> block_at(std::uint64_t pc) {
+            for (const RegionBlock& b : blocks) {
+                if (b.block->start_pc == pc) {
+                    return b.label;
+                }
+            }
+            if (blocks.size() >= max_blocks || std::ranges::contains(refused, pc)) {
+                return std::nullopt;
+            }
+            const Block* block = more.block_at(pc);
+            if (block == nullptr) {
+                refused.push_back(pc);
+                return std::nullopt;
+            }
+            blocks.push_back({block, a.label()});
+            return blocks.back().label;
+        }
+    };
+
     // A block's normal end: the guest values in `registers` written back, and the CPU's state
     // made exact for the next block (pc, next pc, delay slot clear, the cycles of `ran`
-    // operations); then the deadline check and dispatch.
-    void end_block(Assembler& a, const GuestRegisters::State& registers, Final final,
-                   std::uint64_t pc, std::size_t ran, const Boundary& b, bool delay_written) {
+    // operations); then the deadline check and dispatch. When the next pc is one of `targets`
+    // and the region has (or can join) the block there, the end jumps to it after the deadline
+    // check instead, leaving pc and next pc for that block to write where they are observed.
+    // After a helper (`helpers`) the translation context is checked first: only a state change,
+    // which ends its block, changes it, but the jump needs no such argument.
+    void end_block(Assembler& a, Region& region, const GuestRegisters::State& registers,
+                   Final final, std::uint64_t pc, std::span<const std::uint64_t> targets,
+                   std::size_t ran, const Boundary& b, bool delay_written, bool helpers) {
         GuestRegisters::write_back(a, layout_, registers);
         switch (final) {
         case Final::constant:
@@ -973,16 +1020,47 @@ class X86_64NativeCode final : public NativeCode {
             a.mov(Reg::rax, field(layout_.pc));
             break;
         }
-        if (final != Final::cpu) {
-            a.mov(field(layout_.pc), Reg::rax);
-            a.lea(Reg::rcx, Mem{Reg::rax, 4});
-            a.mov(field(layout_.next_pc), Reg::rcx);
-            if (delay_written) {
-                a.mov_byte(field(layout_.delay_slot), 0);
-            }
+        if (final != Final::cpu && delay_written) {
+            a.mov_byte(field(layout_.delay_slot), 0);
         }
         if (ran > b.cycles) {
             a.add(field(layout_.cycles), static_cast<std::int32_t>(ran - b.cycles));
+        }
+        if (final != Final::cpu) {
+            std::vector<std::pair<std::uint64_t, Label>> joined;
+            for (const std::uint64_t target : targets) {
+                if (const auto label = region.block_at(target)) {
+                    joined.emplace_back(target, *label);
+                }
+            }
+            if (!joined.empty()) {
+                const Label generic = a.label();
+                a.mov(Reg::rcx, field(layout_.cycles));
+                a.cmp(Reg::rcx, Mem{Reg::r12, context_deadline});
+                a.jcc(Cond::ae, generic);
+                if (helpers) {
+                    a.mov(Reg::rcx, cpu_.code_context());
+                    a.cmp(Reg::rcx, field(layout_.translation_context));
+                    a.jcc(Cond::ne, generic);
+                }
+                if (final == Final::constant) {
+                    a.jmp(joined.front().second);
+                } else {
+                    for (const auto& [target, label] : joined) {
+                        if (fits_int32(target)) {
+                            a.cmp(Reg::rax, static_cast<std::int32_t>(target));
+                        } else {
+                            a.mov(Reg::rcx, target);
+                            a.cmp(Reg::rax, Reg::rcx);
+                        }
+                        a.jcc(Cond::e, label);
+                    }
+                }
+                a.bind(generic);
+            }
+            a.mov(field(layout_.pc), Reg::rax);
+            a.lea(Reg::rcx, Mem{Reg::rax, 4});
+            a.mov(field(layout_.next_pc), Reg::rcx);
         }
         a.mov(Reg::rcx, field(layout_.cycles));
         a.cmp(Reg::rcx, Mem{Reg::r12, context_deadline});
@@ -1047,9 +1125,73 @@ class X86_64NativeCode final : public NativeCode {
         }
     }
 
-    // The block's code in the region, or null when it does not fit.
-    const void* emit_block(const Block& block) {
+    // The region starting with `first` in the code region, or null when it does not fit.
+    const void* emit_region(const Block& first, BlockSource& more,
+                            std::vector<RegionEntry>& entries, std::size_t max_blocks) {
+        entries.clear();
         Assembler a{next_address()};
+        Region region{.a = a,
+                      .more = more,
+                      .max_blocks = max_blocks,
+                      .blocks = {{&first, a.label()}},
+                      .refused = {}};
+        std::vector<std::uint64_t> starts;
+        std::uint64_t native_count = 0;
+        std::uint64_t operations = 0;
+        // Blocks join while earlier ones are emitted.
+        for (std::size_t k = 0; k < region.blocks.size(); ++k) {
+            const RegionBlock b = region.blocks[k];
+            starts.push_back(a.here());
+            a.bind(b.label);
+            native_count += emit_block(a, region, *b.block);
+            operations += b.block->operations.size();
+        }
+        const std::uint64_t at = place(a);
+        if (at == 0) {
+            return nullptr;
+        }
+        invariant(starts.front() == at, "a region starts with its first block");
+        for (std::size_t k = 1; k < region.blocks.size(); ++k) {
+            entries.push_back({region.blocks[k].block->start_pc,
+                               reinterpret_cast<const void*>(starts[k])});
+        }
+        if (perf_map_ != nullptr) {
+            char name[40];
+            std::snprintf(name, sizeof name, "block_%llx",
+                          static_cast<unsigned long long>(first.start_pc));
+            name_code(at, a.size(), name);
+        }
+        if (jit_dump_ != nullptr) {
+            for (std::size_t k = 0; k < region.blocks.size(); ++k) {
+                const Block& block = *region.blocks[k].block;
+                const std::size_t size = (k + 1 < starts.size() ? starts[k + 1] : at + a.size()) -
+                                         starts[k];
+                std::fprintf(jit_dump_, "block %llx %llx %zx\nguest",
+                             static_cast<unsigned long long>(block.start_pc),
+                             static_cast<unsigned long long>(starts[k]), size);
+                for (const DecodedInstruction& op : block.operations) {
+                    std::fprintf(jit_dump_, " %08x", op.instruction.word);
+                }
+                std::fprintf(jit_dump_, "\nhost ");
+                const auto* bytes = reinterpret_cast<const unsigned char*>(starts[k]);
+                for (std::size_t i = 0; i < size; ++i) {
+                    std::fprintf(jit_dump_, "%02x", bytes[i]);
+                }
+                std::fprintf(jit_dump_, "\n");
+            }
+        }
+        statistics_.blocks_translated += region.blocks.size();
+        ++statistics_.regions;
+        statistics_.region_blocks += region.blocks.size() - 1;
+        statistics_.native_bytes += a.size();
+        statistics_.native_operations += native_count;
+        statistics_.helper_operations += operations - native_count;
+        return reinterpret_cast<const void*>(at);
+    }
+
+    // Emits `block` at the current position (its label bound there), with its out-of-line
+    // exits after it. Returns how many of its operations are native.
+    std::uint64_t emit_block(Assembler& a, Region& region, const Block& block) {
         GuestRegisters registers{a, layout_};
         const auto& operations = block.operations;
         const std::size_t count = operations.size();
@@ -1083,19 +1225,27 @@ class X86_64NativeCode final : public NativeCode {
         std::uint64_t native_count = 0;
         // Whether the CPU's delay-slot flag may be set when the block ends.
         bool delay_written = false;
+        // Whether any operation runs through call_semantics.
+        bool helpers = false;
+        // The pcs a branch's outcome can continue at, when known.
+        std::vector<std::uint64_t> targets;
 
         // At entry: no pending exception, and room for every operation before the deadline,
         // so no boundary inside the block can meet the run limit or the next internal event
         // (JIT.adoc "Boundaries"). Only a helper can change either; it is checked after one.
+        // A block entered from another of its region finds pc and next pc unwritten, so the
+        // exits write them (and the boundary starts inexact).
+        const Label pending = a.label();
+        const Label limit = a.label();
         a.cmp_byte(field(layout_.interrupt_check), 0);
-        a.jcc_to(Cond::ne, exit(BlockExit::pending_exception));
+        a.jcc(Cond::ne, pending);
         a.mov(Reg::rax, field(layout_.cycles));
         a.add(Reg::rax, static_cast<std::int32_t>(count));
         a.cmp(Reg::rax, Mem{Reg::r12, context_deadline});
-        a.jcc_to(Cond::a, exit(BlockExit::run_limit));
+        a.jcc(Cond::a, limit);
         a.add(Mem{Reg::r12, context_blocks}, 1);
 
-        Boundary boundary;
+        Boundary boundary{.exact = false};
         Final final = Final::constant;
         for (std::size_t i = 0; i < count; ++i) {
             const DecodedInstruction& op = operations[i];
@@ -1132,6 +1282,11 @@ class X86_64NativeCode final : public NativeCode {
                                     .cycles = boundary.cycles};
                         break;
                     case Flow::branch_likely:
+                        targets.clear();
+                        if (result->target.is_constant &&
+                            !(result->taken.is_constant && result->taken.constant == 0)) {
+                            targets.push_back(result->target.constant);
+                        }
                         if (!result->taken.is_constant || result->taken.constant == 0) {
                             const Label label = a.label();
                             nullified.push_back({label, i, boundary, registers.state()});
@@ -1145,6 +1300,17 @@ class X86_64NativeCode final : public NativeCode {
                         }
                         [[fallthrough]];
                     case Flow::branch:
+                        if (result->flow == Flow::branch) {
+                            targets.clear();
+                            const bool always = result->taken.is_constant;
+                            if (result->target.is_constant &&
+                                !(always && result->taken.constant == 0)) {
+                                targets.push_back(result->target.constant);
+                            }
+                            if (!(always && result->taken.constant != 0)) {
+                                targets.push_back(pc + 8);
+                            }
+                        }
                         invariant(i + 2 == count && !boundary.delay_slot,
                                   "a branch and its delay slot end a block");
                         store_branch(a, b, pc, *result);
@@ -1163,6 +1329,7 @@ class X86_64NativeCode final : public NativeCode {
                 registers.end_operation();
             }
             // call_semantics: every guest value into the CPU first.
+            helpers = true;
             registers.flush();
             delay_written = delay_written || boundary.delay_slot;
             call_operation(a, block, i, boundary);
@@ -1177,13 +1344,27 @@ class X86_64NativeCode final : public NativeCode {
                 final = Final::constant;
             }
         }
-        end_block(a, registers.state(), final, start + 4 * count, count, boundary, delay_written);
+        const std::uint64_t sequential_pc = start + 4 * count;
+        end_block(a, region, registers.state(), final, sequential_pc,
+                  final == Final::next_pc ? std::span<const std::uint64_t>{targets}
+                                          : std::span<const std::uint64_t>{&sequential_pc, 1},
+                  count, boundary, delay_written, helpers);
 
         for (const Nullified& n : nullified) {
             // pc moves past the slot; the slot takes no cycle.
             a.bind(n.label);
-            end_block(a, n.registers, Final::constant, start + 4 * (n.index + 2), n.index + 1,
-                      n.boundary, delay_written);
+            const std::uint64_t next = start + 4 * (n.index + 2);
+            end_block(a, region, n.registers, Final::constant, next,
+                      std::span<const std::uint64_t>{&next, 1}, n.index + 1, n.boundary,
+                      delay_written, helpers);
+        }
+        for (const auto& [label, reason] :
+             {std::pair{pending, BlockExit::pending_exception}, std::pair{limit, BlockExit::run_limit}}) {
+            a.bind(label);
+            store_constant(a, layout_.pc, start);
+            store_constant(a, layout_.next_pc, start + 4);
+            a.mov_byte(field(layout_.delay_slot), 0);
+            a.jmp_to(exit(reason));
         }
         for (RaiseExit& r : raise_exits) {
             // Side exit (JIT.adoc "Precise exceptions"): the guest values and the boundary before
@@ -1215,36 +1396,8 @@ class X86_64NativeCode final : public NativeCode {
             a.jmp(p.merge);
         }
 
-        const std::uint64_t at = place(a);
-        if (at == 0) {
-            return nullptr;
-        }
-        if (perf_map_ != nullptr) {
-            char name[40];
-            std::snprintf(name, sizeof name, "block_%llx",
-                          static_cast<unsigned long long>(block.start_pc));
-            name_code(at, a.size(), name);
-        }
-        if (jit_dump_ != nullptr) {
-            std::fprintf(jit_dump_, "block %llx %llx %zx\nguest", static_cast<unsigned long long>(start),
-                         static_cast<unsigned long long>(at), a.size());
-            for (const DecodedInstruction& op : operations) {
-                std::fprintf(jit_dump_, " %08x", op.instruction.word);
-            }
-            std::fprintf(jit_dump_, "\nhost ");
-            const auto* bytes = reinterpret_cast<const unsigned char*>(at);
-            for (std::size_t i = 0; i < a.size(); ++i) {
-                std::fprintf(jit_dump_, "%02x", bytes[i]);
-            }
-            std::fprintf(jit_dump_, "\n");
-        }
-        ++statistics_.blocks_translated;
-        statistics_.native_bytes += a.size();
-        statistics_.native_operations += native_count;
-        statistics_.helper_operations += count - native_count;
-        return reinterpret_cast<const void*>(at);
+        return native_count;
     }
-
     // Where the next allocation (16-byte aligned) will execute.
     std::uint64_t next_address() const {
         return memory_.executable_start() + (memory_.used() + 15) / 16 * 16;

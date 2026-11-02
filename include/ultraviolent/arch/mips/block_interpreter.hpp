@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace ultraviolent::mips {
@@ -188,6 +189,20 @@ class BlockInterpreter {
     };
     [[nodiscard]] bool valid(const DispatchValidity& v) const;
     void clear_dispatch();
+    // The blocks a translation may join (JIT.adoc "Regions"): built on the first block's code
+    // page, in the current translation context (the first block's, which lookup validated).
+    class RegionBlocks final : public BlockSource {
+      public:
+        RegionBlocks(Cpu& cpu, const Block& first, std::vector<std::unique_ptr<Block>>& storage)
+            : cpu_{cpu}, first_{first}, storage_{storage} {}
+        const Block* block_at(std::uint64_t pc) override;
+
+      private:
+        Cpu& cpu_;
+        const Block& first_;
+        std::vector<std::unique_ptr<Block>>& storage_;
+        std::size_t used_{};
+    };
 
     Cpu& cpu_;
     Interpreter reference_;
@@ -200,6 +215,9 @@ class BlockInterpreter {
     std::vector<DispatchValidity> dispatch_validity_;
     // The backend epoch the dispatch table's code belongs to.
     std::uint64_t dispatch_epoch_{};
+    // Reused between translations: RegionBlocks' blocks and the translation's other entries.
+    std::vector<std::unique_ptr<Block>> region_storage_;
+    std::vector<RegionEntry> region_entries_;
 };
 
 } // namespace ultraviolent::mips

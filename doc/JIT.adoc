@@ -236,7 +236,8 @@ has single digits. The interface must allow amortized accounting later; J1-J4 do
 * **Chaining** (J6, only if profiling shows dispatcher transitions matter): exits through
   link cells that are validated or reset on invalidation. No raw patched jumps between
   independently invalidatable blocks until that lifetime story is designed. Dispatch
-  (below) is the indirect form, built first; direct links remain J6.
+  (below) is the indirect form, built first; direct links between blocks that share validity
+  are regions ("Regions"); links between independently valid blocks remain J6.
 
 == Dispatch
 
@@ -265,6 +266,39 @@ native code:
   is pushed, so a run of any length uses one entry frame.
 * **Lifetime is unchanged.** Translation and discard still happen only in the engine, between
   runs, and a discard clears the dispatch table.
+
+== Regions
+
+Profile of `cpu` after the device work (2026-11-02, perf with the code map, "Measurement"):
+generated code 55% of host time, dispatch 7%, FPU helpers about 23%; of the time in blocks,
+67% was in blocks ending in a conditional branch whose two successors are on the same code
+page, 24% in JR/JALR. So a translation is a **region**: its first block and the blocks of the
+same code page that block ends reach at a known pc (a branch's target and fall-through, a
+branch-likely's nullified path, the next pc of a block cut at the length limit), up to 16
+blocks (`max_region_blocks`), joined as their predecessors are emitted
+(`BlockSource::block_at`, from `BlockInterpreter::RegionBlocks`).
+
+* **Validity.** A joined block is decoded from the same code page (host bytes, frame, TLB
+  entry) in the same translation context as the first, so it is valid exactly while the first
+  is: the region has the first block's validity inputs, and BlockInterpreter installs every
+  joined block in the dispatch table with them, so blocks already in a region are not
+  translated again on their own.
+* **Edges.** Where a block's end would dispatch to a pc the region holds, it writes its guest
+  values and cycles back as before, makes the end-of-block deadline check (which can deliver
+  the internal event), and jumps to that block instead of storing pc and next pc and looking
+  the pc up. After a helper the edge also compares the translation context with the region's
+  (only a state change, which ends its block, changes it; the comparison makes the jump
+  independent of that argument).
+* **Block entry.** Every block keeps its entry check (pending exception; all operations fit
+  before the deadline), so a loop inside a region is checked once per iteration exactly as
+  dispatch was. A block reached by an edge finds pc and next pc unwritten: its boundary starts
+  inexact (written before a helper or side exit, as inside a block), and its entry exits write
+  them before leaving.
+* **Size.** A region that does not fit an empty code region is translated as its first block
+  alone. Sweep (release, M cycles/s, `boot`/`cpu`/`fs`): 1 block 200.5/311.6/251.4, 4
+  207.8/325.4/262.0, 8 207.9/327.0/264.2, 16 210.0/335.6/264.6, 32 203.8/327.2/262.3. Regions
+  repeat code (a block can be in several): `boot` translates 1.14 million blocks in 212,437
+  regions, 790 MB with 11 discards.
 
 == Boundaries
 
@@ -515,6 +549,14 @@ J5 and J6 are optional for this personality.
   for device loads would save only the operation dispatch (the executor already reaches
   `ld` through one table); a larger gain needs native code that calls a device page's
   target itself, with the boundary materialized. Not started.
+
+* **Regions (2026-11-02, branch `jit-speed`).** Profiling aids first ("Measurement": the
+  perf map and code dump). Then regions ("Regions"). Gates: the whole suite on dev and asan
+  (`mips.tier1.discard_when_the_region_is_full` now also covers a region that does not fit an
+  empty code region: translated as its first block); digests of `prom`, `boot`, `cpu`, `fs`,
+  `boot2`, `cpu2`, `mix2`, `reboot2`, and `cpu4` identical to `v-tier1.json`; `cpu2` and `boot4`
+  complete in parallel mode. Release build, M cycles/s, one run each, before and after: `cpu`
+  282-293 to 336, `fs` 229-240 to 265, `boot` 186-198 to 210, `prom` 309.
 
 == Toward host-parallel vCPUs (not built)
 

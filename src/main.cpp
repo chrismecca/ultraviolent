@@ -764,9 +764,12 @@ int main(int argc, char** argv) {
                          static_cast<unsigned long long>(b.dispatch_revalidations),
                          static_cast<unsigned long long>(b.dispatch_invalid));
             std::fprintf(stderr,
-                         "tier1: %llu blocks translated, %llu native bytes, %.3f s translating, "
-                         "%llu discards, %llu operations native, %llu through call_semantics\n",
+                         "tier1: %llu blocks translated (%llu regions, %llu joined), %llu "
+                         "native bytes, %.3f s translating, %llu discards, %llu operations "
+                         "native, %llu through call_semantics\n",
                          static_cast<unsigned long long>(n.blocks_translated),
+                         static_cast<unsigned long long>(n.regions),
+                         static_cast<unsigned long long>(n.region_blocks),
                          static_cast<unsigned long long>(n.native_bytes),
                          static_cast<double>(n.translation_nanoseconds) / 1e9,
                          static_cast<unsigned long long>(n.discards),

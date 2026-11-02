@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace ultraviolent::mips {
 
@@ -43,8 +44,28 @@ struct NativeExit {
     std::uint64_t blocks;
 };
 
+// Blocks a translation may join into one region (JIT.adoc "Regions"), from BlockInterpreter.
+class BlockSource {
+  public:
+    // The block at `pc`, decoded from the code page of the block being translated and in its
+    // translation context, so valid exactly while that block is; null when there is none.
+    virtual const Block* block_at(std::uint64_t pc) = 0;
+
+  protected:
+    ~BlockSource() = default;
+};
+
+// A block of a region after its first, and where its code starts.
+struct RegionEntry {
+    std::uint64_t pc;
+    const void* code;
+};
+
 struct NativeStatistics {
     std::uint64_t blocks_translated{};
+    // Translations, and the blocks they joined after their first.
+    std::uint64_t regions{};
+    std::uint64_t region_blocks{};
     std::uint64_t native_bytes{};
     std::uint64_t translation_nanoseconds{};
     // Times the code region was full and everything was discarded.
@@ -59,9 +80,12 @@ class NativeCode {
     virtual ~NativeCode() = default;
 
     // Native code for `block`, valid while epoch() is unchanged; null when it cannot be made.
-    // May discard every earlier translation (advancing epoch()): called only between blocks,
-    // when no native code is running.
-    virtual const void* translate(const Block& block) = 0;
+    // The translation may join blocks from `more` that the block can reach directly; each is
+    // appended to `entries`, and its code may be entered on its own while the region is
+    // valid. May discard every earlier translation (advancing epoch()): called only between
+    // blocks, when no native code is running.
+    virtual const void* translate(const Block& block, BlockSource& more,
+                                  std::vector<RegionEntry>& entries) = 0;
     // Runs `code`, the block at the CPU's pc, and the blocks it continues into through
     // `dispatch` (dispatch_entries long), until one of them leaves. The CPU is at a boundary
     // with no pending exception and not in a delay slot. `limit` is the run limit.

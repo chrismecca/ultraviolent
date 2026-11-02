@@ -97,7 +97,9 @@ bool BlockInterpreter::install_native(Entry& entry) {
         if (entry.uses < native_threshold_) {
             return false;
         }
-        entry.native = native_->translate(entry.block);
+        RegionBlocks more{cpu_, entry.block, region_storage_};
+        region_entries_.clear();
+        entry.native = native_->translate(entry.block, more, region_entries_);
         entry.native_epoch = native_->epoch();
         if (entry.native == nullptr) {
             return false;
@@ -114,13 +116,46 @@ bool BlockInterpreter::install_native(Entry& entry) {
                         .context = entry.context,
                         .stamp = cpu_.code_changes(),
                         .code = entry.native};
-    dispatch_validity_[index] = {.epoch = entry.epoch,
-                                 .frame_generation = entry.frame_generation,
-                                 .frame_generation_value = entry.frame_generation_value,
-                                 .tlb_generation = entry.tlb_generation,
-                                 .tlb_index = entry.tlb_index};
+    const DispatchValidity validity{.epoch = entry.epoch,
+                                    .frame_generation = entry.frame_generation,
+                                    .frame_generation_value = entry.frame_generation_value,
+                                    .tlb_generation = entry.tlb_generation,
+                                    .tlb_index = entry.tlb_index};
+    dispatch_validity_[index] = validity;
     ++statistics_.dispatch_installs;
+    // The region's other blocks share the first's code page and context, so its validity.
+    for (const RegionEntry& r : region_entries_) {
+        const std::size_t other = dispatch_index(r.pc);
+        dispatch_[other] = {.pc = r.pc,
+                            .context = entry.context,
+                            .stamp = cpu_.code_changes(),
+                            .code = r.code};
+        dispatch_validity_[other] = validity;
+        ++statistics_.dispatch_installs;
+    }
+    region_entries_.clear();
     return true;
+}
+
+const Block* BlockInterpreter::RegionBlocks::block_at(std::uint64_t pc) {
+    if ((pc >> 12) != (first_.start_pc >> 12)) {
+        return nullptr;
+    }
+    if (used_ == storage_.size()) {
+        storage_.push_back(std::make_unique<Block>());
+    }
+    Block& block = *storage_[used_];
+    if (build_block(cpu_, pc, block)) {
+        return nullptr;
+    }
+    const Cpu::CodePage& a = block.code;
+    const Cpu::CodePage& b = first_.code;
+    if (a.bytes != b.bytes || a.block != b.block || a.frame != b.frame ||
+        a.tlb_index != b.tlb_index) {
+        return nullptr;
+    }
+    ++used_;
+    return &block;
 }
 
 bool BlockInterpreter::valid(const DispatchValidity& v) const {
