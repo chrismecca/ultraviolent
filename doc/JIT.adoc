@@ -346,6 +346,17 @@ end to end (M cycles/s, as now) and as generated-code throughput with compile ti
 so PROM and boot compilation do not hide the quality of the code. Host counters per guest
 cycle (`--counters`) as in stage H.
 
+Generated code is invisible to `perf` by default (it lives in a memfd mapping). Two
+environment variables, read when tier 1 starts, are for profiling only and change nothing
+the guest sees:
+
+* `ULTRAVIOLENT_PERF_MAP=1` appends each translation and the shared code (entry, exits,
+  deadline, dispatch) to `/tmp/perf-<pid>.map` as `uv:block_<guest pc>`, `uv:dispatch`, and
+  so on. perf reads such maps only for anonymous memory, so a profile is attributed by
+  matching `perf script -F ip,sym,dso` addresses in the memfd mapping against the map.
+* `ULTRAVIOLENT_JIT_DUMP=<file>` appends each block's guest pc, host address and size, guest
+  instruction words, and host code bytes in hex, for `objdump -b binary` against samples.
+
 == Milestones
 
 Each is one or more commits with the gates above; speed is a gate only where stated.

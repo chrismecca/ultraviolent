@@ -26,10 +26,14 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace ultraviolent::mips {
 
@@ -725,6 +729,17 @@ class X86_64NativeCode final : public NativeCode {
   public:
     X86_64NativeCode(Cpu& cpu, std::size_t code_bytes)
         : cpu_{cpu}, layout_{cpu.native_layout()}, memory_{code_bytes} {
+        // Profiling only: ULTRAVIOLENT_PERF_MAP names generated code for perf
+        // (/tmp/perf-<pid>.map, perf's convention for code it cannot find in a file).
+        if (std::getenv("ULTRAVIOLENT_PERF_MAP") != nullptr) {
+            char path[64];
+            std::snprintf(path, sizeof path, "/tmp/perf-%d.map", static_cast<int>(::getpid()));
+            perf_map_ = std::fopen(path, "a");
+        }
+        // ULTRAVIOLENT_JIT_DUMP=<file>: each block's guest words and host code, in hex.
+        if (const char* dump = std::getenv("ULTRAVIOLENT_JIT_DUMP")) {
+            jit_dump_ = std::fopen(dump, "a");
+        }
         // The helper table.
         auto table = memory_.allocate(helper_count * sizeof(std::uint64_t), 64);
         invariant(!table.writable.empty(), "code region holds the helper table");
@@ -737,6 +752,16 @@ class X86_64NativeCode final : public NativeCode {
         table_ = table.executable;
         emit_shared();
         memory_.make_permanent();
+    }
+
+    X86_64NativeCode(const X86_64NativeCode&) = delete;
+    X86_64NativeCode& operator=(const X86_64NativeCode&) = delete;
+    ~X86_64NativeCode() override {
+        for (std::FILE* f : {perf_map_, jit_dump_}) {
+            if (f != nullptr) {
+                std::fclose(f);
+            }
+        }
     }
 
     const void* translate(const Block& block) override {
@@ -797,10 +822,18 @@ class X86_64NativeCode final : public NativeCode {
         std::ranges::copy(bytes, space.writable.begin());
         return space.executable;
     }
-    std::uint64_t place_permanent(Assembler& a) {
+    std::uint64_t place_permanent(Assembler& a, const char* name) {
         const std::uint64_t at = place(a);
         invariant(at != 0, "code region holds the shared code");
+        name_code(at, a.size(), name);
         return at;
+    }
+    void name_code(std::uint64_t at, std::size_t size, const char* name) {
+        if (perf_map_ != nullptr) {
+            std::fprintf(perf_map_, "%llx %zx uv:%s\n", static_cast<unsigned long long>(at), size,
+                         name);
+            std::fflush(perf_map_);
+        }
     }
 
     // The entry, which saves the callee-saved registers, loads rbx and r12, and calls the
@@ -819,13 +852,13 @@ class X86_64NativeCode final : public NativeCode {
                 a.pop(r);
             }
             a.ret();
-            entry_ = reinterpret_cast<Entry>(place_permanent(a));
+            entry_ = reinterpret_cast<Entry>(place_permanent(a, "entry"));
         }
         for (std::size_t reason = 0; reason < block_exit_count; ++reason) {
             Assembler a{next_address()};
             a.mov(Reg::rax, std::uint64_t{reason});
             a.ret();
-            exits_[reason] = place_permanent(a);
+            exits_[reason] = place_permanent(a, "exit");
         }
         {
             // The cycle count reached the deadline at a block's end: the internal event, if
@@ -839,7 +872,7 @@ class X86_64NativeCode final : public NativeCode {
             a.call_indirect(slot(helper_internal_event));
             a.bind(done);
             a.jmp_to(exit(BlockExit::run_limit));
-            deadline_ = place_permanent(a);
+            deadline_ = place_permanent(a, "deadline");
         }
         {
             // rax: the pc of the next block; the CPU's state is exact at a boundary.
@@ -859,7 +892,7 @@ class X86_64NativeCode final : public NativeCode {
             a.cmp(Reg::rdx, Mem{Reg::rcx, dispatch_stamp});
             a.jcc_to(Cond::ne, miss);
             a.jmp(Mem{Reg::rcx, dispatch_code});
-            dispatch_ = place_permanent(a);
+            dispatch_ = place_permanent(a, "dispatch");
         }
     }
 
@@ -1186,6 +1219,25 @@ class X86_64NativeCode final : public NativeCode {
         if (at == 0) {
             return nullptr;
         }
+        if (perf_map_ != nullptr) {
+            char name[40];
+            std::snprintf(name, sizeof name, "block_%llx",
+                          static_cast<unsigned long long>(block.start_pc));
+            name_code(at, a.size(), name);
+        }
+        if (jit_dump_ != nullptr) {
+            std::fprintf(jit_dump_, "block %llx %llx %zx\nguest", static_cast<unsigned long long>(start),
+                         static_cast<unsigned long long>(at), a.size());
+            for (const DecodedInstruction& op : operations) {
+                std::fprintf(jit_dump_, " %08x", op.instruction.word);
+            }
+            std::fprintf(jit_dump_, "\nhost ");
+            const auto* bytes = reinterpret_cast<const unsigned char*>(at);
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                std::fprintf(jit_dump_, "%02x", bytes[i]);
+            }
+            std::fprintf(jit_dump_, "\n");
+        }
         ++statistics_.blocks_translated;
         statistics_.native_bytes += a.size();
         statistics_.native_operations += native_count;
@@ -1208,6 +1260,8 @@ class X86_64NativeCode final : public NativeCode {
     std::uint64_t dispatch_{};
     std::uint64_t epoch_{};
     NativeStatistics statistics_;
+    std::FILE* perf_map_{};
+    std::FILE* jit_dump_{};
 };
 
 } // namespace
