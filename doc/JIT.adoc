@@ -294,6 +294,14 @@ blocks (`max_region_blocks`), joined as their predecessors are emitted
   dispatch was. A block reached by an edge finds pc and next pc unwritten: its boundary starts
   inexact (written before a helper or side exit, as inside a block), and its entry exits write
   them before leaving.
+* **Guest values across edges: measured, not kept (2026-11-02).** Block ends write their
+  dirty guest values back (stores at end of block were the largest share of `end` samples in
+  `cpu`). Tried: each joined block entered with the guest values in host registers (the state
+  of the first edge to it, its constants written back), other edges moving their values into
+  that state, dispatch entering through a stub that loads it, a loop back to the first block
+  joining a copy of it; then with entry states limited to the registers a block reads. Three
+  runs each, M cycles/s, `boot`/`cpu`/`fs`: before 238.9/557.7/292.4; carried 230.7/546.8/283.4;
+  limited 231.9/555.1/286.6. More code and more translation outweighed the stores saved.
 * **Size.** A region that does not fit an empty code region is translated as its first block
   alone. Sweep (release, M cycles/s, `boot`/`cpu`/`fs`): 1 block 200.5/311.6/251.4, 4
   207.8/325.4/262.0, 8 207.9/327.0/264.2, 16 210.0/335.6/264.6, 32 203.8/327.2/262.3. Regions
