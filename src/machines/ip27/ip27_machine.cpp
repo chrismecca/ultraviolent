@@ -990,10 +990,18 @@ Ip27Machine::SynchronizedTarget::mmio_read(std::uint64_t offset, AccessWidth wid
         }
         return machine_.locked_access([&] { return target_.mmio_read(offset, width); });
     }
+    // PI_RT_COUNT, most device reads (the firmware's delay loops): a function of device time,
+    // read straight from the Hub. It changes no event, so the next one stays where it was. With
+    // one CPU not even device time moves: the CPU runs only below the next event's cycle, so
+    // synchronizing would run no event and only bring device time to the CPU's, whose count
+    // this is (JIT.adoc "Device time").
+    if (hub_ != nullptr && offset == Hub::rt_count_offset && width == AccessWidth::bits64 &&
+        machine_.cpu_count() == 1) {
+        return hub_->rt_count_at(
+            std::max(machine_.cpu_time_.time_at(machine_.lowest_cycles()), machine_.scheduler_.now()));
+    }
     ++machine_.synchronized_accesses_;
     machine_.synchronize_time();
-    // PI_RT_COUNT, most device reads (the firmware's delay loops): a function of device time,
-    // read straight from the Hub. It changes no event, so the next one stays where it was.
     if (hub_ != nullptr && offset == Hub::rt_count_offset && width == AccessWidth::bits64) {
         --machine_.synchronized_accesses_;
         return hub_->rt_count();

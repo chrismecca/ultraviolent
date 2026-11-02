@@ -323,6 +323,21 @@ exchanged: 5 failures); 48,614 encodings identical to GNU as. Release, M cycles/
 322.5 to 366.5, `boot` 217.5 to 227.6; `cpu` and `fs` unchanged (three runs each with and
 without: 552.2/555.6 and 288.0/287.1, so the smaller pool costs nothing measurable).
 
+== Device time
+
+Profile of `prom` after multiply and divide (2026-11-02): the synchronized target's read 13.7%
+of host time, `Scheduler::advance_to` 4.8%, `update_next_event` 2.6%, nearly all for
+PI_RT_COUNT in the firmware's delay loops. With one CPU a PI_RT_COUNT read no longer
+synchronizes device time: that CPU runs only below the next event's cycle (its run limit), so
+`synchronize_time` would run no event and only bring device time to the CPU's time, and the
+count is a function of that time (`Hub::rt_count_at`, at the later of the CPU's time and
+device time, as `synchronize_time` takes it). With several CPUs on one thread device time is
+the lowest CPU's, so their reads keep synchronizing. Release, M cycles/s: `prom` 366.5 to
+376.3, `boot` 227.6 to 237.7; every digest unchanged. What remains of a delay-loop read is
+the time conversion itself (`CycleTime::time_at` and `cycles_at`, dependent multiplies, about
+a tenth of `prom`), the helper path of the load (`operation_helper`, the load's builder,
+`load_slow`, `device_read`), and the checks after it.
+
 == FPU
 
 FPU operations are one decoded opcode (`cop1`) executed by `FpuExecutor` (fpu.cpp), whose
