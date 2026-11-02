@@ -9,12 +9,16 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <span>
 #include <string_view>
 #include <vector>
+
+#include <time.h>
 
 namespace {
 
@@ -823,6 +827,59 @@ const test::Registration parallel_local_reset{
         t.check(machine.cpu(0).state().gpr[t6] > 0 && machine.cpu(1).state().gpr[t6] > 0,
                 "both CPUs run after the reset");
     }};
+
+// A host hold (main's --realtime) makes the run wait for the host's clock, set from an event
+// as the pacer does, and changes nothing the guest sees: one CPU, two taking turns, and two on
+// host threads (whose results are the program's own, as above).
+const test::Registration host_hold{"ip27.host_hold", [](test::Context& t) {
+    const auto prom = program({lui(t0, 0xa800), dsll32(t0, t0, 0), daddiu(t1, t1, 1),
+                               sd(t1, 0x100, t0), beq(zero, zero, -8), nop()});
+    constexpr auto hold = std::chrono::milliseconds{100};
+    // This thread's CPU time: a held run sleeps rather than spins.
+    const auto thread_time = [] {
+        timespec now{};
+        ::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+        return std::chrono::seconds{now.tv_sec} + std::chrono::nanoseconds{now.tv_nsec};
+    };
+    for (const unsigned mode : {0u, 1u, 2u}) {
+        const unsigned cpus = mode == 0 ? 1 : 2;
+        const auto make = [&] {
+            auto machine =
+                std::make_unique<Ip27Machine>(cpus == 1 ? small_config() : two_cpu_config(), prom);
+            if (mode == 2) {
+                machine->set_parallel(true, 100);
+            }
+            for (unsigned cpu = 0; cpu < cpus; ++cpu) {
+                machine->cpu(cpu).mtc0(mips::cp0::status, mips::status::kx);
+            }
+            return machine;
+        };
+        auto held = make();
+        auto& scheduler = held->scheduler();
+        const EventId pace = scheduler.add_event("test.pace", [&] {
+            held->hold_host_until(std::chrono::steady_clock::now() + hold);
+        });
+        scheduler.schedule_at(pace, time_at_cycles(1000, small_config().cpu_clock));
+        const auto start = std::chrono::steady_clock::now();
+        const auto start_cpu = thread_time();
+        held->run(5000);
+        t.check(std::chrono::steady_clock::now() - start >= hold, "the run waited");
+        t.check(thread_time() - start_cpu < hold / 2, "asleep while it waited");
+        for (unsigned cpu = 0; cpu < cpus; ++cpu) {
+            t.check(held->cpu(cpu).cycles() >= 5000, "every CPU ran its cycles");
+        }
+        if (mode != 2) {
+            auto free = make();
+            free->run(5000);
+            for (unsigned cpu = 0; cpu < cpus; ++cpu) {
+                t.check(held->cpu(cpu).state().gpr == free->cpu(cpu).state().gpr,
+                        "same registers");
+                t.check_equal(held->cpu(cpu).cycles(), free->cpu(cpu).cycles());
+            }
+            t.check_equal(held->now(), free->now());
+        }
+    }
+}};
 
 } // namespace
 

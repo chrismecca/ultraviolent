@@ -627,7 +627,6 @@ std::optional<Cpu::CodePage> Cpu::code_page(std::uint64_t address) {
     if (address % 4 != 0) {
         return std::nullopt;
     }
-    const std::uint64_t page = address & ~page_offset_mask;
     const auto hit = [&]() -> std::optional<CodePage> {
         const HostPage& entry = code_pages_[host_page_slot(address)];
         if (entry.page == host_page_tag(address)) {

@@ -4,6 +4,7 @@
 #include <ultraviolent/backends/console.hpp>
 #include <ultraviolent/backends/file_block_store.hpp>
 #include <ultraviolent/backends/pcap_link.hpp>
+#include <ultraviolent/backends/real_time_pacer.hpp>
 #include <ultraviolent/backends/stream_trace_sink.hpp>
 #include <ultraviolent/backends/tap_link.hpp>
 #include <ultraviolent/backends/terminal_input.hpp>
@@ -55,7 +56,7 @@ void usage() {
         "                    [--nvram FILE] [--io6prom FILE]\n"
         "                    [--console LINE]... [--cdrom FILE] [--disk FILE]\n"
         "                    [--sample-pc NS] [--date DATE] [--stop-at-prompt]\n"
-        "                    [--interactive] [--ethernet tap:IFNAME|pcap:FILE]\n"
+        "                    [--interactive] [--realtime] [--ethernet tap:IFNAME|pcap:FILE]\n"
         "                    [--engine reference|tier0|tier1] [--engine-statistics]\n"
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
         "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
@@ -85,11 +86,15 @@ void usage() {
         "used up (Ctrl-C and the like go to the guest). Ctrl-] starts a monitor command: q\n"
         "ends the run, cdrom FILE changes the disc, eject empties the drive. Such runs are\n"
         "not deterministic.\n"
+        "--realtime paces the run to the host's clock: it waits while virtual time is ahead of\n"
+        "the host time since the start, so the guest's clock keeps real time and an idle guest\n"
+        "leaves the host idle. A slower stretch runs unpaced and catches up by at most a\n"
+        "second. Waiting changes nothing the guest sees.\n"
         "--stop-at-prompt ends the run when the console script is used up and the guest\n"
         "waits at a prompt (--cycles is then a limit). SIGINT, SIGUSR1, SIGTERM, or SIGHUP\n"
         "ends a run early; the snapshot, flash, NVRAM, and disk are still written.\n"
         "--date YYYY-MM-DD[THH:MM:SS] sets the time-of-day clock at power-on (UTC; default\n"
-        "2026-01-01): virtual time runs it from there.\n"
+        "2026-01-01): virtual time runs it from there. --date now takes the host's time.\n"
         "--engine reference|tier0|tier1 selects the execution engine (default tier1, native\n"
         "code for decoded blocks, doc/JIT.adoc, or tier0 where the host has no tier-1\n"
         "backend; tier0, decoded blocks; reference, the interpreter every engine is tested\n"
@@ -250,6 +255,7 @@ struct Options {
     std::optional<std::int64_t> date;
     bool stop_at_prompt{};
     bool interactive{};
+    bool realtime{};
     // Unset: the machine's default (tier 1 where the host has a backend, else tier 0).
     std::optional<mips::ExecutionEngine> engine;
     bool engine_statistics{};
@@ -280,6 +286,13 @@ std::optional<std::int64_t> parse_date(std::string_view text) {
            std::int64_t{hour} * 3600 + std::int64_t{minute} * 60 + second;
 }
 
+// The host's time as Unix seconds (--date now).
+std::int64_t host_date() {
+    return std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now())
+        .time_since_epoch()
+        .count();
+}
+
 std::optional<Options> parse(std::span<char*> arguments) {
     Options options;
     for (std::size_t i = 0; i < arguments.size(); ++i) {
@@ -290,6 +303,10 @@ std::optional<Options> parse(std::span<char*> arguments) {
         }
         if (flag == "--interactive") {
             options.interactive = true;
+            continue;
+        }
+        if (flag == "--realtime") {
+            options.realtime = true;
             continue;
         }
         if (flag == "--engine-statistics") {
@@ -344,9 +361,9 @@ std::optional<Options> parse(std::span<char*> arguments) {
         } else if (flag == "--console") {
             options.console_lines.emplace_back(value);
         } else if (flag == "--date") {
-            options.date = parse_date(value);
+            options.date = value == "now" ? std::optional{host_date()} : parse_date(value);
             if (!options.date) {
-                std::fprintf(stderr, "not a date (YYYY-MM-DD[THH:MM:SS]): %.*s\n",
+                std::fprintf(stderr, "not a date (YYYY-MM-DD[THH:MM:SS] or now): %.*s\n",
                              static_cast<int>(value.size()), value.data());
                 return std::nullopt;
             }
@@ -698,11 +715,22 @@ int main(int argc, char** argv) {
         scheduler.schedule_after(sample, interval);
     }
 
-    // A host signal ends the run at the next check; the check only reads a host flag.
+    // A host signal ends the run at the next check; the check only reads a host flag. With
+    // --realtime, the same check holds the run while it is ahead of the host's clock.
+    std::optional<backends::RealTimePacer> pacer;
+    if (options->realtime) {
+        pacer.emplace(machine.now(), backends::RealTimePacer::Clock::now());
+    }
     const EventId stop_check = scheduler.add_event("host.stop_check", [&] {
         if (stop_requested != 0) {
             machine.request_stop();
             return;
+        }
+        if (pacer) {
+            const auto host_now = backends::RealTimePacer::Clock::now();
+            if (const auto wait = pacer->wait(machine.now(), host_now); wait.count() > 0) {
+                machine.hold_host_until(host_now + wait);
+            }
         }
         scheduler.schedule_after(stop_check, VirtualDuration{10'000'000});
     });

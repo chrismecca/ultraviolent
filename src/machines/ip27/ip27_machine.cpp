@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <format>
 #include <limits>
@@ -1063,6 +1064,9 @@ void Ip27Machine::run(std::uint64_t cycles) {
             step(cpu_a);
             continue;
         }
+        if (const auto until = host_hold()) {
+            std::this_thread::sleep_until(*until);
+        }
         run_processor(false);
         if (cpu_a.cpu.cycles() >= next_event_cycle_) {
             synchronize_time();
@@ -1109,6 +1113,9 @@ void Ip27Machine::run_many(std::uint64_t cycles) {
                 }
             }
             slice_end_cycle_ = lowest_other_cycles() + config_.cpu_slice;
+        }
+        if (const auto until = host_hold()) {
+            std::this_thread::sleep_until(*until);
         }
         update_next_event();
         run_processor(observed);
@@ -1180,6 +1187,12 @@ void Ip27Machine::run_thread(Processor& processor, unsigned index, std::uint64_t
         if (cycles >= end || parallel_stop_.load(std::memory_order_relaxed)) {
             break;
         }
+        if (const auto until = host_hold()) {
+            cpu.park();
+            std::this_thread::sleep_until(*until);
+            cpu.unpark();
+            continue;
+        }
         const std::uint64_t next_event = parallel_next_event_.load(std::memory_order_acquire);
         if (cycles >= next_event) {
             cpu.park();
@@ -1194,9 +1207,10 @@ void Ip27Machine::run_thread(Processor& processor, unsigned index, std::uint64_t
         const std::uint64_t window_end = lowest_published_other(index) + parallel_window_;
         if (cycles >= window_end) {
             cpu.park();
-            // Attention (a reset to meet, a level to apply) goes to the loop's top.
+            // Attention (a reset to meet, a level to apply) and a host hold go to the loop's top.
             while (cycles >= lowest_published_other(index) + parallel_window_ &&
-                   !parallel_stop_.load(std::memory_order_relaxed) && !cpu.attention_raised()) {
+                   !parallel_stop_.load(std::memory_order_relaxed) && !cpu.attention_raised() &&
+                   !host_hold()) {
                 std::this_thread::yield();
             }
             cpu.unpark();
@@ -1276,6 +1290,18 @@ std::uint64_t Ip27Machine::lowest_published_other(unsigned index) const {
         }
     }
     return lowest;
+}
+
+std::optional<std::chrono::steady_clock::time_point> Ip27Machine::host_hold() const {
+    const auto hold = host_hold_.load(std::memory_order_relaxed);
+    if (hold == 0) [[likely]] {
+        return std::nullopt;
+    }
+    const std::chrono::steady_clock::time_point until{std::chrono::steady_clock::duration{hold}};
+    if (std::chrono::steady_clock::now() >= until) {
+        return std::nullopt;
+    }
+    return until;
 }
 
 void Ip27Machine::advance_device_time(std::uint64_t cycles) {

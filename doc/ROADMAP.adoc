@@ -202,6 +202,21 @@ through J6 (block linking, only if profiling asks for it).
 * optional optimizing tier later;
 * keep interpreter permanently.
 
+=== Usable VM
+
+Agreed with the user 2026-11-02, after the tier-1 speed work: someone with their own PROM
+image and IRIX media can install IRIX, boot it, and use it day to day without reading the
+development history.
+
+* the guest's clock keeps real time and an idle guest leaves the host mostly idle (host
+  pacing, `--realtime`; guest-visible behavior unchanged);
+* a soak: hours of IRIX under load (builds, file churn, network) without failure;
+* a user's quickstart: what to supply, install, boot, network, shut down;
+* installation from CD-ROM in one cold run, scripted;
+* known limits written down (serial console only, one system disk, the two-node `ust_change`
+  message);
+* then a release, if the user wants one (at RC-IP27 they chose no tag).
+
 === SMP IP27
 
 Target (ADR-021): the topology of the reference machine `slate`, one deskside module with two

@@ -211,6 +211,7 @@ if(BUILD_TESTING)
         tests/devices/xbow_test.cpp
         tests/scsi/scsi_test.cpp
         tests/backends/console_test.cpp
+        tests/backends/real_time_pacer_test.cpp
         tests/backends/terminal_input_test.cpp
     )
     target_link_libraries(device_tests PRIVATE ultraviolent_devices ultraviolent_backends

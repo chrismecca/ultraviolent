@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -264,6 +265,13 @@ class Ip27Machine {
         stop_requested_ = true;
     }
 
+    // Host pacing (for interactive use, main's --realtime): the run's host threads wait until
+    // host time `until` before they go on, each where it holds no lock (a CPU thread at the top
+    // of its loop, parked). Usable from an event. Nothing the guest sees changes.
+    void hold_host_until(std::chrono::steady_clock::time_point until) {
+        host_hold_.store(until.time_since_epoch().count(), std::memory_order_relaxed);
+    }
+
     // CPU `index` (which must be installed): node index * 2 + slice, so 0 is the first node's
     // slice A and 1 its slice B.
     [[nodiscard]] mips::Cpu& cpu(unsigned index = 0) {
@@ -475,6 +483,8 @@ class Ip27Machine {
     // On host threads, under the device lock: device time moves to the CPU's time if that is
     // later, and the events due by then run; then the next event's cycle is published.
     void advance_device_time(std::uint64_t cycles);
+    // hold_host_until's time while it is still ahead of the host's clock.
+    [[nodiscard]] std::optional<std::chrono::steady_clock::time_point> host_hold() const;
     void publish_next_event();
     // A device access by the calling thread's CPU, under the device lock.
     template <typename Access> auto locked_access(Access access);
@@ -664,6 +674,8 @@ class Ip27Machine {
     SpinLock device_lock_;
     std::atomic<std::uint64_t> parallel_next_event_{};
     std::atomic<bool> parallel_stop_{};
+    // hold_host_until's time, in steady_clock ticks; 0 when the run was never held.
+    std::atomic<std::chrono::steady_clock::rep> host_hold_{};
     // CPU threads that have finished their run.
     std::atomic<unsigned> parallel_finished_{};
     // The CPU the calling host thread runs, while CPUs run on threads.

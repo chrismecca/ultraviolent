@@ -226,6 +226,19 @@ R10000 default) and refuse another.
   the next event deadline (events fire there), and immediately before any device access
   (devices see the time at the start of the accessing instruction). Deterministic by
   construction (ADR-005, ADR-018).
+* Host pacing (`--realtime`, for interactive use; ARCHITECTURE.adoc "Wall clock may pace a
+  guest"). `backends::RealTimePacer` compares virtual time since the start of the run with
+  host time since then; main's host check event (every 10 ms of virtual time, the one that
+  also reads the stop flag) asks it how long to wait and passes that to
+  `Ip27Machine::hold_host_until`. The machine does not wait in the event: an event can run
+  under the device lock (host-parallel CPUs), where the other threads would spin. Each run
+  loop waits where it holds nothing: the one-CPU and turn-taking loops before their next
+  engine run, each CPU thread at the top of its loop, parked (a thread at the window leaves
+  its wait for this too). Only host time is spent: a paced run without input ends in the same
+  state as an unpaced one (`ip27.host_hold`, and the idle measurement in STATUS.adoc). When
+  the host falls behind, the run goes unpaced until it catches up, by at most a second; older
+  lag is forgotten (a boot that runs slower than real time, a stopped process), so the guest's
+  clock then trails the host's by that much.
 
 == Hub
 
