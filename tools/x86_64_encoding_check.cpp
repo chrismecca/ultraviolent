@@ -91,6 +91,12 @@ int main() {
             add(std::format("sub {}, {}", names32[r], imm), [=](Assembler& a) { a.sub32(reg, imm); });
         }
         add(std::format("not {}", n), [=](Assembler& a) { a.not_(reg); });
+        add(std::format("neg {}", n), [=](Assembler& a) { a.neg(reg); });
+        add(std::format("imul {}, {}", n, o), [=](Assembler& a) { a.imul(reg, other); });
+        add(std::format("mul {}", n), [=](Assembler& a) { a.mul(reg); });
+        add(std::format("imul {}", n), [=](Assembler& a) { a.imul(reg); });
+        add(std::format("div {}", n), [=](Assembler& a) { a.div(reg); });
+        add(std::format("idiv {}", n), [=](Assembler& a) { a.idiv(reg); });
         for (const std::uint8_t c : std::initializer_list<std::uint8_t>{1, 5, 31, 63}) {
             add(std::format("shl {}, {}", n, c), [=](Assembler& a) { a.shl(reg, c); });
             add(std::format("shr {}, {}", n, c), [=](Assembler& a) { a.shr(reg, c); });
@@ -221,6 +227,7 @@ int main() {
         }
     }
     add("ret", [](Assembler& a) { a.ret(); });
+    add("cqo", [](Assembler& a) { a.cqo(); });
     add("jmp .+0x1000", [](Assembler& a) { a.jmp_to(a.here() + 0x1000); });
     add("jmp .-0x1000", [](Assembler& a) { a.jmp_to(a.here() - 0x1000); });
     for (unsigned c = 0; c < 16; ++c) {

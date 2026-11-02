@@ -193,6 +193,12 @@ class GuestRegisters {
     [[nodiscard]] bool is_temp(Reg r) const {
         return hosts_[static_cast<unsigned>(r)].use == Use::temp;
     }
+    // A temporary the operation no longer reads.
+    void release_temp(Reg r) {
+        if (is_temp(r)) {
+            hosts_[static_cast<unsigned>(r)].use = Use::free;
+        }
+    }
     Reg temp() {
         const Reg r = allocate();
         hosts_[static_cast<unsigned>(r)].use = Use::temp;
@@ -247,11 +253,11 @@ class GuestRegisters {
 
   private:
     // Every register but rbx, r12, and r15 (the Cpu, the context, the cycle count), rsp, and
-    // rcx. rbp, r13, and r14 are callee-saved, which the entry code saved; no value lives
-    // across a helper call.
-    static constexpr std::array<Reg, 11> pool = {Reg::rax, Reg::rdx, Reg::rsi, Reg::rdi,
-                                                 Reg::r8,  Reg::r9,  Reg::r10, Reg::r11,
-                                                 Reg::rbp, Reg::r13, Reg::r14};
+    // the scratch registers rax, rcx, and rdx (shift counts, wide constants, and the fixed
+    // operands of multiply and divide). rbp, r13, and r14 are callee-saved, which the entry
+    // code saved; no value lives across a helper call.
+    static constexpr std::array<Reg, 9> pool = {Reg::rsi, Reg::rdi, Reg::r8,  Reg::r9, Reg::r10,
+                                                Reg::r11, Reg::rbp, Reg::r13, Reg::r14};
     enum class Use : std::uint8_t {
         unavailable,
         free,
@@ -468,6 +474,44 @@ class EmitBuilder {
     Condition sub_overflows_64(Value x, Value y) {
         return overflow(x, y, semantics::DirectBuilder::sub_overflows_64, &Assembler::sub,
                         &Assembler::sub);
+    }
+
+    Value select(Condition c, Value x, Value y) {
+        if (c.is_constant) {
+            return c.constant != 0 ? x : y;
+        }
+        const Reg r = copy(y);
+        a_.test(c.reg, c.reg);
+        a_.cmov(Cond::ne, r, materialize(x));
+        return reg(r);
+    }
+    Value multiply(Value x, Value y) {
+        if (x.is_constant && y.is_constant) {
+            return constant(semantics::DirectBuilder::multiply(x.constant, y.constant));
+        }
+        const Reg r = copy(x);
+        a_.imul(r, materialize(y));
+        return reg(r);
+    }
+    struct Wide {
+        Value hi;
+        Value lo;
+    };
+    Wide multiply_wide_signed(Value x, Value y) {
+        return multiply_wide(x, y, true);
+    }
+    Wide multiply_wide_unsigned(Value x, Value y) {
+        return multiply_wide(x, y, false);
+    }
+    struct Division {
+        Value quotient;
+        Value remainder;
+    };
+    Division divide_signed(Value x, Value y) {
+        return divide(x, y, true);
+    }
+    Division divide_unsigned(Value x, Value y) {
+        return divide(x, y, false);
     }
 
     // Branches to the operation's exception exit when c holds; translation continues either
@@ -793,6 +837,82 @@ class EmitBuilder {
         a_.jcc(Cond::ne, slow);
         a_.mov(t, Mem{Reg::rbx, base + layout_.host_page_addend, entry});
         return Mem{t, 0, va};
+    }
+
+    // The x86 forms take rax and leave the result in rdx:rax; both are scratch, outside the
+    // pool, so no guest value or temporary is there. The other operand goes in rcx. The
+    // operands are consumed (operations.hpp), so temporaries holding them are freed, and the
+    // results stay in rax and rdx: valid until the next multiply or divide, which no operation
+    // makes before using them.
+    void load_operands(Value x, Value y) {
+        if (y.is_constant) {
+            a_.mov(Reg::rcx, y.constant);
+        } else {
+            a_.mov(Reg::rcx, y.reg);
+        }
+        if (x.is_constant) {
+            a_.mov(Reg::rax, x.constant);
+        } else {
+            a_.mov(Reg::rax, x.reg);
+        }
+        for (const Value& v : {x, y}) {
+            if (!v.is_constant) {
+                registers_.release_temp(v.reg);
+            }
+        }
+    }
+    Wide multiply_wide(Value x, Value y, bool is_signed) {
+        if (x.is_constant && y.is_constant) {
+            const auto p = is_signed
+                               ? semantics::DirectBuilder::multiply_wide_signed(x.constant, y.constant)
+                               : semantics::DirectBuilder::multiply_wide_unsigned(x.constant,
+                                                                                 y.constant);
+            return {constant(p.hi), constant(p.lo)};
+        }
+        load_operands(x, y);
+        if (is_signed) {
+            a_.imul(Reg::rcx);
+        } else {
+            a_.mul(Reg::rcx);
+        }
+        return {reg(Reg::rdx), reg(Reg::rax)};
+    }
+    // The builder's division, defined for every input: a zero divisor gives 0 and 0 (x86
+    // would fault), and a signed division by -1 gives the negation and 0 (x86 would fault on
+    // the most negative dividend).
+    Division divide(Value x, Value y, bool is_signed) {
+        if (x.is_constant && y.is_constant) {
+            const auto d = is_signed
+                               ? semantics::DirectBuilder::divide_signed(x.constant, y.constant)
+                               : semantics::DirectBuilder::divide_unsigned(x.constant, y.constant);
+            return {constant(d.quotient), constant(d.remainder)};
+        }
+        load_operands(x, y);
+        const Label zero = a_.label();
+        const Label done = a_.label();
+        a_.test(Reg::rcx, Reg::rcx);
+        a_.jcc(Cond::e, zero);
+        if (is_signed) {
+            const Label minus_one = a_.label();
+            a_.cmp(Reg::rcx, -1);
+            a_.jcc(Cond::e, minus_one);
+            a_.cqo();
+            a_.idiv(Reg::rcx);
+            a_.jmp(done);
+            a_.bind(minus_one);
+            a_.neg(Reg::rax);
+            a_.xor_(Reg::rdx, Reg::rdx);
+            a_.jmp(done);
+        } else {
+            a_.xor_(Reg::rdx, Reg::rdx);
+            a_.div(Reg::rcx);
+            a_.jmp(done);
+        }
+        a_.bind(zero);
+        a_.xor_(Reg::rax, Reg::rax);
+        a_.xor_(Reg::rdx, Reg::rdx);
+        a_.bind(done);
+        return {reg(Reg::rax), reg(Reg::rdx)};
     }
 
     using Fold = std::uint64_t (*)(std::uint64_t, std::uint64_t);

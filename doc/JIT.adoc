@@ -300,6 +300,29 @@ blocks (`max_region_blocks`), joined as their predecessors are emitted
   repeat code (a block can be in several): `boot` translates 1.14 million blocks in 212,437
   regions, 790 MB with 11 discards.
 
+== Multiply and divide
+
+Counted at the helper (2026-11-02, `boot`): 263 million DDIVU went through call_semantics
+(the PROM's delay loops divide), second only to device loads. MULT, MULTU, DIV, DIVU, DMULT,
+DMULTU, DDIV, and DDIVU are in builder form (operations.hpp), with builder primitives
+`multiply`, `multiply_wide_signed`/`_unsigned`, `divide_signed`/`_unsigned`, and `select`.
+The divisions are defined for every input (a zero divisor gives 0 and 0, a signed division
+by -1 the negation and 0), and the operations select the old HI and LO for a zero divisor,
+so the interpreters' results are those of the code they replace. The 32-bit divisions are
+64-bit divisions of the extended words.
+
+Tier 1 emits IMUL for `multiply`, and the one-operand MUL/IMUL/DIV/IDIV with rdx:rax, after
+tests that keep x86 from faulting (zero divisor, and -1 for signed division). rax and rdx
+left the register pool for this (nine registers remain); the wide multiplies and divisions
+consume their operands, whose temporaries are freed, and leave their results in rax and rdx.
+Gates: `mips.tier1.builder_operations.*` with the eight operations added;
+`mips.tier1.division_edges.*` (the most negative doubleword and word divided by -1, zero
+divisors, unsigned operands with bit 63 or 31 set, each result moved out of HI and LO);
+mutation checks (no -1 test: the test process dies of SIGFPE; HI and LO of the wide product
+exchanged: 5 failures); 48,614 encodings identical to GNU as. Release, M cycles/s: `prom`
+322.5 to 366.5, `boot` 217.5 to 227.6; `cpu` and `fs` unchanged (three runs each with and
+without: 552.2/555.6 and 288.0/287.1, so the smaller pool costs nothing measurable).
+
 == FPU
 
 FPU operations are one decoded opcode (`cop1`) executed by `FpuExecutor` (fpu.cpp), whose

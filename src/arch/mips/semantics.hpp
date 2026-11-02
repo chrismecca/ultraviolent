@@ -190,6 +190,38 @@ class DirectBuilder {
     static Value from_condition(Condition c) {
         return c ? 1 : 0;
     }
+    static Value select(Condition c, Value a, Value b) {
+        return c ? a : b;
+    }
+    static Value multiply(Value a, Value b) {
+        return a * b;
+    }
+    static Product multiply_wide_signed(Value a, Value b) {
+        return semantics::multiply_signed(a, b);
+    }
+    static Product multiply_wide_unsigned(Value a, Value b) {
+        return semantics::multiply_unsigned(a, b);
+    }
+    struct Division {
+        Value quotient;
+        Value remainder;
+    };
+    static Division divide_signed(Value a, Value b) {
+        if (b == 0) {
+            return {0, 0};
+        }
+        if (as_signed(b) == -1) {
+            return {0 - a, 0};
+        }
+        return {static_cast<Value>(as_signed(a) / as_signed(b)),
+                static_cast<Value>(as_signed(a) % as_signed(b))};
+    }
+    static Division divide_unsigned(Value a, Value b) {
+        if (b == 0) {
+            return {0, 0};
+        }
+        return {a / b, a % b};
+    }
     static Condition add_overflows_32(Value a, Value b) {
         const std::int64_t sum = std::int64_t{static_cast<std::int32_t>(a)} +
                                  std::int64_t{static_cast<std::int32_t>(b)};
@@ -550,77 +582,38 @@ inline constexpr auto needs_64bit_operations = [] {
         auto b = direct();
         return operations::dsrav(b, i_);
     }
-    case DecodedOpcode::mult: { // MULT
-        const std::int64_t product =
-            std::int64_t{static_cast<std::int32_t>(rs32())} * static_cast<std::int32_t>(rt32());
-        s_.lo = sign_extend_32(static_cast<std::uint64_t>(product));
-        s_.hi = sign_extend_32(static_cast<std::uint64_t>(product) >> 32);
-        return sequential();
+    case DecodedOpcode::mult: {
+        auto b = direct();
+        return operations::mult(b, i_);
     }
-    case DecodedOpcode::multu: { // MULTU
-        const std::uint64_t product = std::uint64_t{rs32()} * rt32();
-        s_.lo = sign_extend_32(product);
-        s_.hi = sign_extend_32(product >> 32);
-        return sequential();
+    case DecodedOpcode::multu: {
+        auto b = direct();
+        return operations::multu(b, i_);
     }
-    case DecodedOpcode::div: { // DIV
-        const auto dividend = static_cast<std::int32_t>(rs32());
-        const auto divisor = static_cast<std::int32_t>(rt32());
-        // hypothesis: a zero divisor leaves HI and LO unchanged (the ISA result is
-        // UNPREDICTABLE and raises no exception).
-        if (divisor == 0) {
-            return sequential();
-        }
-        if (dividend == std::numeric_limits<std::int32_t>::min() && divisor == -1) {
-            s_.lo = sign_extend_32(static_cast<std::uint32_t>(dividend));
-            s_.hi = 0;
-            return sequential();
-        }
-        s_.lo = sign_extend_32(static_cast<std::uint32_t>(dividend / divisor));
-        s_.hi = sign_extend_32(static_cast<std::uint32_t>(dividend % divisor));
-        return sequential();
+    case DecodedOpcode::div: {
+        auto b = direct();
+        return operations::div(b, i_);
     }
-    case DecodedOpcode::divu: // DIVU
-        if (rt32() == 0) {
-            return sequential();
-        }
-        s_.lo = sign_extend_32(rs32() / rt32());
-        s_.hi = sign_extend_32(rs32() % rt32());
-        return sequential();
-    case DecodedOpcode::dmult: { // DMULT
-        const Product p = multiply_signed(rs(), rt());
-        s_.hi = p.hi;
-        s_.lo = p.lo;
-        return sequential();
+    case DecodedOpcode::divu: {
+        auto b = direct();
+        return operations::divu(b, i_);
     }
-    case DecodedOpcode::dmultu: { // DMULTU
-        const Product p = multiply_unsigned(rs(), rt());
-        s_.hi = p.hi;
-        s_.lo = p.lo;
-        return sequential();
+    case DecodedOpcode::dmult: {
+        auto b = direct();
+        return operations::dmult(b, i_);
     }
-    case DecodedOpcode::ddiv: { // DDIV
-        const std::int64_t dividend = as_signed(rs());
-        const std::int64_t divisor = as_signed(rt());
-        if (divisor == 0) {
-            return sequential();
-        }
-        if (dividend == std::numeric_limits<std::int64_t>::min() && divisor == -1) {
-            s_.lo = rs();
-            s_.hi = 0;
-            return sequential();
-        }
-        s_.lo = static_cast<std::uint64_t>(dividend / divisor);
-        s_.hi = static_cast<std::uint64_t>(dividend % divisor);
-        return sequential();
+    case DecodedOpcode::dmultu: {
+        auto b = direct();
+        return operations::dmultu(b, i_);
     }
-    case DecodedOpcode::ddivu: // DDIVU
-        if (rt() == 0) {
-            return sequential();
-        }
-        s_.lo = rs() / rt();
-        s_.hi = rs() % rt();
-        return sequential();
+    case DecodedOpcode::ddiv: {
+        auto b = direct();
+        return operations::ddiv(b, i_);
+    }
+    case DecodedOpcode::ddivu: {
+        auto b = direct();
+        return operations::ddivu(b, i_);
+    }
     case DecodedOpcode::add: {
         auto b = direct();
         return operations::add(b, i_);

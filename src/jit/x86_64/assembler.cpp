@@ -346,6 +346,48 @@ void Assembler::not_(Reg dst) {
     modrm_register(2, code(dst));
 }
 
+void Assembler::neg(Reg dst) {
+    rex(true, 0, 0, code(dst));
+    byte(0xf7);
+    modrm_register(3, code(dst));
+}
+
+void Assembler::imul(Reg dst, Reg src) {
+    rex(true, code(dst), 0, code(src));
+    byte(0x0f);
+    byte(0xaf);
+    modrm_register(code(dst), code(src));
+}
+
+void Assembler::mul(Reg src) {
+    rex(true, 0, 0, code(src));
+    byte(0xf7);
+    modrm_register(4, code(src));
+}
+
+void Assembler::imul(Reg src) {
+    rex(true, 0, 0, code(src));
+    byte(0xf7);
+    modrm_register(5, code(src));
+}
+
+void Assembler::div(Reg src) {
+    rex(true, 0, 0, code(src));
+    byte(0xf7);
+    modrm_register(6, code(src));
+}
+
+void Assembler::idiv(Reg src) {
+    rex(true, 0, 0, code(src));
+    byte(0xf7);
+    modrm_register(7, code(src));
+}
+
+void Assembler::cqo() {
+    byte(0x48);
+    byte(0x99);
+}
+
 void Assembler::shift(unsigned extension, Reg dst, std::uint8_t count, bool wide) {
     rex(wide, 0, 0, code(dst));
     if (count == 1) {

@@ -69,7 +69,8 @@ const test::Registration discard{"mips.tier1.discard_when_the_region_is_full",
 
 // Every operation in builder form (operations.hpp), which tier 1 emits natively: random
 // registers including 0 (a constant) and 31 (the link), values at the overflow and sign
-// boundaries, every branch kind with short forward offsets, and JR/JALR/JAL through
+// boundaries (and so zero divisors, -1, and the most negative words and doublewords for the
+// divisions), every branch kind with short forward offsets, and JR/JALR/JAL through
 // registers. The reference interpreter executes the same operations through the direct
 // builder; any difference between the two builders shows here.
 std::uint32_t builder_operation(std::mt19937_64& rng) {
@@ -85,7 +86,7 @@ std::uint32_t builder_operation(std::mt19937_64& rng) {
     const auto uimm = [&] { return static_cast<std::uint32_t>(rng() % 0x10000); };
     const auto sa = [&] { return static_cast<unsigned>(rng() % 32); };
     const auto skip = [&] { return static_cast<std::int32_t>(4 * (1 + rng() % 3)); };
-    switch (rng() % 62) {
+    switch (rng() % 70) {
     case 0: return sll(reg(), reg(), sa());
     case 1: return srl(reg(), reg(), sa());
     case 2: return sra(reg(), reg(), sa());
@@ -147,9 +148,59 @@ std::uint32_t builder_operation(std::mt19937_64& rng) {
     case 58: return bgezall(reg(), skip());
     case 59: return dsra32(reg(), reg(), sa());
     case 60: return dsrl32(reg(), reg(), sa());
+    case 61: return mult(reg(), reg());
+    case 62: return multu(reg(), reg());
+    case 63: return div(reg(), reg());
+    case 64: return divu(reg(), reg());
+    case 65: return dmult(reg(), reg());
+    case 66: return dmultu(reg(), reg());
+    case 67: return ddiv(reg(), reg());
+    case 68: return ddivu(reg(), reg());
     default: return nop();
     }
 }
+
+// The divisions' edges, which random programs rarely reach: the most negative doubleword
+// and word divided by -1 (x86 faults on the first), zero divisors (HI and LO unchanged), and
+// unsigned divisions of values with bit 63 or bit 31 set; each result moved out of HI and LO.
+template <class Engine> void division_edges(test::Context& t) {
+    DifferentialWith<Engine> d;
+    d.load_skip_handlers();
+    std::vector<std::uint32_t> words;
+    for (const auto& [x, y] : {std::pair{t0, t1}, std::pair{t2, t1}, std::pair{t0, zero},
+                               std::pair{t3, t2}, std::pair{t1, t3}, std::pair{t2, t0}}) {
+        for (const std::uint32_t op : {ddiv(x, y), div(x, y), ddivu(x, y), divu(x, y),
+                                       dmult(x, y), dmultu(x, y), mult(x, y), multu(x, y)}) {
+            words.push_back(mthi(a0));
+            words.push_back(mtlo(a1));
+            words.push_back(op);
+            words.push_back(mfhi(v0));
+            words.push_back(mflo(v1));
+            words.push_back(daddu(a2, a2, v0));
+            words.push_back(daddu(a3, a3, v1));
+        }
+    }
+    words.push_back(beq(zero, zero, -4 * static_cast<std::int32_t>(words.size() + 1)));
+    words.push_back(nop());
+    for (std::size_t i = 0; i < words.size(); ++i) {
+        d.load(System::code + 4 * i, kseg0(System::code) + 4 * i, {words[i]});
+    }
+    d.both([&](System& s) {
+        s.start_kernel();
+        s.set(t0, 0x8000'0000'0000'0000);
+        s.set(t1, 0xffff'ffff'ffff'ffff);
+        s.set(t2, 0xffff'ffff'8000'0000);
+        s.set(t3, 0x0000'0000'8000'0001);
+        s.set(a0, 0x1234'5678'9abc'def0);
+        s.set(a1, 0x0fed'cba9'8765'4321);
+    });
+    t.check(d.run(t, 2 * words.size()), "matches the reference");
+}
+
+const test::Registration division_edges_tier0{"mips.tier1.division_edges.tier0",
+                                              division_edges<Tier0Engine>};
+const test::Registration division_edges_tier1{"mips.tier1.division_edges.tier1",
+                                              division_edges<Tier1Engine>};
 
 template <class Engine> void builder_operations(test::Context& t) {
     std::mt19937_64 rng{20261010};

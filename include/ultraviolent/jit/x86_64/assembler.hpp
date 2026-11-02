@@ -132,6 +132,15 @@ class Assembler {
     void add(Mem dst, std::int32_t immediate);
     void cmp_byte(Mem a, std::uint8_t immediate);
     void not_(Reg dst);
+    void neg(Reg dst);
+    void imul(Reg dst, Reg src); // dst = low 64 bits of dst * src
+    // rdx:rax = rax * src (unsigned, signed); rax = rdx:rax / src and rdx the remainder
+    // (unsigned, signed); rdx = the sign of rax (cqo).
+    void mul(Reg src);
+    void imul(Reg src);
+    void div(Reg src);
+    void idiv(Reg src);
+    void cqo();
     void add32(Reg dst, Reg src);
     void sub32(Reg dst, Reg src);
     void add32(Reg dst, std::int32_t immediate);

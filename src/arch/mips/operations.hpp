@@ -23,6 +23,17 @@
 //   from_condition(c)                   0 or 1
 //   add_overflows_32, sub_overflows_32  signed overflow of the bits 31:0 operation -> Condition
 //   add_overflows_64, sub_overflows_64  signed 64-bit overflow -> Condition
+//   select(c, a, b)                     a when c holds, otherwise b
+//   multiply(a, b)                      bits 63:0 of the product
+//   multiply_wide_signed(a, b), multiply_wide_unsigned(a, b)
+//                                       the 128-bit product, as .hi and .lo
+//   divide_signed(a, b), divide_unsigned(a, b)
+//                                       .quotient and .remainder, truncating; defined for
+//                                       every input: b = 0 gives 0 and 0, and a signed
+//                                       division by -1 gives -a (modulo 2^64) and 0
+//                                       The wide multiplies and the divisions consume a and b
+//                                       (not used again), and their results are used before
+//                                       any other wide multiply or division.
 //   raise_if(c, code)                   takes the exception when c holds; true if it did
 //   load<W, SignExtend>(address)        std::optional<Value>: empty when it took an exception
 //   store<W>(address, value)            true when it took an exception
@@ -130,6 +141,64 @@ template <class B> typename B::Result mflo(B& b, Instruction i) {
 template <class B> typename B::Result mtlo(B& b, Instruction i) {
     b.set_lo(b.gpr(i.rs()));
     return b.sequential();
+}
+
+// Multiply and divide into HI and LO (ISA MULT, DIV, and their U and D forms). A 32-bit
+// result is sign-extended from bits 31:0. A zero divisor leaves HI and LO unchanged
+// (hypothesis: the ISA result is UNPREDICTABLE and raises no exception). The 32-bit divisions
+// are 64-bit divisions of the extended words: the quotient and remainder fit in 32 bits, and
+// the one overflow, -2^31 / -1, gives the word -2^31 and remainder 0.
+template <class B> typename B::Result mult(B& b, Instruction i) {
+    const auto p = b.multiply(b.sign_extend_32(b.gpr(i.rs())), b.sign_extend_32(b.gpr(i.rt())));
+    b.set_lo(b.sign_extend_32(p));
+    b.set_hi(b.sign_extend_32(b.shift_right_logical(p, 32)));
+    return b.sequential();
+}
+template <class B> typename B::Result multu(B& b, Instruction i) {
+    const auto p = b.multiply(b.zero_extend_32(b.gpr(i.rs())), b.zero_extend_32(b.gpr(i.rt())));
+    b.set_lo(b.sign_extend_32(p));
+    b.set_hi(b.sign_extend_32(b.shift_right_logical(p, 32)));
+    return b.sequential();
+}
+template <class B> typename B::Result dmult(B& b, Instruction i) {
+    const auto p = b.multiply_wide_signed(b.gpr(i.rs()), b.gpr(i.rt()));
+    b.set_hi(p.hi);
+    b.set_lo(p.lo);
+    return b.sequential();
+}
+template <class B> typename B::Result dmultu(B& b, Instruction i) {
+    const auto p = b.multiply_wide_unsigned(b.gpr(i.rs()), b.gpr(i.rt()));
+    b.set_hi(p.hi);
+    b.set_lo(p.lo);
+    return b.sequential();
+}
+template <class B, class Quotient>
+typename B::Result divide(B& b, Quotient d, typename B::Condition zero, bool word) {
+    const auto quotient = word ? b.sign_extend_32(d.quotient) : d.quotient;
+    const auto remainder = word ? b.sign_extend_32(d.remainder) : d.remainder;
+    b.set_lo(b.select(zero, b.lo(), quotient));
+    b.set_hi(b.select(zero, b.hi(), remainder));
+    return b.sequential();
+}
+template <class B> typename B::Result div(B& b, Instruction i) {
+    const auto y = b.sign_extend_32(b.gpr(i.rt()));
+    const auto zero = b.equal(y, b.constant(0));
+    return divide(b, b.divide_signed(b.sign_extend_32(b.gpr(i.rs())), y), zero, true);
+}
+template <class B> typename B::Result divu(B& b, Instruction i) {
+    const auto y = b.zero_extend_32(b.gpr(i.rt()));
+    const auto zero = b.equal(y, b.constant(0));
+    return divide(b, b.divide_unsigned(b.zero_extend_32(b.gpr(i.rs())), y), zero, true);
+}
+template <class B> typename B::Result ddiv(B& b, Instruction i) {
+    const auto y = b.gpr(i.rt());
+    const auto zero = b.equal(y, b.constant(0));
+    return divide(b, b.divide_signed(b.gpr(i.rs()), y), zero, false);
+}
+template <class B> typename B::Result ddivu(B& b, Instruction i) {
+    const auto y = b.gpr(i.rt());
+    const auto zero = b.equal(y, b.constant(0));
+    return divide(b, b.divide_unsigned(b.gpr(i.rs()), y), zero, false);
 }
 
 // Register arithmetic and logic.
@@ -413,6 +482,14 @@ std::optional<typename B::Result> translate(B& b, DecodedOpcode op, Instruction 
     case mthi: return operations::mthi(b, i);
     case mflo: return operations::mflo(b, i);
     case mtlo: return operations::mtlo(b, i);
+    case mult: return operations::mult(b, i);
+    case multu: return operations::multu(b, i);
+    case dmult: return operations::dmult(b, i);
+    case dmultu: return operations::dmultu(b, i);
+    case DecodedOpcode::div: return operations::div(b, i);
+    case divu: return operations::divu(b, i);
+    case ddiv: return operations::ddiv(b, i);
+    case ddivu: return operations::ddivu(b, i);
     case DecodedOpcode::add: return operations::add(b, i);
     case addu: return operations::addu(b, i);
     case DecodedOpcode::sub: return operations::sub(b, i);
