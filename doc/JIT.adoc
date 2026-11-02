@@ -377,12 +377,44 @@ integer ones), and MOV.S and MOV.D.
 * **Memory** through the integer fast path and its slow path ("Native memory"). No FCSR
   field changes for any of them.
 
-Arithmetic, compares, conversions, and BC1 still run through call_semantics. Gate:
+The rest, added the same day, from counts at the helper in `cpu` (SUB.D 4.5 million, MUL.D
+and ADD.D 3 million each, BC1F and BC1T 3 million, C.EQ.D, C.LT.D, and CVT.D.W 1.5 million
+each):
+
+* **BC1 is a branch to blocks.** COP1 rs 8 decodes as its own operation, `bc1` (decode table
+  entry 240), executed exactly as `cop1` but classed as control flow, so a block ends after its
+  delay slot. Before, a block ran on past it, and each BC1 left native code and had its slot
+  stepped by the reference interpreter. Tier 1 emits BC1F, BC1T, BC1FL, and BC1TL on condition
+  0 natively (`EmitBuilder::bc1`): Coprocessor Unusable (Cause.CE 1, which `raise_helper`
+  now carries in bits 15:8 of its argument) when CU1 is clear, else a branch on FCSR bit 23.
+* **ADD, SUB, MUL, DIV .S and .D** (`fpu_arithmetic`) as `FpuExecutor::binary` computes them:
+  the SSE operation under MXCSR 0x1F80 (round to nearest, exceptions masked, flags clear; the
+  run restores the host's MXCSR on return), its flags read back. The fast path takes only the
+  case where the result is final: FCSR rounds to nearest with no exception enabled, the host
+  raised no IEEE exception but inexact and saw no denormal operand, and the result is neither
+  a NaN (MIPS NaN rules differ from x86's) nor denormal (`finish`: Unimplemented Operation or
+  flushed). Cause becomes inexact or nothing, and Flags gains it. Everything else takes the
+  slow path, which redoes the operation through call_semantics.
+* **C.cond.S and C.cond.D on condition 0** (`fpu_compare`): ordered operands set or clear
+  FCSR bit 23 from less and equal as cond bits 2 and 1 select, and clear Cause; unordered
+  operands take the slow path.
+* **CVT.D.W**: exact, so Cause cleared and the double written.
+
+Conversions other than CVT.D.W, SQRT, ABS, NEG, MOVF/MOVT/MOVZ/MOVN.fmt, the COP1X operations,
+and conditions other than 0 still run through call_semantics. Gates for the moves:
 `mips.tier1.fpu_moves.*` (random FPU moves, loads, and stores on odd and even registers under
 FR=1 and FR=0, interleaved with integer memory operations and FPU arithmetic, with MTC0 to
 Status switching FR and CU1 inside the program, compared with the reference including FPU
 state); mutation checks (the odd register's lower half instead of its upper half: 2 failures;
-a guard that always passes: 2). Release, M cycles/s: `cpu` 366.4 to 511.9.
+a guard that always passes: 2). Release, M cycles/s: `cpu` 366.4 to 511.9. Gates for the
+rest: `mips.tier1.fpu_arithmetic.*` (random arithmetic, compares on conditions 0 and 1,
+CVT.D.W, and all four BC1 forms over IEEE edge operands in both formats, FCSR rewritten inside
+the program with every rounding mode, the flush bit, and enabled exceptions, CU1 switched off
+and on, and first, directed, subtractions whose results are exactly denormal, with FS clear
+and set); mutation checks (no NaN test: 5 failures; no denormal test: 2, after the directed
+subtractions were added, which random operands had not reached; Flags not updated: 2; the
+rounding mode not tested: 2; less-or-equal as less: 4; BC1's sense inverted: fails the FPU
+suites); 53,702 encodings identical to GNU as. Release, M cycles/s: `cpu` 561.6 to 662.9.
 
 == Boundaries
 

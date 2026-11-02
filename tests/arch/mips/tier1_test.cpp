@@ -4,6 +4,7 @@
 #include "arch/mips/differential.hpp"
 #include "support/test.hpp"
 
+#include <ultraviolent/arch/mips/fpu.hpp>
 #include <ultraviolent/arch/mips/native_code.hpp>
 
 #include <cstdint>
@@ -442,6 +443,119 @@ template <class Engine> void fpu_moves(test::Context& t) {
         }
     }
 }
+
+// The FPU's arithmetic, compares, CVT.D.W, and branches, which tier 1 emits with fast paths
+// that leave every unusual case to call_semantics: operands at the IEEE edges in both formats
+// (signaling and quiet NaNs in MIPS's encoding, infinities, zeros, denormals, values whose
+// products overflow or underflow, values whose quotients are inexact, values whose differences
+// are exactly denormal from normal operands), FCSR rewritten inside
+// the program (every rounding mode, the flush bit, and now and then enabled exceptions, which
+// trap), every compare condition on condition codes 0 and 1, all four BC1 forms over short
+// skips, and Status switching CU1 off and on. FPU state is compared with the reference.
+std::uint32_t fpu_arithmetic_operation(std::mt19937_64& rng) {
+    const auto f = [&] { return static_cast<unsigned>(rng() % 20); }; // f0-f19: the edges
+    const Format fmt = rng() % 2 == 0 ? fmt_d : fmt_s;
+    const auto skip = [&] { return static_cast<std::int32_t>(4 * (1 + rng() % 3)); };
+    switch (rng() % 14) {
+    case 0: return add_fmt(fmt, f(), f(), f());
+    case 1: return sub_fmt(fmt, f(), f(), f());
+    case 2: return mul_fmt(fmt, f(), f(), f());
+    case 3: return div_fmt(fmt, f(), f(), f());
+    case 4:
+    case 5: return c_cond(fmt, static_cast<unsigned>(rng() % 16), rng() % 6 == 0 ? 1u : 0u, f(), f());
+    case 6: return cvt_d(fmt_w, f(), f());
+    case 7: return bc1(rng() % 6 == 0 ? 1u : 0u, rng() % 2 == 0, rng() % 2 == 0, skip());
+    case 8: return rng() % 3 == 0 ? ctc1(16 + static_cast<unsigned>(rng() % 6), 31) : nop();
+    case 9: return rng() % 8 == 0 ? mtc0(22 + static_cast<unsigned>(rng() % 2), cp0::status) : nop();
+    case 10: return mov_fmt(fmt, f(), f());
+    case 11: return cfc1(2 + static_cast<unsigned>(rng() % 10), 31);
+    default: return add_fmt(fmt_d, f(), f(), f());
+    }
+}
+
+template <class Engine> void fpu_arithmetic(test::Context& t) {
+    std::mt19937_64 rng{20261103};
+    // Doubles in the even registers' 64 bits, singles in the odd ones' low halves (FR=1).
+    constexpr std::uint64_t doubles[] = {
+        0x3ff0'0000'0000'0000, // 1
+        0x4008'0000'0000'0000, // 3
+        0x7fe0'0000'0000'0000, // 2^1023: products overflow
+        0x0010'0000'0000'0000, // the smallest normal: products underflow
+        0x0000'0000'0000'0001, // the smallest denormal
+        0x7ff0'0000'0000'0000, // infinity
+        0x7ff4'0000'0000'0000, // a quiet NaN (MIPS)
+        0x7ff8'0000'0000'0000, // a signaling NaN (MIPS)
+        0x0018'0000'0000'0000, // 1.5 times the smallest normal: less it, a denormal, exactly
+        0x3ff8'0000'0000'0000, // 1.5
+    };
+    constexpr std::uint32_t singles[] = {
+        0x3f80'0000, 0x4040'0000, 0x7f00'0000, 0x0080'0000, 0x0000'0001,
+        0x7f80'0000, 0x7fa0'0000, 0x7fc0'0000, 0x00c0'0000, 0x3fc0'0000,
+    };
+    // FCSR values ctc1 writes: each rounding mode, flush, and enables (inexact, overflow).
+    constexpr std::uint64_t fcsrs[] = {0, 1, 2, 3, fcsr::flush, 0x80 | 0x200};
+    for (int program = 0; program < 60; ++program) {
+        DifferentialWith<Engine> d;
+        d.load_skip_handlers();
+        std::vector<std::uint32_t> words;
+        // First, directed: 1.5 times the smallest normal less the smallest normal, exactly a
+        // denormal (Unimplemented Operation with FS=0, zero with FS=1), in both formats, then
+        // again with FS set.
+        const auto holding = [&](unsigned k, bool single) {
+            return 2 * ((k + 10 - static_cast<unsigned>(program) % 10) % 10) + (single ? 1 : 0);
+        };
+        const unsigned flush = 16 + (4 + 6 - static_cast<unsigned>(program) % 6) % 6;
+        for (const std::uint32_t word :
+             {sub_fmt(fmt_d, 20, holding(8, false), holding(3, false)),
+              sub_fmt(fmt_s, 21, holding(8, true), holding(3, true)), ctc1(flush, 31),
+              sub_fmt(fmt_d, 22, holding(8, false), holding(3, false)),
+              sub_fmt(fmt_s, 23, holding(8, true), holding(3, true))}) {
+            words.push_back(word);
+        }
+        for (int i = 0; i < 120; ++i) {
+            const std::uint32_t word = fpu_arithmetic_operation(rng);
+            words.push_back(word);
+            if ((word >> 26) == 16 || (word >> 26) == 17) {
+                // After MTC0 or a COP1 branch, a word that is no branch.
+                words.push_back(i % 2 == 0 ? nop() : add_fmt(fmt_d, 1, 1, 0));
+            }
+        }
+        words.push_back(beq(zero, zero, -4 * static_cast<std::int32_t>(words.size() + 1)));
+        for (const std::uint32_t word : {nop(), nop(), nop(), nop(), beq(zero, zero, -4), nop()}) {
+            words.push_back(word);
+        }
+        for (std::size_t i = 0; i < words.size(); ++i) {
+            d.load(System::code + 4 * i, kseg0(System::code) + 4 * i, {words[i]});
+        }
+        d.both([&](System& s) {
+            s.start_kernel(kseg0(System::code), status::kx | status::cu1 | status::fr);
+            for (unsigned r = 16; r < 22; ++r) {
+                s.set(r, fcsrs[(r + static_cast<unsigned>(program)) % 6]);
+            }
+            s.set(22, status::kx | status::fr);               // coprocessor 1 unusable
+            s.set(23, status::kx | status::cu1 | status::fr); // back
+            for (unsigned n = 0; n < 20; ++n) {
+                const unsigned k = (n / 2 + static_cast<unsigned>(program)) % 10;
+                const std::uint64_t sign = (n + static_cast<unsigned>(program)) % 3 == 0
+                                               ? 0x8000'0000'0000'0000
+                                               : 0;
+                s.cpu.fpu().fpr[n] = n % 2 == 0 ? doubles[k] | sign
+                                                : singles[k] | (sign != 0 ? 0x8000'0000u : 0u);
+            }
+        });
+        if (!d.run(t, 1500)) {
+            t.check(false, std::format("program {}", program));
+            return;
+        }
+    }
+}
+
+const test::Registration fpu_arithmetic_tier0{"mips.tier1.fpu_arithmetic.tier0",
+                                              fpu_arithmetic<Tier0Engine>};
+const test::Registration fpu_arithmetic_tier1{"mips.tier1.fpu_arithmetic.tier1",
+                                              fpu_arithmetic<Tier1Engine>};
+const test::Registration fpu_arithmetic_regions{"mips.tier1.fpu_arithmetic.regions",
+                                                fpu_arithmetic<Tier1RegionEngine>};
 
 const test::Registration fpu_tier0{"mips.tier1.fpu_moves.tier0", fpu_moves<Tier0Engine>};
 const test::Registration fpu_tier1{"mips.tier1.fpu_moves.tier1", fpu_moves<Tier1Engine>};

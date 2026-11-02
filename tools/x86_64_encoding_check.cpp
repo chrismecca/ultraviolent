@@ -228,6 +228,50 @@ int main() {
     }
     add("ret", [](Assembler& a) { a.ret(); });
     add("cqo", [](Assembler& a) { a.cqo(); });
+    // Scalar SSE with xmm0 and xmm1, over the memory forms above.
+    for (unsigned x = 0; x < 2; ++x) {
+        const auto xmm = static_cast<Xmm>(x);
+        const std::string xn = std::format("xmm{}", x);
+        for (unsigned r = 0; r < 16; ++r) {
+            const auto reg = static_cast<Reg>(r);
+            add(std::format("movq {}, {}", names64[r], xn), [=](Assembler& a) { a.movq(reg, xmm); });
+            add(std::format("movd {}, {}", names32[r], xn), [=](Assembler& a) { a.movd(reg, xmm); });
+            add(std::format("cvtsi2sd {}, {}", xn, names32[r]),
+                [=](Assembler& a) { a.cvtsi2sd(xmm, reg); });
+        }
+        for (unsigned b = 0; b < 16; ++b) {
+            for (const unsigned i : {4u, 0u, 9u, 13u}) {
+                for (const std::int32_t d : {0, 8, 0x1000}) {
+                    const Mem m{static_cast<Reg>(b), d, static_cast<Reg>(i)};
+                    add(std::format("movsd {}, {}", xn, mem(m)), [=](Assembler& a) { a.movsd(xmm, m); });
+                    add(std::format("movss {}, {}", xn, mem(m, "DWORD")),
+                        [=](Assembler& a) { a.movss(xmm, m); });
+                    add(std::format("addsd {}, {}", xn, mem(m)), [=](Assembler& a) { a.addsd(xmm, m); });
+                    add(std::format("subsd {}, {}", xn, mem(m)), [=](Assembler& a) { a.subsd(xmm, m); });
+                    add(std::format("mulsd {}, {}", xn, mem(m)), [=](Assembler& a) { a.mulsd(xmm, m); });
+                    add(std::format("divsd {}, {}", xn, mem(m)), [=](Assembler& a) { a.divsd(xmm, m); });
+                    add(std::format("addss {}, {}", xn, mem(m, "DWORD")),
+                        [=](Assembler& a) { a.addss(xmm, m); });
+                    add(std::format("subss {}, {}", xn, mem(m, "DWORD")),
+                        [=](Assembler& a) { a.subss(xmm, m); });
+                    add(std::format("mulss {}, {}", xn, mem(m, "DWORD")),
+                        [=](Assembler& a) { a.mulss(xmm, m); });
+                    add(std::format("divss {}, {}", xn, mem(m, "DWORD")),
+                        [=](Assembler& a) { a.divss(xmm, m); });
+                    add(std::format("ucomisd {}, {}", xn, mem(m)),
+                        [=](Assembler& a) { a.ucomisd(xmm, m); });
+                    add(std::format("ucomiss {}, {}", xn, mem(m, "DWORD")),
+                        [=](Assembler& a) { a.ucomiss(xmm, m); });
+                    if (x == 0) {
+                        add(std::format("ldmxcsr {}", mem(m, "DWORD")),
+                            [=](Assembler& a) { a.ldmxcsr(m); });
+                        add(std::format("stmxcsr {}", mem(m, "DWORD")),
+                            [=](Assembler& a) { a.stmxcsr(m); });
+                    }
+                }
+            }
+        }
+    }
     add("jmp .+0x1000", [](Assembler& a) { a.jmp_to(a.here() + 0x1000); });
     add("jmp .-0x1000", [](Assembler& a) { a.jmp_to(a.here() - 0x1000); });
     for (unsigned c = 0; c < 16; ++c) {

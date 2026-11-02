@@ -864,6 +864,7 @@ inline constexpr auto needs_64bit_operations = [] {
         return operations::lui(b, i_);
     }
     case DecodedOpcode::cop1: // COP1, LWC1, LDC1, SWC1, SDC1
+    case DecodedOpcode::bc1:
         if (!cpu_.coprocessor_usable(1)) {
             return unusable(1);
         }

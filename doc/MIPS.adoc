@@ -29,7 +29,8 @@ execute        the instruction semantics for a DecodedInstruction (semantics.hpp
                the delay-slot state
 Interpreter    reference execution engine: fetch, decode, execute, per-cycle accounting;
                keeps no state
-execute_fpu    COP1/COP1X semantics, called by execute (the FPU stays opaque to decode)
+execute_fpu    COP1/COP1X semantics, called by execute (the FPU stays opaque to decode, but
+               for its branches, decoded as `bc1` so blocks end after their delay slots)
 Tlb            64-entry joint TLB
 ProcessorModel the processor personality (ADR-022): identity (PRId, Config, FPU ID), features,
                the decode table derived from the MIPS IV encodings, the Count rate;

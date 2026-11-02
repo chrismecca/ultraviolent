@@ -37,6 +37,7 @@
 #include <vector>
 
 #include <cpuid.h>
+#include <xmmintrin.h>
 #include <unistd.h>
 
 namespace ultraviolent::mips {
@@ -60,12 +61,19 @@ struct Context {
     // Cpu::code_changes() when the run started: every block entered was valid then, and stays
     // valid while it is unchanged.
     std::uint64_t code_changes;
+    // MXCSR for the FPU's fast paths: round to nearest, every exception masked, no flag set,
+    // denormals neither flushed nor treated as zero (the host default); and where they store
+    // MXCSR to read its flags.
+    std::uint32_t mxcsr;
+    std::uint32_t scratch;
 };
 constexpr std::int32_t context_cpu = offsetof(Context, cpu);
 constexpr std::int32_t context_limit = offsetof(Context, limit);
 constexpr std::int32_t context_deadline = offsetof(Context, deadline);
 constexpr std::int32_t context_dispatch = offsetof(Context, dispatch);
 constexpr std::int32_t context_code_changes = offsetof(Context, code_changes);
+constexpr std::int32_t context_mxcsr = offsetof(Context, mxcsr);
+constexpr std::int32_t context_scratch = offsetof(Context, scratch);
 
 static_assert(sizeof(DispatchEntry) == 32, "dispatch scales the index by 32");
 constexpr std::int32_t dispatch_pc = offsetof(DispatchEntry, pc);
@@ -89,8 +97,10 @@ std::uint64_t operation_helper(Cpu* cpu, std::uint64_t operation) {
 
 // raise_if held in native code: the exception the direct builder would have taken, then the
 // cycle (complete_cycle's exception path).
+// `code` is the exception code, with Cause.CE in bits 15:8 for Coprocessor Unusable.
 void raise_helper(Cpu* cpu, std::uint64_t code) {
-    cpu->take_exception(Exception{.code = static_cast<ExceptionCode>(code)});
+    cpu->take_exception(Exception{.code = static_cast<ExceptionCode>(code & 0xff),
+                                  .coprocessor = static_cast<std::uint8_t>(code >> 8)});
     cpu->end_cycle(false);
 }
 
@@ -337,6 +347,8 @@ class EmitBuilder {
         Label label;
         GuestRegisters::State registers;
         ExceptionCode code{};
+        // Cause.CE, for Coprocessor Unusable.
+        std::uint8_t coprocessor{};
     };
 
     EmitBuilder(Assembler& a, GuestRegisters& registers, const Cpu::NativeLayout& layout,
@@ -516,12 +528,12 @@ class EmitBuilder {
 
     // Branches to the operation's exception exit when c holds; translation continues either
     // way, so it never reports having raised.
-    bool raise_if(Condition c, ExceptionCode code) {
+    bool raise_if(Condition c, ExceptionCode code, std::uint8_t coprocessor = 0) {
         if (c.is_constant && c.constant == 0) {
             return false;
         }
         const Label label = a_.label();
-        raises_.push_back({label, registers_.state(), code});
+        raises_.push_back({label, registers_.state(), code, coprocessor});
         if (c.is_constant) {
             a_.jmp(label);
         } else {
@@ -624,7 +636,9 @@ class EmitBuilder {
     // what it must). `wide` is whether MIPS III operations are allowed (fixed by the block's
     // translation context). Empty, with nothing emitted, for every other COP1 operation.
     std::optional<Result> cop1(Instruction i, bool fr, bool wide) {
-        enum class Form : std::uint8_t { ldc1, sdc1, lwc1, swc1, mfc1, dmfc1, mtc1, dmtc1, mov };
+        enum class Form : std::uint8_t {
+            ldc1, sdc1, lwc1, swc1, mfc1, dmfc1, mtc1, dmtc1, mov, arithmetic, compare, cvt_d_w
+        };
         std::optional<Form> form;
         switch (i.opcode()) {
         case 53:
@@ -650,6 +664,12 @@ class EmitBuilder {
                 form = Form::dmtc1;
             } else if ((i.rs() == 16 || i.rs() == 17) && i.funct() == 6) {
                 form = Form::mov;
+            } else if ((i.rs() == 16 || i.rs() == 17) && i.funct() < 4) {
+                form = Form::arithmetic;
+            } else if ((i.rs() == 16 || i.rs() == 17) && i.funct() >= 48 && (i.sa() >> 2) == 0) {
+                form = Form::compare;
+            } else if (i.rs() == 20 && i.funct() == 33) {
+                form = Form::cvt_d_w;
             }
             break;
         default:
@@ -751,8 +771,43 @@ class EmitBuilder {
             }
             break;
         }
+        case Form::arithmetic:
+            fpu_arithmetic(i, doubleword, fr);
+            break;
+        case Form::compare:
+            fpu_compare(i, doubleword);
+            break;
+        case Form::cvt_d_w: {
+            // An int32 converts to a double exactly: no exception, Cause cleared.
+            a_.mov32(Reg::rax, doubleword(i.rd()));
+            a_.cvtsi2sd(Xmm::xmm0, Reg::rax);
+            a_.movq(Reg::rdx, Xmm::xmm0);
+            a_.mov(doubleword(i.sa()), Reg::rdx);
+            a_.mov32(Reg::rcx, Mem{Reg::rbx, layout_.fcsr});
+            a_.and_(Reg::rcx, static_cast<std::int32_t>(~(0x3fu << fcsr::cause_shift)));
+            a_.mov32(Mem{Reg::rbx, layout_.fcsr}, Reg::rcx);
+            break;
+        }
         }
         return sequential();
+    }
+
+    // BC1F, BC1T, BC1FL, BC1TL on condition 0 (FpuExecutor::branch): Coprocessor Unusable
+    // when CU1 is clear, otherwise a branch on FCSR bit 23. Other conditions: empty.
+    std::optional<Result> bc1(Instruction i) {
+        if (((i.rt() >> 2) & 7) != 0) {
+            return std::nullopt;
+        }
+        const Reg t = registers_.temp();
+        a_.mov32(t, Mem{Reg::rbx, layout_.status});
+        raise_if(equal(and_(reg(t), constant(status::cu1)), constant(0)),
+                 ExceptionCode::coprocessor_unusable, 1);
+        const Reg c = registers_.temp();
+        a_.mov32(c, Mem{Reg::rbx, layout_.fcsr});
+        const Value condition = and_(shift_right_logical(reg(c), 23), constant(1));
+        const bool on_true = (i.rt() & 1) != 0;
+        const std::uint64_t target = pc_ + 4 + (static_cast<std::uint64_t>(i.signed_immediate()) << 2);
+        return branch(equal(condition, constant(on_true ? 1 : 0)), target, (i.rt() & 2) != 0);
     }
 
     [[nodiscard]] static Result raised() {
@@ -837,6 +892,108 @@ class EmitBuilder {
         a_.jcc(Cond::ne, slow);
         a_.mov(t, Mem{Reg::rbx, base + layout_.host_page_addend, entry});
         return Mem{t, 0, va};
+    }
+
+    // ADD, SUB, MUL, DIV .S and .D as FpuExecutor::binary computes them: the host operation
+    // under round to nearest with every exception masked and the flags cleared, its flags read
+    // back. The fast path takes only the case where the result is final: FCSR rounds to
+    // nearest with no exception enabled (otherwise a trap or another rounding may follow), the
+    // host raised no IEEE exception but inexact (and no denormal operand), and the result is
+    // neither a NaN (MIPS NaN rules differ from x86's) nor denormal (unimplemented or flushed,
+    // FpuExecutor::finish). Then Cause is inexact or nothing, and Flags gains it. Anything else
+    // takes the slow path, which redoes the operation through call_semantics. Uses rax, rcx,
+    // rdx, and xmm0.
+    template <class Doubleword>
+    void fpu_arithmetic(Instruction i, Doubleword doubleword, bool fr) {
+        const bool is_double = i.rs() == 17;
+        const auto slow_unless = [&](Cond taken) {
+            const Label slow = a_.label();
+            slow_.push_back({slow, registers_.state()});
+            a_.jcc(taken, slow);
+        };
+        a_.mov32(Reg::rcx, Mem{Reg::rbx, layout_.fcsr});
+        a_.and_(Reg::rcx, static_cast<std::int32_t>(fcsr::rounding_mask | 0x1fu << fcsr::enable_shift));
+        slow_unless(Cond::ne);
+        a_.ldmxcsr(Mem{Reg::r12, context_mxcsr});
+        using Op = void (Assembler::*)(Xmm, Mem);
+        static constexpr Op doubles[] = {&Assembler::addsd, &Assembler::subsd, &Assembler::mulsd,
+                                         &Assembler::divsd};
+        static constexpr Op singles[] = {&Assembler::addss, &Assembler::subss, &Assembler::mulss,
+                                         &Assembler::divss};
+        if (is_double) {
+            a_.movsd(Xmm::xmm0, doubleword(i.rd()));
+            (a_.*doubles[i.funct()])(Xmm::xmm0, doubleword(i.rt()));
+            a_.movq(Reg::rdx, Xmm::xmm0);
+        } else {
+            a_.movss(Xmm::xmm0, doubleword(i.rd()));
+            (a_.*singles[i.funct()])(Xmm::xmm0, doubleword(i.rt()));
+            a_.movd(Reg::rdx, Xmm::xmm0);
+        }
+        a_.stmxcsr(Mem{Reg::r12, context_scratch});
+        // The result's bits without the sign, doubled: above the infinity's, a NaN; nonzero
+        // and below the smallest normal's, a denormal.
+        a_.mov(Reg::rcx, Reg::rdx);
+        a_.add(Reg::rcx, Reg::rcx);
+        if (!is_double) {
+            a_.mov32(Reg::rcx, Reg::rcx); // bits 31:0: the word's sign shifted out
+        }
+        a_.mov(Reg::rax, is_double ? 0xffe0'0000'0000'0000 : std::uint64_t{0xff00'0000});
+        a_.cmp(Reg::rcx, Reg::rax);
+        slow_unless(Cond::a);
+        a_.sub(Reg::rcx, 1);
+        a_.mov(Reg::rax, is_double ? 0x001f'ffff'ffff'ffff : std::uint64_t{0x00ff'ffff});
+        a_.cmp(Reg::rcx, Reg::rax);
+        slow_unless(Cond::b);
+        a_.movzx_byte(Reg::rax, Mem{Reg::r12, context_scratch});
+        a_.mov(Reg::rcx, Reg::rax);
+        a_.and_(Reg::rcx, 0x1f); // invalid, denormal operand, divide by zero, overflow, underflow
+        slow_unless(Cond::ne);
+        // The result (FpuExecutor::write_result), then Cause and Flags from inexact (MXCSR PE,
+        // bit 5): Cause.I is bit 12, Flags.I bit 2.
+        if (is_double) {
+            a_.mov(doubleword(i.sa()), Reg::rdx);
+        } else if (fr) {
+            a_.mov(doubleword(i.sa()), Reg::rdx);
+        } else {
+            a_.mov32(doubleword(i.sa()), Reg::rdx);
+        }
+        a_.and_(Reg::rax, 0x20);
+        a_.mov(Reg::rdx, Reg::rax);
+        a_.shl(Reg::rax, 7);
+        a_.shr(Reg::rdx, 3);
+        a_.mov32(Reg::rcx, Mem{Reg::rbx, layout_.fcsr});
+        a_.and_(Reg::rcx, static_cast<std::int32_t>(~(0x3fu << fcsr::cause_shift)));
+        a_.or_(Reg::rcx, Reg::rax);
+        a_.or_(Reg::rcx, Reg::rdx);
+        a_.mov32(Mem{Reg::rbx, layout_.fcsr}, Reg::rcx);
+    }
+
+    // C.cond.S and C.cond.D on condition 0 (FpuExecutor compare): ordered operands only, for
+    // which no exception is possible (Cause cleared) and the condition is less and/or equal as
+    // cond bits 2 and 1 select; unordered ones (NaNs: invalid for some conditions) take the
+    // slow path. Uses rax, rcx, and xmm0.
+    template <class Doubleword> void fpu_compare(Instruction i, Doubleword doubleword) {
+        if (i.rs() == 17) {
+            a_.movsd(Xmm::xmm0, doubleword(i.rd()));
+            a_.ucomisd(Xmm::xmm0, doubleword(i.rt()));
+        } else {
+            a_.movss(Xmm::xmm0, doubleword(i.rd()));
+            a_.ucomiss(Xmm::xmm0, doubleword(i.rt()));
+        }
+        const Label slow = a_.label();
+        slow_.push_back({slow, registers_.state()});
+        a_.jcc(Cond::p, slow);
+        const unsigned cond = i.funct() & 6;
+        a_.mov(Reg::rax, std::uint64_t{0});
+        if (cond != 0) {
+            // ucomis: CF less, ZF equal.
+            a_.setcc(cond == 6 ? Cond::be : cond == 4 ? Cond::b : Cond::e, Reg::rax);
+        }
+        a_.shl(Reg::rax, 23);
+        a_.mov32(Reg::rcx, Mem{Reg::rbx, layout_.fcsr});
+        a_.and_(Reg::rcx, static_cast<std::int32_t>(~(0x3fu << fcsr::cause_shift | fcsr::condition0)));
+        a_.or_(Reg::rcx, Reg::rax);
+        a_.mov32(Mem{Reg::rbx, layout_.fcsr}, Reg::rcx);
     }
 
     // The x86 forms take rax and leave the result in rdx:rax; both are scratch, outside the
@@ -1069,8 +1226,13 @@ class X86_64NativeCode final : public NativeCode {
                         .limit = &limit,
                         .deadline = std::min(limit, cpu_.next_internal_event_cycle()),
                         .dispatch = dispatch,
-                        .code_changes = cpu_.code_changes()};
+                        .code_changes = cpu_.code_changes(),
+                        .mxcsr = 0x1f80,
+                        .scratch = 0};
+        // The FPU's fast paths load their own MXCSR; the host's comes back after.
+        const unsigned host_mxcsr = _mm_getcsr();
         const std::uint64_t exit = entry_(&context, code);
+        _mm_setcsr(host_mxcsr);
         return {.reason = static_cast<BlockExit>(exit & 0xff)};
     }
 
@@ -1547,6 +1709,9 @@ class X86_64NativeCode final : public NativeCode {
                     result = b.cop1(op.instruction, cpu_.fpu_64bit_registers(),
                                     cpu_.allows_64bit_operations());
                 }
+                if (!result && op.opcode == DecodedOpcode::bc1 && cpu_.coprocessor_usable(1)) {
+                    result = b.bc1(op.instruction);
+                }
                 if (result) {
                     for (auto& r : raises) {
                         raise_exits.push_back({std::move(r), i, boundary});
@@ -1667,7 +1832,8 @@ class X86_64NativeCode final : public NativeCode {
             GuestRegisters::write_back(a, layout_, r.exit.registers);
             materialize(a, block, r.index, r.boundary);
             a.mov(Reg::rdi, Reg::rbx);
-            a.mov(Reg::rsi, static_cast<std::uint64_t>(r.exit.code));
+            a.mov(Reg::rsi, static_cast<std::uint64_t>(r.exit.code) |
+                                std::uint64_t{r.exit.coprocessor} << 8);
             call_helper(a, helper_raise);
             a.jmp_to(exit(BlockExit::exception));
         }

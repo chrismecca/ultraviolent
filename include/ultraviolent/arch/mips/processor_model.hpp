@@ -30,7 +30,7 @@ enum class Feature : std::uint8_t {
 };
 
 // Entries in decode's table (decoded.hpp "decode").
-inline constexpr std::size_t decode_table_size = 240;
+inline constexpr std::size_t decode_table_size = 241;
 
 // A processor personality (ADR-022): the guest-visible CPU implementation, as data that the
 // CPU, the decoder, and the semantics consult and that execution engines may query in

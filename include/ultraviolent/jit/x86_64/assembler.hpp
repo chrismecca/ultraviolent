@@ -31,6 +31,9 @@ enum class Reg : std::uint8_t {
     r15,
 };
 
+// SSE registers; generated code uses them only within one operation.
+enum class Xmm : std::uint8_t { xmm0, xmm1 };
+
 // [base + index + displacement]; rsp as the index means none (it cannot be one).
 struct Mem {
     Reg base;
@@ -141,6 +144,27 @@ class Assembler {
     void div(Reg src);
     void idiv(Reg src);
     void cqo();
+
+    // Scalar SSE: loads, arithmetic and unordered compares with a memory operand, moves to
+    // general registers (movq 64 bits, movd 32 bits zero-extended), int32 to double, and
+    // MXCSR.
+    void movsd(Xmm dst, Mem src);
+    void movss(Xmm dst, Mem src);
+    void addsd(Xmm dst, Mem src);
+    void subsd(Xmm dst, Mem src);
+    void mulsd(Xmm dst, Mem src);
+    void divsd(Xmm dst, Mem src);
+    void addss(Xmm dst, Mem src);
+    void subss(Xmm dst, Mem src);
+    void mulss(Xmm dst, Mem src);
+    void divss(Xmm dst, Mem src);
+    void ucomisd(Xmm a, Mem b);
+    void ucomiss(Xmm a, Mem b);
+    void movq(Reg dst, Xmm src);
+    void movd(Reg dst, Xmm src);
+    void cvtsi2sd(Xmm dst, Reg src32);
+    void ldmxcsr(Mem src);
+    void stmxcsr(Mem dst);
     void add32(Reg dst, Reg src);
     void sub32(Reg dst, Reg src);
     void add32(Reg dst, std::int32_t immediate);
@@ -198,6 +222,8 @@ class Assembler {
     void shift(unsigned extension, Reg dst, std::uint8_t count, bool wide);
     void shift_cl(unsigned extension, Reg dst, bool wide);
     void jump_to(Label target, std::uint8_t opcode1, std::int16_t opcode2);
+    // [prefix] [REX] 0F opcode with ModRM reg `reg` and memory `m` (prefix 0: none).
+    void sse(std::uint8_t prefix, std::uint8_t opcode, unsigned reg, Mem m);
 
     struct Fixup {
         std::size_t at; // the rel32 field

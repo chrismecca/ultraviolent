@@ -13,7 +13,8 @@ namespace ultraviolent::mips {
 // One value per operation the R10000 distinguishes (IR.adoc "DecodedInstruction"). Words
 // that decode to the same behavior share a value: `reserved` for every reserved encoding,
 // `cop0_reserved` for reserved CP0 encodings (which check CP0 usability first), `cop1` and
-// `cop1x` for the FPU, which stays opaque (execute_fpu decodes it).
+// `cop1x` for the FPU, which stays opaque (execute_fpu decodes it), except its branches
+// (`bc1`, COP1 rs 8), which blocks must know as branches.
 enum class DecodedOpcode : std::uint8_t {
     // SPECIAL
     sll,
@@ -120,6 +121,7 @@ enum class DecodedOpcode : std::uint8_t {
     cop0_reserved,
     // Coprocessors 1 and 2
     cop1,  // COP1, LWC1, LDC1, SWC1, SDC1
+    bc1,   // BC1F, BC1T, BC1FL, BC1TL (COP1 rs 8)
     cop1x, // COP1X (MIPS IV)
     cop2,  // COP2, LWC2, LDC2, SWC2, SDC2: coprocessor unusable or reserved
     // Loads and stores
@@ -168,7 +170,8 @@ namespace detail {
 
 // The MIPS IV encodings, by decode's index: primary opcode 0-63 (0, 1, and 16 are decoded
 // further), SPECIAL function 64-127, REGIMM rt 128-159, COP0 rs below 16 160-175, COP0
-// function (rs 16 and up) 176-239. Encodings not listed are reserved. A processor model
+// function (rs 16 and up) 176-239, COP1 rs 8 (the FPU's branches) 240. Encodings not listed
+// are reserved. A processor model
 // derives its own table from this one (ProcessorModel::operations).
 inline constexpr std::array<DecodedOpcode, decode_table_size> mips_iv_operations = {
     DecodedOpcode::reserved,      // opcode 0
@@ -411,6 +414,7 @@ inline constexpr std::array<DecodedOpcode, decode_table_size> mips_iv_operations
     DecodedOpcode::cop0_reserved, // COP0 function 61
     DecodedOpcode::cop0_reserved, // COP0 function 62
     DecodedOpcode::cop0_reserved, // COP0 function 63
+    DecodedOpcode::bc1,           // COP1 rs 8
 };
 
 } // namespace detail
@@ -427,6 +431,7 @@ inline DecodedInstruction decode(const ProcessorModel& model, std::uint32_t word
     index = op == 1 ? 128 + i.rt() : index;
     const unsigned cop0 = i.rs() < 16 ? 160 + i.rs() : 176 + i.funct();
     index = op == 16 ? cop0 : index;
+    index = op == 17 && i.rs() == 8 ? 240 : index;
     return {.opcode = model.operations()[index], .instruction = i};
 }
 
@@ -469,7 +474,7 @@ inline constexpr auto operation_classes = [] {
     std::array<OperationClass, std::to_underlying(reserved) + 1> table{};
     for (const DecodedOpcode op :
          {jr, jalr, bltz, bgez, bltzl, bgezl, bltzal, bgezal, bltzall, bgezall,
-          j,  jal,  beq,  bne,  blez,  bgtz,  beql,   bnel,   blezl,   bgtzl}) {
+          j,  jal,  beq,  bne,  blez,  bgtz,  beql,   bnel,   blezl,   bgtzl, bc1}) {
         table[std::to_underlying(op)] = OperationClass::control;
     }
     for (const DecodedOpcode op : {mtc0, dmtc0, eret, tlbr, tlbwi, tlbwr, tlbp, cache, sync}) {

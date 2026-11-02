@@ -388,6 +388,83 @@ void Assembler::cqo() {
     byte(0x99);
 }
 
+void Assembler::sse(std::uint8_t prefix, std::uint8_t opcode, unsigned reg, Mem m) {
+    if (prefix != 0) {
+        byte(prefix);
+    }
+    rex(false, reg, index_code(m), code(m.base));
+    byte(0x0f);
+    byte(opcode);
+    modrm_memory(reg, m);
+}
+
+void Assembler::movsd(Xmm dst, Mem src) {
+    sse(0xf2, 0x10, static_cast<unsigned>(dst), src);
+}
+void Assembler::movss(Xmm dst, Mem src) {
+    sse(0xf3, 0x10, static_cast<unsigned>(dst), src);
+}
+void Assembler::addsd(Xmm dst, Mem src) {
+    sse(0xf2, 0x58, static_cast<unsigned>(dst), src);
+}
+void Assembler::subsd(Xmm dst, Mem src) {
+    sse(0xf2, 0x5c, static_cast<unsigned>(dst), src);
+}
+void Assembler::mulsd(Xmm dst, Mem src) {
+    sse(0xf2, 0x59, static_cast<unsigned>(dst), src);
+}
+void Assembler::divsd(Xmm dst, Mem src) {
+    sse(0xf2, 0x5e, static_cast<unsigned>(dst), src);
+}
+void Assembler::addss(Xmm dst, Mem src) {
+    sse(0xf3, 0x58, static_cast<unsigned>(dst), src);
+}
+void Assembler::subss(Xmm dst, Mem src) {
+    sse(0xf3, 0x5c, static_cast<unsigned>(dst), src);
+}
+void Assembler::mulss(Xmm dst, Mem src) {
+    sse(0xf3, 0x59, static_cast<unsigned>(dst), src);
+}
+void Assembler::divss(Xmm dst, Mem src) {
+    sse(0xf3, 0x5e, static_cast<unsigned>(dst), src);
+}
+void Assembler::ucomisd(Xmm a, Mem b) {
+    sse(0x66, 0x2e, static_cast<unsigned>(a), b);
+}
+void Assembler::ucomiss(Xmm a, Mem b) {
+    sse(0, 0x2e, static_cast<unsigned>(a), b);
+}
+void Assembler::ldmxcsr(Mem src) {
+    sse(0, 0xae, 2, src);
+}
+void Assembler::stmxcsr(Mem dst) {
+    sse(0, 0xae, 3, dst);
+}
+
+void Assembler::movq(Reg dst, Xmm src) {
+    byte(0x66);
+    rex(true, static_cast<unsigned>(src), 0, code(dst));
+    byte(0x0f);
+    byte(0x7e);
+    modrm_register(static_cast<unsigned>(src), code(dst));
+}
+
+void Assembler::movd(Reg dst, Xmm src) {
+    byte(0x66);
+    rex(false, static_cast<unsigned>(src), 0, code(dst));
+    byte(0x0f);
+    byte(0x7e);
+    modrm_register(static_cast<unsigned>(src), code(dst));
+}
+
+void Assembler::cvtsi2sd(Xmm dst, Reg src32) {
+    byte(0xf2);
+    rex(false, static_cast<unsigned>(dst), 0, code(src32));
+    byte(0x0f);
+    byte(0x2a);
+    modrm_register(static_cast<unsigned>(dst), code(src32));
+}
+
 void Assembler::shift(unsigned extension, Reg dst, std::uint8_t count, bool wide) {
     rex(wide, 0, 0, code(dst));
     if (count == 1) {

@@ -115,6 +115,8 @@ enum class DecodedOpcode : std::uint8_t {
     sll, srl, sra, ...        // one value per operation
     cop0_reserved,            // reserved CP0 encodings (CP0 usability is checked first)
     cop1, cop1x,              // the FPU, opaque in tier 0: execute_fpu(cpu, word)
+    bc1,                      // the FPU's branches (COP1 rs 8): execute_fpu, but a branch
+                              // for blocks (JIT.adoc "FPU")
     cop2,                     // COP2, LWC2, SWC2, LDC2, SDC2
     reserved,                 // every other reserved encoding
 };
