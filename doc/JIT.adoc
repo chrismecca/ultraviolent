@@ -302,6 +302,15 @@ blocks (`max_region_blocks`), joined as their predecessors are emitted
   joining a copy of it; then with entry states limited to the registers a block reads. Three
   runs each, M cycles/s, `boot`/`cpu`/`fs`: before 238.9/557.7/292.4; carried 230.7/546.8/283.4;
   limited 231.9/555.1/286.6. More code and more translation outweighed the stores saved.
+* **Only blocks that ran (2026-11-02).** A block joins only when tier 0's cache holds it in the
+  translation context with at least one hit (`BlockInterpreter::RegionJoins::ran`); joining
+  every reachable block translated about twice the code for paths that never ran (`fs` 98
+  against 49 MB and 0.41 against 0.25 s translating; `boot` 790 against 479 MB, 3.0 against
+  2.0 s). Three runs, release, M cycles/s, `boot`/`cpu`/`fs`: 238.9/557.7/292.4 to
+  242.4/570.1/296.6. Tests translate on first execution, when nothing has run yet, so the
+  differential suites also run with `RegionJoins::reachable` (`Tier1RegionEngine`:
+  `mips.tier1.*.regions`; a mutation sending every compared edge to the first target fails
+  them and the default ones).
 * **Size.** A region that does not fit an empty code region is translated as its first block
   alone. Sweep (release, M cycles/s, `boot`/`cpu`/`fs`): 1 block 200.5/311.6/251.4, 4
   207.8/325.4/262.0, 8 207.9/327.0/264.2, 16 210.0/335.6/264.6, 32 203.8/327.2/262.3. Regions

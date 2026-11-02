@@ -467,4 +467,24 @@ const test::Registration builder_tier1{"mips.tier1.builder_operations.tier1",
 const test::Registration builder_tier1_tiny{"mips.tier1.builder_operations.tier1_tiny_cache",
                                             builder_operations<Tier1TinyCacheEngine>};
 
+const test::Registration builder_regions{"mips.tier1.builder_operations.regions",
+                                         builder_operations<Tier1RegionEngine>};
+const test::Registration memory_regions{"mips.tier1.memory_operations.regions",
+                                        memory_operations<Tier1RegionEngine>};
+const test::Registration fpu_regions{"mips.tier1.fpu_moves.regions", fpu_moves<Tier1RegionEngine>};
+const test::Registration division_edges_regions{"mips.tier1.division_edges.regions",
+                                                division_edges<Tier1RegionEngine>};
+const test::Registration native_runs_regions{
+    "mips.tier1.native_code_runs.regions", [](test::Context& t) {
+        DifferentialWith<Tier1RegionEngine> d;
+        d.max_chunk = 2000;
+        load_block_chain(d, 4);
+        t.check(d.run(t, 2000), "matches the reference");
+#ifdef ULTRAVIOLENT_TIER1
+        const NativeStatistics& n = d.engine.native()->statistics();
+        t.check_equal(n.regions, std::uint64_t{1});
+        t.check_equal(n.region_blocks, std::uint64_t{3});
+#endif
+    }};
+
 } // namespace

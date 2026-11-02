@@ -97,7 +97,7 @@ bool BlockInterpreter::install_native(Entry& entry) {
         if (entry.uses < native_threshold_) {
             return false;
         }
-        RegionBlocks more{cpu_, entry.block, region_storage_};
+        RegionBlocks more{*this, cpu_, entry.block, region_storage_};
         region_entries_.clear();
         entry.native = native_->translate(entry.block, more, region_entries_);
         entry.native_epoch = native_->epoch();
@@ -139,6 +139,14 @@ bool BlockInterpreter::install_native(Entry& entry) {
 
 const Block* BlockInterpreter::RegionBlocks::block_at(std::uint64_t pc) {
     if ((pc >> 12) != (first_.start_pc >> 12)) {
+        return nullptr;
+    }
+    // By default only blocks that have run: tier 0's cache holds the pc in this context and
+    // has been hit. Joining every reachable block translated about twice the code (`fs` 98
+    // against 49 MB, `boot` 790 against 479 MB) for nothing that ran.
+    const Entry& cached = engine_.cache_[(pc >> 2) & engine_.mask_];
+    if (engine_.region_joins_ == RegionJoins::ran &&
+        (cached.pc != pc || cached.context != cpu_.code_context() || cached.uses < 1)) {
         return nullptr;
     }
     if (used_ == storage_.size()) {

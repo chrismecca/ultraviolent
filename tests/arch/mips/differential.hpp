@@ -291,7 +291,8 @@ template <class Engine> struct DifferentialWith {
 // The engine under test from tier 1 (JIT.adoc): tier 0's executor with native code for its
 // blocks. On hosts without a tier-1 backend it is tier 0.
 template <std::size_t Entries = BlockInterpreter::default_cache_entries,
-          std::size_t CodeBytes = default_native_code_bytes>
+          std::size_t CodeBytes = default_native_code_bytes,
+          BlockInterpreter::RegionJoins Joins = BlockInterpreter::RegionJoins::ran>
 class Tier1EngineSized {
   public:
     static constexpr bool decodes_unsupported = false;
@@ -300,6 +301,7 @@ class Tier1EngineSized {
         : native_{make_native_code(cpu, CodeBytes)}, interpreter_{cpu, Entries} {
         interpreter_.set_native_code(native_.get());
         interpreter_.set_native_threshold(0); // every block native
+        interpreter_.set_region_joins(Joins);
     }
 
     void add(std::uint64_t /*virtual_address*/, std::uint32_t /*word*/) {}
@@ -337,5 +339,10 @@ using Tier0Engine = Tier0EngineSized<>;
 using Tier0TinyCacheEngine = Tier0EngineSized<2>;
 using Tier1Engine = Tier1EngineSized<>;
 using Tier1TinyCacheEngine = Tier1EngineSized<2>;
+// Regions joining every reachable block: translating on first execution, the default joins
+// only blocks that already ran, which a test program's first pass has not.
+using Tier1RegionEngine = Tier1EngineSized<BlockInterpreter::default_cache_entries,
+                                           default_native_code_bytes,
+                                           BlockInterpreter::RegionJoins::reachable>;
 
 } // namespace ultraviolent::mips::testing

@@ -134,6 +134,13 @@ class BlockInterpreter {
     [[nodiscard]] std::size_t cache_entries() const {
         return cache_.size();
     }
+    // Which blocks a translation may join into its region (JIT.adoc "Regions"): those tier 0
+    // has run (the default), or every one reachable (tests, which translate on first
+    // execution and would otherwise rarely join any).
+    enum class RegionJoins : std::uint8_t { ran, reachable };
+    void set_region_joins(RegionJoins joins) {
+        region_joins_ = joins;
+    }
 
     [[nodiscard]] const BlockStatistics& statistics() const {
         return statistics_;
@@ -192,11 +199,13 @@ class BlockInterpreter {
     // page, in the current translation context (the first block's, which lookup validated).
     class RegionBlocks final : public BlockSource {
       public:
-        RegionBlocks(Cpu& cpu, const Block& first, std::vector<std::unique_ptr<Block>>& storage)
-            : cpu_{cpu}, first_{first}, storage_{storage} {}
+        RegionBlocks(const BlockInterpreter& engine, Cpu& cpu, const Block& first,
+                     std::vector<std::unique_ptr<Block>>& storage)
+            : engine_{engine}, cpu_{cpu}, first_{first}, storage_{storage} {}
         const Block* block_at(std::uint64_t pc) override;
 
       private:
+        const BlockInterpreter& engine_;
         Cpu& cpu_;
         const Block& first_;
         std::vector<std::unique_ptr<Block>>& storage_;
@@ -216,6 +225,7 @@ class BlockInterpreter {
     std::uint64_t dispatch_epoch_{};
     // Reused between translations: RegionBlocks' blocks and the translation's other entries.
     std::vector<std::unique_ptr<Block>> region_storage_;
+    RegionJoins region_joins_{RegionJoins::ran};
     std::vector<RegionEntry> region_entries_;
 };
 
