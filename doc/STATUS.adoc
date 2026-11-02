@@ -446,6 +446,31 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
+. **Tier-1 speed, on branch `jit-speed` (the user, 2026-11-02: "branch here as an experiment
+  and push on this ... while staying inside the architecture").** Not merged; every digest
+  is unchanged, so merging is the user's call. Done, in order (JIT.adoc "Measurement",
+  "Regions", "Native memory", "Multiply and divide", "Device time", "FPU", and the cycle
+  count under "Boundaries"): a perf map and code dump for generated code; regions (blocks
+  of one code page joined into one translation, then only blocks that have run); a shorter
+  memory path (context tags, an addend, MOVBE); the FPU's moves, loads, stores, arithmetic,
+  compares, CVT.D.W, and BC1 natively, with BC1 decoded as a branch; the cycle count in a
+  host register; multiply and divide in builder form and native; one CPU's PI_RT_COUNT
+  reads without synchronizing and remembered per tick. Measured and not kept: guest values
+  carried across region edges. Result (PGO, best of 3, against `v-tier1.json`; saved as
+  `local/bench/r3600/x-tier1-a.json` and `-b.json`), M cycles/s and x real time at 180 MHz:
+  prom 402.1 (1.15x, 2.23), boot 264.9 (1.13x, 1.47), cpu 676.1 (2.18x, 3.76), fs 305.5
+  (1.00x, 1.70), boot2 254.5 (1.07x), cpu2 471.2 (2.04x), mix2 368.4 (1.46x), reboot2 244.7
+  (1.07x), boot4 242.6 (1.10x), cpu4 326.6 (1.90x), reboot4 239.2 (1.12x); every digest
+  equal. Parallel (`x-parallel.json`, one run, against S4.3's): cpu2 3.48x real (2.14x),
+  mix2 2.01 (1.48x), boot2 1.05 (1.06x), reboot2 1.07 (1.09x), cpu4 2.71 (1.80x), boot4
+  0.97 (1.08x), reboot4 0.86 (1.06x). Next, by measured share: device loads through a lighter
+  helper than call_semantics (`boot`: 675 million in one boot, mostly the PROM's delay
+  loops); tier 0's share of `fs` and `boot` (about a tenth: code that runs fewer than 64
+  times, and translation); the FPU operations still in helpers (other conversions, SQRT,
+  ABS, NEG, conditional moves, COP1X, conditions other than 0); PGO training that includes
+  IRIX workloads (the PGO build trains on the PROM only, and `fs` gains less from it than
+  from the release build).
+
 . **Blocked on evidence: "Error in ust_change: Addressed slave not responding"** (twice,
   two-node boots only; never on slate, OBS-SLATE-0003). Already observed (IP27.adoc "System
   controller"): the PROM reads one byte at the controller's command address `0x20`, flips
@@ -773,6 +798,29 @@ installation": only the defective `libmp.so`) and restarts into the installed sy
 shell, `uname -aR`, `w`. The clean one-sequence demonstration is still to do
 |===
 
+----
+Date: 2026-11-02
+Milestone: performance experiment, branch `jit-speed` (the user's request)
+Hypothesis: generated code, not the architecture, limits speed; known JIT techniques get
+  most of it without changing anything the guest sees.
+Evidence: perf with a map of generated code and a code dump (new), attributed by block and
+  by operation; counts of operations reaching call_semantics (temporary instrumentation);
+  three-run comparisons on one release build per change.
+Changed: see Next task (branch `jit-speed`, 11 commits after `7e2bd0c`); the encoder gained
+  indexed operands, MOVBE, OR from memory, IMUL/MUL/DIV/IDIV/NEG/CQO, and scalar SSE (53,702
+  encodings identical to GNU as); the decoder distinguishes BC1 (`bc1`).
+Tests: new mips.tier1.fpu_moves.*, fpu_arithmetic.*, division_edges.*, the region variants
+  (`Tier1RegionEngine`), ip27.rt_count_back_to_back; mutation checks for each fast path; dev
+  and asan green, also without MOVBE; every workload digest equal to `v-tier1.json`.
+Newly proven: an x86 FPU fast path that defers every non-final case to the shared semantics
+  is exact and pays (the slow path is the reference's code); one CPU never has an event due
+  before its own time, so a pure read of device time needs no synchronization.
+Disproven: that block-end write-backs were worth carrying registers across edges for (more
+  code cost more than the stores saved).
+Unknowns: how much PGO trained on IRIX workloads would add.
+Best checkpoint: unchanged (no guest-visible change).
+Next step: the user's decision on merging; then Next task's first item.
+----
 == Session log template
 
 ----
