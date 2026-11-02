@@ -446,9 +446,9 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **Tier-1 speed, on branch `jit-speed` (the user, 2026-11-02: "branch here as an experiment
-  and push on this ... while staying inside the architecture").** Not merged; every digest
-  is unchanged, so merging is the user's call. Done, in order (JIT.adoc "Measurement",
+. **Tier-1 speed (the user, 2026-11-02: "branch here as an experiment and push on this ...
+  while staying inside the architecture"; developed on branch `jit-speed`, merged into
+  `main` the same day at the user's word, every digest unchanged).** Done, in order (JIT.adoc "Measurement",
   "Regions", "Native memory", "Multiply and divide", "Device time", "FPU", and the cycle
   count under "Boundaries"): a perf map and code dump for generated code; regions (blocks
   of one code page joined into one translation, then only blocks that have run); a shorter
@@ -819,7 +819,7 @@ Disproven: that block-end write-backs were worth carrying registers across edges
   code cost more than the stores saved).
 Unknowns: how much PGO trained on IRIX workloads would add.
 Best checkpoint: unchanged (no guest-visible change).
-Next step: the user's decision on merging; then Next task's first item.
+Next step: Next task's first item (merged into `main` 2026-11-02 at the user's word).
 ----
 == Session log template
 
