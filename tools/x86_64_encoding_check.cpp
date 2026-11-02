@@ -29,11 +29,14 @@ const char* const conditions[] = {"o", "no", "b", "ae", "e",  "ne", "be", "a",
                                   "s", "ns", "p", "np", "l", "ge", "le", "g"};
 
 std::string mem(Mem m, const char* size = "QWORD") {
-    if (m.displacement == 0) {
-        return std::format("{} PTR [{}]", size, names64[static_cast<unsigned>(m.base)]);
+    std::string address = names64[static_cast<unsigned>(m.base)];
+    if (m.index != Reg::rsp) {
+        address += std::format("+{}*1", names64[static_cast<unsigned>(m.index)]);
     }
-    return std::format("{} PTR [{}{:+}]", size, names64[static_cast<unsigned>(m.base)],
-                       m.displacement);
+    if (m.displacement == 0) {
+        return std::format("{} PTR [{}]", size, address);
+    }
+    return std::format("{} PTR [{}{:+}]", size, address, m.displacement);
 }
 
 struct Case {
@@ -129,6 +132,19 @@ int main() {
                     [=](Assembler& a) { a.lea(reg, m); });
                 add(std::format("cmp {}, {}", n, mem(m)), [=](Assembler& a) { a.cmp(reg, m); });
                 add(std::format("add {}, {}", n, mem(m)), [=](Assembler& a) { a.add(reg, m); });
+                add(std::format("or {}, {}", n, mem(m)), [=](Assembler& a) { a.or_(reg, m); });
+                add(std::format("movbe {}, {}", n, mem(m)),
+                    [=](Assembler& a) { a.movbe(reg, m, 8); });
+                add(std::format("movbe {}, {}", names32[r], mem(m, "DWORD")),
+                    [=](Assembler& a) { a.movbe(reg, m, 4); });
+                add(std::format("movbe {}, {}", names16[r], mem(m, "WORD")),
+                    [=](Assembler& a) { a.movbe(reg, m, 2); });
+                add(std::format("movbe {}, {}", mem(m), n),
+                    [=](Assembler& a) { a.movbe(m, reg, 8); });
+                add(std::format("movbe {}, {}", mem(m, "DWORD"), names32[r]),
+                    [=](Assembler& a) { a.movbe(m, reg, 4); });
+                add(std::format("movbe {}, {}", mem(m, "WORD"), names16[r]),
+                    [=](Assembler& a) { a.movbe(m, reg, 2); });
                 add(std::format("mov {}, {}", names32[r], mem(m, "DWORD")),
                     [=](Assembler& a) { a.mov32(reg, m); });
                 add(std::format("mov {}, {}", mem(m, "DWORD"), names32[r]),
@@ -156,6 +172,50 @@ int main() {
                         [=](Assembler& a) { a.mov(m, std::int32_t{0x1234'5678}); });
                     add(std::format("add {}, 0x1000", mem(m)),
                         [=](Assembler& a) { a.add(m, 0x1000); });
+                }
+            }
+        }
+    }
+    // Indexed operands: every base with indices that need REX.X (r8-r15, r12 and r13 among
+    // them) or not, and displacements that force each ModRM form.
+    for (unsigned r : {0u, 5u, 9u, 12u, 15u}) {
+        const auto reg = static_cast<Reg>(r);
+        for (unsigned b = 0; b < 16; ++b) {
+            for (unsigned i : {0u, 5u, 7u, 8u, 12u, 13u, 15u}) {
+                for (const std::int32_t d : {0, 8, 0x1000}) {
+                    const Mem m{static_cast<Reg>(b), d, static_cast<Reg>(i)};
+                    add(std::format("mov {}, {}", names64[r], mem(m)),
+                        [=](Assembler& a) { a.mov(reg, m); });
+                    add(std::format("mov {}, {}", mem(m), names64[r]),
+                        [=](Assembler& a) { a.mov(m, reg); });
+                    add(std::format("cmp {}, {}", names64[r], mem(m)),
+                        [=](Assembler& a) { a.cmp(reg, m); });
+                    add(std::format("mov {}, {}", names32[r], mem(m, "DWORD")),
+                        [=](Assembler& a) { a.mov32(reg, m); });
+                    add(std::format("mov {}, {}", mem(m, "WORD"), names16[r]),
+                        [=](Assembler& a) { a.mov16(m, reg); });
+                    add(std::format("movzx {}, {}", names32[r], mem(m, "BYTE")),
+                        [=](Assembler& a) { a.movzx_byte(reg, m); });
+                    add(std::format("movsx {}, {}", names64[r], mem(m, "BYTE")),
+                        [=](Assembler& a) { a.movsx_byte(reg, m); });
+                    add(std::format("movzx {}, {}", names32[r], mem(m, "WORD")),
+                        [=](Assembler& a) { a.movzx_word(reg, m); });
+                    add(std::format("mov {}, {}", mem(m, "BYTE"), names8[r]),
+                        [=](Assembler& a) { a.mov_byte(m, reg); });
+                    add(std::format("movbe {}, {}", names64[r], mem(m)),
+                        [=](Assembler& a) { a.movbe(reg, m, 8); });
+                    add(std::format("movbe {}, {}", mem(m, "DWORD"), names32[r]),
+                        [=](Assembler& a) { a.movbe(m, reg, 4); });
+                    add(std::format("movbe {}, {}", mem(m, "WORD"), names16[r]),
+                        [=](Assembler& a) { a.movbe(m, reg, 2); });
+                    if (r == 0) {
+                        add(std::format("mov {}, 0x5a", mem(m, "BYTE")),
+                            [=](Assembler& a) { a.mov_byte(m, 0x5a); });
+                        add(std::format("cmp {}, 0x1", mem(m, "BYTE")),
+                            [=](Assembler& a) { a.cmp_byte(m, 1); });
+                        add(std::format("add {}, 1", mem(m)), [=](Assembler& a) { a.add(m, 1); });
+                        add(std::format("jmp {}", mem(m)), [=](Assembler& a) { a.jmp(m); });
+                    }
                 }
             }
         }

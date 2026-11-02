@@ -19,6 +19,15 @@ constexpr bool needs_rex_for_byte(Reg r) {
     return code(r) >= 4 && code(r) < 8;
 }
 
+constexpr bool has_index(Mem m) {
+    return m.index != Reg::rsp;
+}
+
+// The index register's number for REX.X (0 when there is none).
+constexpr unsigned index_code(Mem m) {
+    return has_index(m) ? code(m.index) : 0;
+}
+
 } // namespace
 
 void Assembler::bytes32(std::uint32_t v) {
@@ -48,9 +57,15 @@ void Assembler::modrm_memory(unsigned reg, Mem m) {
     const unsigned base = code(m.base) & 7;
     // rbp and r13 as a base always need a displacement (mod 00 means RIP or no base).
     const unsigned mod = (m.displacement == 0 && base != 5) ? 0 : fits_int8(m.displacement) ? 1 : 2;
-    byte(static_cast<std::uint8_t>((mod << 6) | ((reg & 7) << 3) | base));
-    if (base == 4) {
-        byte(0x24); // SIB: no index, base rsp or r12
+    if (has_index(m)) {
+        // SIB: scale 1, the index, the base.
+        byte(static_cast<std::uint8_t>((mod << 6) | ((reg & 7) << 3) | 4));
+        byte(static_cast<std::uint8_t>(((code(m.index) & 7) << 3) | base));
+    } else {
+        byte(static_cast<std::uint8_t>((mod << 6) | ((reg & 7) << 3) | base));
+        if (base == 4) {
+            byte(0x24); // SIB: no index, base rsp or r12
+        }
     }
     if (mod == 1) {
         byte(static_cast<std::uint8_t>(m.displacement));
@@ -66,7 +81,7 @@ void Assembler::op_rr(std::uint8_t opcode, Reg reg, Reg rm, bool wide) {
 }
 
 void Assembler::op_rm(std::uint8_t opcode, Reg reg, Mem m, bool wide) {
-    rex(wide, code(reg), 0, code(m.base));
+    rex(wide, code(reg), index_code(m), code(m.base));
     byte(opcode);
     modrm_memory(code(reg), m);
 }
@@ -100,7 +115,7 @@ void Assembler::mov(Reg dst, std::uint64_t immediate) {
 }
 
 void Assembler::mov(Mem dst, std::int32_t immediate) {
-    rex(true, 0, 0, code(dst.base));
+    rex(true, 0, index_code(dst), code(dst.base));
     byte(0xc7);
     modrm_memory(0, dst);
     bytes32(static_cast<std::uint32_t>(immediate));
@@ -111,20 +126,20 @@ void Assembler::mov32(Reg dst, Reg src) {
 }
 
 void Assembler::mov_byte(Mem dst, std::uint8_t immediate) {
-    rex(false, 0, 0, code(dst.base));
+    rex(false, 0, index_code(dst), code(dst.base));
     byte(0xc6);
     modrm_memory(0, dst);
     byte(immediate);
 }
 
 void Assembler::mov_byte(Mem dst, Reg src) {
-    rex(false, code(src), 0, code(dst.base), needs_rex_for_byte(src));
+    rex(false, code(src), index_code(dst), code(dst.base), needs_rex_for_byte(src));
     byte(0x88);
     modrm_memory(code(src), dst);
 }
 
 void Assembler::movzx_byte(Reg dst, Mem src) {
-    rex(false, code(dst), 0, code(src.base));
+    rex(false, code(dst), index_code(src), code(src.base));
     byte(0x0f);
     byte(0xb6);
     modrm_memory(code(dst), src);
@@ -153,14 +168,14 @@ void Assembler::mov16(Mem dst, Reg src) {
 }
 
 void Assembler::movzx_word(Reg dst, Mem src) {
-    rex(false, code(dst), 0, code(src.base));
+    rex(false, code(dst), index_code(src), code(src.base));
     byte(0x0f);
     byte(0xb7);
     modrm_memory(code(dst), src);
 }
 
 void Assembler::movsx_byte(Reg dst, Mem src) {
-    rex(true, code(dst), 0, code(src.base));
+    rex(true, code(dst), index_code(src), code(src.base));
     byte(0x0f);
     byte(0xbe);
     modrm_memory(code(dst), src);
@@ -277,8 +292,36 @@ void Assembler::add(Reg dst, Mem src) {
     op_rm(0x03, dst, src);
 }
 
+void Assembler::or_(Reg dst, Mem src) {
+    op_rm(0x0b, dst, src);
+}
+
+void Assembler::movbe(Reg dst, Mem src, unsigned bytes) {
+    invariant(bytes == 2 || bytes == 4 || bytes == 8, "movbe moves 2, 4, or 8 bytes");
+    if (bytes == 2) {
+        byte(0x66);
+    }
+    rex(bytes == 8, code(dst), index_code(src), code(src.base));
+    byte(0x0f);
+    byte(0x38);
+    byte(0xf0);
+    modrm_memory(code(dst), src);
+}
+
+void Assembler::movbe(Mem dst, Reg src, unsigned bytes) {
+    invariant(bytes == 2 || bytes == 4 || bytes == 8, "movbe moves 2, 4, or 8 bytes");
+    if (bytes == 2) {
+        byte(0x66);
+    }
+    rex(bytes == 8, code(src), index_code(dst), code(dst.base));
+    byte(0x0f);
+    byte(0x38);
+    byte(0xf1);
+    modrm_memory(code(src), dst);
+}
+
 void Assembler::add(Mem dst, std::int32_t immediate) {
-    rex(true, 0, 0, code(dst.base));
+    rex(true, 0, index_code(dst), code(dst.base));
     if (fits_int8(immediate)) {
         byte(0x83);
         modrm_memory(0, dst);
@@ -291,7 +334,7 @@ void Assembler::add(Mem dst, std::int32_t immediate) {
 }
 
 void Assembler::cmp_byte(Mem a, std::uint8_t immediate) {
-    rex(false, 0, 0, code(a.base));
+    rex(false, 0, index_code(a), code(a.base));
     byte(0x80);
     modrm_memory(7, a);
     byte(immediate);
@@ -409,7 +452,7 @@ void Assembler::call_indirect(std::uint64_t slot) {
 }
 
 void Assembler::jmp(Mem target) {
-    rex(false, 0, 0, code(target.base));
+    rex(false, 0, index_code(target), code(target.base));
     byte(0xff);
     modrm_memory(4, target);
 }

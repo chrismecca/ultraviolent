@@ -348,6 +348,27 @@ SWL/SWR, LDL/LDR, SDL/SDR, LL/SC, CACHE, and the FPU's loads and stores stay hel
 `Cpu::NativeLayout` publishes the host page cache's layout (entry size and count, field
 offsets, byte order); its entries are 64 bytes for a shift-and-mask index.
 
+**The shorter path (2026-11-02).** After regions the memory operations were 58% of the time
+in generated code (`cpu`: `lw` 10%, `sd` 7%, `ld` 7% of all host time) at about 17 host
+instructions each. Three changes, none guest-visible:
+
+* **Context tags.** A host page's `page` field holds the page address with a small number
+  for its translation context in bits 11:3 (`Cpu::context_tag`: up to 512 numbers in an
+  open-addressed table, given as contexts appear; when all are taken, every number and every
+  tagged host page is forgotten). The address masked to its page and misaligned bits, ORed
+  with the current context's tag, is compared once: page, context, and natural alignment in
+  one comparison, where a separate context comparison took three instructions. The C++ fast
+  paths compare the same way.
+* **Addend.** Each entry holds its host bytes less the page's virtual address; the access is
+  `[addend + address]`, and the entry's fields are addressed `[Cpu + entry + field]`.
+* **MOVBE** (CPUID.1:ECX bit 22) for big-endian loads and stores of 2 (stores), 4, and 8
+  bytes, where a swap took a copy and a BSWAP. `ULTRAVIOLENT_NO_MOVBE` selects the BSWAP
+  forms (the suite passes both ways).
+
+Release, M cycles/s, one run, regions alone to all three: `cpu` 335.6 to 366.4, `fs` 264.6 to
+274.5, `boot` 210.0 to 215.2, `prom` 308.7 to 319.1. The encoder gained indexed operands,
+MOVBE, and OR from memory (48,517 encodings identical to GNU as).
+
 == x86-64 encoding
 
 A minimal in-house encoder for the instructions the emitting builder uses, checked against

@@ -76,6 +76,9 @@ Cpu::Cpu(AddressSpace& bus, Tracer& tracer, const ProcessorModel& model, unsigne
     invariant(((model.identity().config & config_big_endian) != 0) ==
                   (bus.byte_order() == ByteOrder::big),
               "Config.BE must match the system bus byte order");
+    // The starting context (0) holds the first tag, so pages filled before the first change
+    // keep theirs.
+    context_tag_ = context_tag(context_);
     reset(ResetKind::power_on);
 }
 
@@ -100,16 +103,38 @@ Cpu::NativeLayout Cpu::native_layout() const {
             .interrupt_check = at(&interrupt_check_),
             .left_host_path = at(&left_host_path_),
             .translation_context = at(&context_),
+            .context_tag = at(&context_tag_),
             .code_changes = at(&code_changes_),
             .data_pages = at(data_pages_.data()),
             .host_page_page = offsetof(HostPage, page),
             .host_page_store_page = offsetof(HostPage, store_page),
-            .host_page_bytes = offsetof(HostPage, bytes),
-            .host_page_writable_bytes = offsetof(HostPage, writable_bytes),
-            .host_page_context = offsetof(HostPage, context),
+            .host_page_addend = offsetof(HostPage, addend),
             .host_page_count = host_page_count,
             .host_page_size = sizeof(HostPage),
             .byte_order = bus_.byte_order()};
+}
+
+std::uint64_t Cpu::context_tag(std::uint64_t context) {
+    constexpr std::size_t slots = std::tuple_size_v<decltype(context_ids_)>;
+    std::size_t slot = static_cast<std::size_t>((context * 0x9e37'79b9'7f4a'7c15) >>
+                                                (64 - std::countr_zero(slots)));
+    while (context_ids_[slot].id != 0) {
+        if (context_ids_[slot].context == context) {
+            return std::uint64_t{context_ids_[slot].id - 1} << 3;
+        }
+        slot = (slot + 1) % slots;
+    }
+    if (context_ids_used_ == max_context_ids) {
+        // Every number is taken: start again, without the host pages tagged with the old
+        // numbers.
+        context_ids_.fill({});
+        context_ids_used_ = 0;
+        code_pages_.fill({});
+        data_pages_.fill({});
+        return context_tag(context);
+    }
+    context_ids_[slot] = {.context = context, .id = static_cast<std::uint32_t>(++context_ids_used_)};
+    return std::uint64_t{context_ids_[slot].id - 1} << 3;
 }
 
 void Cpu::reset(ResetKind kind) {
@@ -602,7 +627,7 @@ std::optional<Cpu::CodePage> Cpu::code_page(std::uint64_t address) {
     const std::uint64_t page = address & ~page_offset_mask;
     const auto hit = [&]() -> std::optional<CodePage> {
         const HostPage& entry = code_pages_[host_page_slot(address)];
-        if (entry.page == page && entry.context == translation_context()) {
+        if (entry.page == host_page_tag(address)) {
             return CodePage{entry.bytes, bus_.byte_order(), entry.block, entry.frame,
                             entry.tlb_index};
         }
@@ -891,22 +916,25 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
         }
         const auto bytes = bus_.writable_memory_bytes(frame, page_size);
         if (bytes.size() == page_size) {
-            data_pages_[host_page_slot(address)] = {page,
-                                                    bytes.data(),
-                                                    bytes.data(),
-                                                    translation_context(),
-                                                    translation.tlb_index,
-                                                    memory->block,
-                                                    memory->offset,
-                                                    page};
+            const std::uint64_t tag = page | context_tag_;
+            data_pages_[host_page_slot(address)] = {
+                tag,           bytes.data(),   bytes.data(),
+                reinterpret_cast<std::uintptr_t>(bytes.data()) - page,
+                translation.tlb_index, memory->block, memory->offset,
+                tag};
         }
         return;
     }
     const auto bytes = bus_.memory_bytes(frame, page_size);
     if (bytes.size() == page_size) {
         (kind == AccessKind::fetch ? code_pages_ : data_pages_)[host_page_slot(address)] = {
-            page,          bytes.data(),  nullptr, translation_context(), translation.tlb_index,
-            memory->block, memory->offset};
+            page | context_tag_,
+            bytes.data(),
+            nullptr,
+            reinterpret_cast<std::uintptr_t>(bytes.data()) - page,
+            translation.tlb_index,
+            memory->block,
+            memory->offset};
     }
 }
 

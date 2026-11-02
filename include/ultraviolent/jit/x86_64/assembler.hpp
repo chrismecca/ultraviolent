@@ -31,10 +31,11 @@ enum class Reg : std::uint8_t {
     r15,
 };
 
-// [base + displacement].
+// [base + index + displacement]; rsp as the index means none (it cannot be one).
 struct Mem {
     Reg base;
     std::int32_t displacement{};
+    Reg index{Reg::rsp};
 };
 
 // Condition codes, in their encoding order (Jcc, SETcc, CMOVcc).
@@ -123,6 +124,11 @@ class Assembler {
     void cmp(Reg a, std::int32_t immediate);
     void cmp(Reg a, Mem b);
     void add(Reg dst, Mem src);
+    void or_(Reg dst, Mem src);
+    // Byte-swapping loads and stores (MOVBE; the host must support it), by width in bytes
+    // (2, 4, 8). A 2-byte load leaves bits 63:16 unchanged; a 4-byte load zero-extends.
+    void movbe(Reg dst, Mem src, unsigned bytes);
+    void movbe(Mem dst, Reg src, unsigned bytes);
     void add(Mem dst, std::int32_t immediate);
     void cmp_byte(Mem a, std::uint8_t immediate);
     void not_(Reg dst);

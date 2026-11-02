@@ -352,8 +352,7 @@ class Cpu final : public InterruptSink {
     }
     std::expected<std::uint32_t, Exception> fetch(std::uint64_t address) {
         const HostPage& page = code_pages_[host_page_slot(address)];
-        if (page.page == (address & ~page_offset_mask) && address % 4 == 0 &&
-            page.context == translation_context()) [[likely]] {
+        if (page.page == host_page_tag(address) && address % 4 == 0) [[likely]] {
 #ifndef NDEBUG
             invariant(host_pages_current(), "stale host page");
 #endif
@@ -545,6 +544,8 @@ class Cpu final : public InterruptSink {
         std::int32_t interrupt_check; // bool
         std::int32_t left_host_path;  // bool
         std::int32_t translation_context;
+        // The translation context's host page tag (bits 11:3; see HostPage).
+        std::int32_t context_tag;
         std::int32_t code_changes;
         // The data host page cache (load and store fast paths): host_page_count entries of
         // host_page_size bytes, selected by bits 6+ of the virtual page number; the fields of
@@ -552,9 +553,7 @@ class Cpu final : public InterruptSink {
         std::int32_t data_pages;
         std::int32_t host_page_page;
         std::int32_t host_page_store_page;
-        std::int32_t host_page_bytes;
-        std::int32_t host_page_writable_bytes;
-        std::int32_t host_page_context;
+        std::int32_t host_page_addend;
         std::uint32_t host_page_count;
         std::uint32_t host_page_size;
         ByteOrder byte_order;
@@ -656,8 +655,14 @@ class Cpu final : public InterruptSink {
         // Attention asked by another thread also stops the engines at the next boundary.
         interrupt_check_.store(exception_pending() || attention_.load(std::memory_order_relaxed),
                                std::memory_order_relaxed);
-        context_ = compute_translation_context();
+        if (const std::uint64_t context = compute_translation_context(); context != context_)
+            [[unlikely]] {
+            context_ = context;
+            context_tag_ = context_tag(context);
+        }
     }
+    // The host page tag of a translation context: a small number, in bits 11:3.
+    std::uint64_t context_tag(std::uint64_t context);
     [[nodiscard]] std::uint32_t cause_value() const {
         std::uint32_t pending = external_interrupts_;
         if (timer_interrupt_) {
@@ -679,7 +684,7 @@ class Cpu final : public InterruptSink {
         // No data page is filled while a watchpoint is armed (remember_page), and arming one
         // drops them: watched accesses need the full path.
         const HostPage& page = data_pages_[host_page_slot(address)];
-        if (page.page != (address & ~page_offset_mask) || page.context != translation_context()) {
+        if (page.page != host_page_tag(address)) {
             return nullptr;
         }
 #ifndef NDEBUG
@@ -814,6 +819,17 @@ class Cpu final : public InterruptSink {
     // tests it.
     std::atomic<bool> interrupt_check_{};
     std::uint64_t context_{};
+    std::uint64_t context_tag_{};
+    // Small numbers for translation contexts (context_tag): an open-addressed table of the
+    // contexts given one since the last reset; id 0 is a free slot. When every number is
+    // taken, all are forgotten together with the host pages tagged with them.
+    static constexpr std::size_t max_context_ids = 512;
+    struct ContextId {
+        std::uint64_t context{};
+        std::uint32_t id{};
+    };
+    std::array<ContextId, 2 * max_context_ids> context_ids_{};
+    std::size_t context_ids_used_{};
 
     // Host page caches: the host bytes of recently used 4 KiB virtual pages that translate
     // to plain memory in the bus byte order, one set for instruction fetch and one for loads
@@ -822,6 +838,9 @@ class Cpu final : public InterruptSink {
     // (TLB Modified) where a load's does not; no data entry is used while a watchpoint is
     // armed. Transparent: every hit returns or changes exactly what the full path would. An
     // entry is used only in the translation context it was filled in (translation_context());
+    // `page` holds the page's virtual address with the context's tag (context_tag) in its
+    // low bits, which no page address has, so one comparison tests both (and, in tier 1, an
+    // access's natural alignment, whose bits 2:0 no tag has);
     // a TLB write drops the entries its target and the entries it invalidated had mapped;
     // everything is dropped when translation_generation_ or the bus generation changes, as
     // soon as it changes, so a hit needs no generation check.
@@ -835,7 +854,9 @@ class Cpu final : public InterruptSink {
         std::uint64_t page{~std::uint64_t{0}};
         const std::byte* bytes{};
         std::byte* writable_bytes{};
-        std::uint64_t context{};
+        // bytes less the page's virtual address: an address's host bytes are at address +
+        // addend (tier 1).
+        std::uint64_t addend{};
         std::int8_t tlb_index{-1};
         // The memory block and offset of the frame (code-frame tracking).
         MemoryBlock* block{};
@@ -845,6 +866,9 @@ class Cpu final : public InterruptSink {
         std::uint64_t store_page{~std::uint64_t{0}};
     };
     static constexpr std::size_t host_page_count = 256;
+    [[nodiscard]] std::uint64_t host_page_tag(std::uint64_t address) const {
+        return (address & ~page_offset_mask) | context_tag_;
+    }
     [[nodiscard]] bool host_pages_current() const {
         return host_pages_translation_generation_ == translation_generation_ &&
                host_pages_bus_generation_ == bus_.generation();

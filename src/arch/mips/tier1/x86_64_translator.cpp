@@ -35,6 +35,7 @@
 #include <utility>
 #include <vector>
 
+#include <cpuid.h>
 #include <unistd.h>
 
 namespace ultraviolent::mips {
@@ -334,8 +335,10 @@ class EmitBuilder {
     };
 
     EmitBuilder(Assembler& a, GuestRegisters& registers, const Cpu::NativeLayout& layout,
-                std::uint64_t pc, std::vector<SideExit>& raises, std::vector<SideExit>& slow)
-        : a_{a}, registers_{registers}, layout_{layout}, pc_{pc}, raises_{raises}, slow_{slow} {}
+                bool movbe, std::uint64_t pc, std::vector<SideExit>& raises,
+                std::vector<SideExit>& slow)
+        : a_{a}, registers_{registers}, layout_{layout}, movbe_{movbe}, pc_{pc}, raises_{raises},
+          slow_{slow} {}
 
     [[nodiscard]] std::uint64_t pc() const {
         return pc_;
@@ -490,9 +493,8 @@ class EmitBuilder {
     // entry, natural alignment, and for a store a writable entry); anything else leaves through
     // the slow path, which runs the whole operation through call_semantics.
     template <AccessWidth W, bool SignExtend> std::optional<Value> load(Value address) {
-        const Reg host = host_address(address, byte_count(W), false);
+        const Mem m = host_address(address, byte_count(W), false);
         const Reg r = registers_.temp();
-        const Mem m{host, 0};
         const bool swap = layout_.byte_order == ByteOrder::big;
         if constexpr (W == AccessWidth::bits8) {
             if (SignExtend) {
@@ -509,13 +511,19 @@ class EmitBuilder {
                 a_.movsx_word(r, r);
             }
         } else if constexpr (W == AccessWidth::bits32) {
-            a_.mov32(r, m);
-            if (swap) {
-                a_.bswap32(r);
+            if (swap && movbe_) {
+                a_.movbe(r, m, 4);
+            } else {
+                a_.mov32(r, m);
+                if (swap) {
+                    a_.bswap32(r);
+                }
             }
             if (SignExtend) {
                 a_.movsxd(r, r);
             }
+        } else if (swap && movbe_) {
+            a_.movbe(r, m, 8);
         } else {
             a_.mov(r, m);
             if (swap) {
@@ -525,8 +533,7 @@ class EmitBuilder {
         return reg(r);
     }
     template <AccessWidth W> bool store(Value address, Value value) {
-        const Reg host = host_address(address, byte_count(W), true);
-        const Mem m{host, 0};
+        const Mem m = host_address(address, byte_count(W), true);
         const bool swap = layout_.byte_order == ByteOrder::big;
         if constexpr (W == AccessWidth::bits8) {
             if (value.is_constant) {
@@ -534,6 +541,10 @@ class EmitBuilder {
             } else {
                 a_.mov_byte(m, value.reg);
             }
+            return false;
+        }
+        if (swap && movbe_ && !value.is_constant) {
+            a_.movbe(m, value.reg, byte_count(W));
             return false;
         }
         // The value in memory order, in a temporary.
@@ -620,11 +631,13 @@ class EmitBuilder {
         return r;
     }
 
-    // The host address of `size` bytes at guest `address`, after the host page cache tests
-    // (Cpu::data_page): the entry for the address's page (bits 17:12 select it), its page
-    // (with the address's misaligned bits, which no page has), its translation context, and
-    // for a store its store page. A miss branches to the slow path.
-    Reg host_address(Value address, std::size_t size, bool store) {
+    // The host bytes of `size` bytes at guest `address`, after the host page cache tests
+    // (Cpu::data_page): the entry for the address's page (bits 17:12 select it) holds the
+    // page's address tagged with its translation context (Cpu::HostPage), which the address
+    // masked to its page and misaligned bits, tagged with the current context, must equal;
+    // a store compares the entry's store tag. A miss branches to the slow path. The bytes are
+    // at the address plus the entry's addend.
+    Mem host_address(Value address, std::size_t size, bool store) {
         const Reg va = materialize(address);
         const Reg entry = registers_.temp();
         const Reg t = registers_.temp();
@@ -632,22 +645,18 @@ class EmitBuilder {
         a_.mov(entry, va);
         a_.shr(entry, static_cast<std::uint8_t>(12 - entry_bits));
         a_.and_(entry, static_cast<std::int32_t>((layout_.host_page_count - 1) << entry_bits));
-        a_.add(entry, Reg::rbx);
         const std::int32_t base = layout_.data_pages;
         a_.mov(t, va);
         a_.and_(t, static_cast<std::int32_t>(~std::uint64_t{0xfff} | (size - 1)));
+        a_.or_(t, Mem{Reg::rbx, layout_.context_tag});
         const Label slow = a_.label();
         slow_.push_back({slow, registers_.state()});
-        a_.cmp(t, Mem{entry, base + (store ? layout_.host_page_store_page : layout_.host_page_page)});
+        a_.cmp(t, Mem{Reg::rbx,
+                      base + (store ? layout_.host_page_store_page : layout_.host_page_page),
+                      entry});
         a_.jcc(Cond::ne, slow);
-        a_.mov(t, Mem{Reg::rbx, layout_.translation_context});
-        a_.cmp(t, Mem{entry, base + layout_.host_page_context});
-        a_.jcc(Cond::ne, slow);
-        a_.mov(t, va);
-        a_.and_(t, 0xfff);
-        a_.add(t, Mem{entry, base + (store ? layout_.host_page_writable_bytes
-                                           : layout_.host_page_bytes)});
-        return t;
+        a_.mov(t, Mem{Reg::rbx, base + layout_.host_page_addend, entry});
+        return Mem{t, 0, va};
     }
 
     using Fold = std::uint64_t (*)(std::uint64_t, std::uint64_t);
@@ -722,6 +731,8 @@ class EmitBuilder {
     Assembler& a_;
     GuestRegisters& registers_;
     const Cpu::NativeLayout& layout_;
+    // Whether the host has MOVBE (byte-swapping loads and stores).
+    bool movbe_;
     std::uint64_t pc_;
     std::vector<SideExit>& raises_;
     std::vector<SideExit>& slow_;
@@ -738,6 +749,13 @@ class X86_64NativeCode final : public NativeCode {
             std::snprintf(path, sizeof path, "/tmp/perf-%d.map", static_cast<int>(::getpid()));
             perf_map_ = std::fopen(path, "a");
         }
+        // MOVBE: CPUID leaf 1, ECX bit 22. ULTRAVIOLENT_NO_MOVBE tests the other path.
+        unsigned eax = 0;
+        unsigned ebx = 0;
+        unsigned ecx = 0;
+        unsigned edx = 0;
+        movbe_ = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 22)) != 0 &&
+                 std::getenv("ULTRAVIOLENT_NO_MOVBE") == nullptr;
         // ULTRAVIOLENT_JIT_DUMP=<file>: each block's guest words and host code, in hex.
         if (const char* dump = std::getenv("ULTRAVIOLENT_JIT_DUMP")) {
             jit_dump_ = std::fopen(dump, "a");
@@ -1138,11 +1156,13 @@ class X86_64NativeCode final : public NativeCode {
         std::vector<std::uint64_t> starts;
         std::uint64_t native_count = 0;
         std::uint64_t operations = 0;
+        marks_.clear();
         // Blocks join while earlier ones are emitted.
         for (std::size_t k = 0; k < region.blocks.size(); ++k) {
             const RegionBlock b = region.blocks[k];
             starts.push_back(a.here());
             a.bind(b.label);
+            mark(a, mark_entry);
             native_count += emit_block(a, region, *b.block);
             operations += b.block->operations.size();
         }
@@ -1171,6 +1191,14 @@ class X86_64NativeCode final : public NativeCode {
                              static_cast<unsigned long long>(starts[k]), size);
                 for (const DecodedInstruction& op : block.operations) {
                     std::fprintf(jit_dump_, " %08x", op.instruction.word);
+                }
+                std::fprintf(jit_dump_, "\nmarks");
+                for (const auto& [offset, kind] : marks_) {
+                    const std::uint64_t address = at + offset;
+                    if (address >= starts[k] && address < starts[k] + size) {
+                        std::fprintf(jit_dump_, " %llx:%d",
+                                     static_cast<unsigned long long>(address - starts[k]), kind);
+                    }
                 }
                 std::fprintf(jit_dump_, "\nhost ");
                 const auto* bytes = reinterpret_cast<const unsigned char*>(starts[k]);
@@ -1251,11 +1279,12 @@ class X86_64NativeCode final : public NativeCode {
             const DecodedInstruction& op = operations[i];
             const std::uint64_t pc = start + 4 * i;
             const bool last = i + 1 == count;
+            mark(a, static_cast<int>(i));
             if (native(op)) {
                 std::vector<EmitBuilder::SideExit> raises;
                 std::vector<EmitBuilder::SideExit> slow;
                 registers.begin_operation(i);
-                EmitBuilder b{a, registers, layout_, pc, raises, slow};
+                EmitBuilder b{a, registers, layout_, movbe_, pc, raises, slow};
                 if (const auto result = operations::translate(b, op.opcode, op.instruction)) {
                     for (auto& r : raises) {
                         raise_exits.push_back({std::move(r), i, boundary});
@@ -1344,12 +1373,14 @@ class X86_64NativeCode final : public NativeCode {
                 final = Final::constant;
             }
         }
+        mark(a, mark_end);
         const std::uint64_t sequential_pc = start + 4 * count;
         end_block(a, region, registers.state(), final, sequential_pc,
                   final == Final::next_pc ? std::span<const std::uint64_t>{targets}
                                           : std::span<const std::uint64_t>{&sequential_pc, 1},
                   count, boundary, delay_written, helpers);
 
+        mark(a, mark_out_of_line);
         for (const Nullified& n : nullified) {
             // pc moves past the slot; the slot takes no cycle.
             a.bind(n.label);
@@ -1398,6 +1429,17 @@ class X86_64NativeCode final : public NativeCode {
 
         return native_count;
     }
+    // The code dump's marks: where each block's entry check, operations (by index), end, and
+    // out-of-line code start, by offset in the region.
+    static constexpr int mark_entry = -1;
+    static constexpr int mark_end = -2;
+    static constexpr int mark_out_of_line = -3;
+    void mark(const Assembler& a, int kind) {
+        if (jit_dump_ != nullptr) {
+            marks_.emplace_back(a.size(), kind);
+        }
+    }
+
     // Where the next allocation (16-byte aligned) will execute.
     std::uint64_t next_address() const {
         return memory_.executable_start() + (memory_.used() + 15) / 16 * 16;
@@ -1413,8 +1455,10 @@ class X86_64NativeCode final : public NativeCode {
     std::uint64_t dispatch_{};
     std::uint64_t epoch_{};
     NativeStatistics statistics_;
+    bool movbe_{};
     std::FILE* perf_map_{};
     std::FILE* jit_dump_{};
+    std::vector<std::pair<std::size_t, int>> marks_;
 };
 
 } // namespace
