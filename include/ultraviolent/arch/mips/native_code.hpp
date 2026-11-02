@@ -32,16 +32,15 @@ inline constexpr std::size_t dispatch_entries = std::size_t{1} << 15;
     return (pc >> 2) & (dispatch_entries - 1);
 }
 
-// Why native code returned (BlockExit), and how many blocks it entered.
+// Why native code returned (BlockExit).
 //
 // BlockExit::completed: a block ended and the next was not in the dispatch table.
 // BlockExit::run_limit: the next block might pass the run limit or the CPU's next internal
-// event (blocks == 0: the first block; BlockInterpreter runs it decoded, exactly), or the
-// limit or event arrived. BlockExit::pending_exception: an interrupt or delayed watch exception
-// is pending at a boundary; it is not taken. The others as for tier 0.
+// event (with no cycle taken: the first block; BlockInterpreter runs it decoded, exactly), or
+// the limit or event arrived. BlockExit::pending_exception: an interrupt or delayed watch
+// exception is pending at a boundary; it is not taken. The others as for tier 0.
 struct NativeExit {
     BlockExit reason;
-    std::uint64_t blocks;
 };
 
 // Blocks a translation may join into one region (JIT.adoc "Regions"), from BlockInterpreter.

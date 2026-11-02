@@ -73,7 +73,8 @@ BlockInterpreter::NativeRun BlockInterpreter::run_native(const std::uint64_t& li
     }
     const std::uint64_t cycles = cpu_.cycles();
     const NativeExit exit = native_->run(entry.code, limit, dispatch_.data());
-    if (exit.blocks == 0 && exit.reason == BlockExit::run_limit) {
+    // Every block that starts runs at least one operation, and every operation takes a cycle.
+    if (cpu_.cycles() == cycles && exit.reason == BlockExit::run_limit) {
         ++statistics_.native_refusals;
         return NativeRun::refused;
     }
@@ -83,9 +84,8 @@ BlockInterpreter::NativeRun BlockInterpreter::run_native(const std::uint64_t& li
     // Every operation native code ran took one cycle (an exception's too).
     const std::uint64_t operations = cpu_.cycles() - cycles;
     ++statistics_.native_runs;
-    statistics_.native_blocks += exit.blocks;
     statistics_.native_operations += operations;
-    statistics_.entries += exit.blocks;
+    ++statistics_.entries;
     statistics_.operations += operations;
     statistics_.cached_operations += operations;
     ++statistics_.exits[static_cast<std::size_t>(exit.reason)];

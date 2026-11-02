@@ -82,11 +82,10 @@ struct BlockStatistics {
     std::array<std::uint64_t, max_block_length + 1> run_lengths{};
     std::array<std::uint64_t, block_exit_count> exits{};
     std::array<std::uint64_t, Cpu::bus_access_count> barriers{};
-    // Tier 1: native runs (each continues through blocks until one leaves), blocks entered in
-    // them, runs refused because the first block might pass the run limit or the next
+    // Tier 1: native runs (each continues through blocks until one leaves; counted as one
+    // entry), runs refused because the first block might pass the run limit or the next
     // internal event, and blocks put into the dispatch table.
     std::uint64_t native_runs{};
-    std::uint64_t native_blocks{};
     std::uint64_t native_operations{};
     std::uint64_t native_refusals{};
     std::uint64_t dispatch_installs{};

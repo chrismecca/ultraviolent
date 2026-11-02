@@ -1,7 +1,8 @@
 // Tier 1 on x86-64 (JIT.adoc): decoded blocks as native code.
 //
-// Register use in generated code: rbx holds the Cpu, r12 the run's Context; both are
-// callee-saved, so helper calls keep them. The entry code saves the callee-saved registers
+// Register use in generated code: rbx holds the Cpu, r12 the run's Context, r15 the CPU's
+// cycle count (Cpu's copy is written before every helper call and exit, and read back after
+// a call); all three are callee-saved, so helper calls keep them. The entry code saves the callee-saved registers
 // and calls the block; a block returns its exit in rax (reason in bits 7:0, operations run in
 // bits 39:8). Helpers are ordinary functions reached through a table at the start of the code
 // region (call [rip + slot]), so no call depends on where the region is mapped.
@@ -55,8 +56,6 @@ struct Context {
     // The run limit or the CPU's next internal event, whichever is first: a block starts only
     // when all of its operations fit before it.
     std::uint64_t deadline;
-    // Blocks entered.
-    std::uint64_t blocks;
     const DispatchEntry* dispatch;
     // Cpu::code_changes() when the run started: every block entered was valid then, and stays
     // valid while it is unchanged.
@@ -65,7 +64,6 @@ struct Context {
 constexpr std::int32_t context_cpu = offsetof(Context, cpu);
 constexpr std::int32_t context_limit = offsetof(Context, limit);
 constexpr std::int32_t context_deadline = offsetof(Context, deadline);
-constexpr std::int32_t context_blocks = offsetof(Context, blocks);
 constexpr std::int32_t context_dispatch = offsetof(Context, dispatch);
 constexpr std::int32_t context_code_changes = offsetof(Context, code_changes);
 
@@ -248,11 +246,12 @@ class GuestRegisters {
     }
 
   private:
-    // Every register but rbx and r12 (the Cpu and the context), rsp, and rcx. rbp and
-    // r13-r15 are callee-saved, which the entry code saved; no value lives across a helper call.
-    static constexpr std::array<Reg, 12> pool = {Reg::rax, Reg::rdx, Reg::rsi, Reg::rdi,
+    // Every register but rbx, r12, and r15 (the Cpu, the context, the cycle count), rsp, and
+    // rcx. rbp, r13, and r14 are callee-saved, which the entry code saved; no value lives
+    // across a helper call.
+    static constexpr std::array<Reg, 11> pool = {Reg::rax, Reg::rdx, Reg::rsi, Reg::rdi,
                                                  Reg::r8,  Reg::r9,  Reg::r10, Reg::r11,
-                                                 Reg::rbp, Reg::r13, Reg::r14, Reg::r15};
+                                                 Reg::rbp, Reg::r13, Reg::r14};
     enum class Use : std::uint8_t {
         unavailable,
         free,
@@ -949,11 +948,10 @@ class X86_64NativeCode final : public NativeCode {
         Context context{.cpu = &cpu_,
                         .limit = &limit,
                         .deadline = std::min(limit, cpu_.next_internal_event_cycle()),
-                        .blocks = 0,
                         .dispatch = dispatch,
                         .code_changes = cpu_.code_changes()};
         const std::uint64_t exit = entry_(&context, code);
-        return {.reason = static_cast<BlockExit>(exit & 0xff), .blocks = context.blocks};
+        return {.reason = static_cast<BlockExit>(exit & 0xff)};
     }
 
     [[nodiscard]] std::uint64_t epoch() const override {
@@ -1009,6 +1007,7 @@ class X86_64NativeCode final : public NativeCode {
             }
             a.mov(Reg::r12, Reg::rdi);
             a.mov(Reg::rbx, Mem{Reg::rdi, context_cpu});
+            a.mov(Reg::r15, field(layout_.cycles));
             a.call(Reg::rsi);
             for (const Reg r : {Reg::r15, Reg::r14, Reg::r13, Reg::r12, Reg::rbp, Reg::rbx}) {
                 a.pop(r);
@@ -1018,6 +1017,7 @@ class X86_64NativeCode final : public NativeCode {
         }
         for (std::size_t reason = 0; reason < block_exit_count; ++reason) {
             Assembler a{next_address()};
+            a.mov(field(layout_.cycles), Reg::r15);
             a.mov(Reg::rax, std::uint64_t{reason});
             a.ret();
             exits_[reason] = place_permanent(a, "exit");
@@ -1027,11 +1027,10 @@ class X86_64NativeCode final : public NativeCode {
             // that is what arrived, then back to the engine.
             Assembler a{next_address()};
             const Label done = a.label();
-            a.mov(Reg::rax, field(layout_.cycles));
-            a.cmp(Reg::rax, field(layout_.timer_cycle));
+            a.cmp(Reg::r15, field(layout_.timer_cycle));
             a.jcc(Cond::ne, done);
             a.mov(Reg::rdi, Reg::rbx);
-            a.call_indirect(slot(helper_internal_event));
+            call_helper(a, helper_internal_event);
             a.bind(done);
             a.jmp_to(exit(BlockExit::run_limit));
             deadline_ = place_permanent(a, "deadline");
@@ -1060,6 +1059,12 @@ class X86_64NativeCode final : public NativeCode {
 
     [[nodiscard]] std::uint64_t exit(BlockExit reason) const {
         return exits_[static_cast<std::size_t>(reason)];
+    }
+    // A helper call: the cycle count into the Cpu before, and back after.
+    void call_helper(Assembler& a, Helper helper) const {
+        a.mov(field(layout_.cycles), Reg::r15);
+        a.call_indirect(slot(helper));
+        a.mov(Reg::r15, field(layout_.cycles));
     }
 
     // Whether `op` is emitted natively in the current translation context: in builder form, and
@@ -1095,7 +1100,7 @@ class X86_64NativeCode final : public NativeCode {
             b.exact = true;
         }
         if (index > b.cycles) {
-            a.add(field(layout_.cycles), static_cast<std::int32_t>(index - b.cycles));
+            a.add(Reg::r15, static_cast<std::int32_t>(index - b.cycles));
             b.cycles = index;
         }
     }
@@ -1179,7 +1184,7 @@ class X86_64NativeCode final : public NativeCode {
             a.mov_byte(field(layout_.delay_slot), 0);
         }
         if (ran > b.cycles) {
-            a.add(field(layout_.cycles), static_cast<std::int32_t>(ran - b.cycles));
+            a.add(Reg::r15, static_cast<std::int32_t>(ran - b.cycles));
         }
         if (final != Final::cpu) {
             std::vector<std::pair<std::uint64_t, Label>> joined;
@@ -1190,8 +1195,7 @@ class X86_64NativeCode final : public NativeCode {
             }
             if (!joined.empty()) {
                 const Label generic = a.label();
-                a.mov(Reg::rcx, field(layout_.cycles));
-                a.cmp(Reg::rcx, Mem{Reg::r12, context_deadline});
+                a.cmp(Reg::r15, Mem{Reg::r12, context_deadline});
                 a.jcc(Cond::ae, generic);
                 if (helpers) {
                     a.mov(Reg::rcx, cpu_.code_context());
@@ -1217,8 +1221,7 @@ class X86_64NativeCode final : public NativeCode {
             a.lea(Reg::rcx, Mem{Reg::rax, 4});
             a.mov(field(layout_.next_pc), Reg::rcx);
         }
-        a.mov(Reg::rcx, field(layout_.cycles));
-        a.cmp(Reg::rcx, Mem{Reg::r12, context_deadline});
+        a.cmp(Reg::r15, Mem{Reg::r12, context_deadline});
         a.jcc_to(Cond::ae, deadline_);
         a.jmp_to(dispatch_);
     }
@@ -1252,7 +1255,7 @@ class X86_64NativeCode final : public NativeCode {
         materialize(a, block, index, b);
         a.mov(Reg::rdi, Reg::rbx);
         a.mov(Reg::rsi, std::bit_cast<std::uint64_t>(block.operations[index]));
-        a.call_indirect(slot(helper_operation));
+        call_helper(a, helper_operation);
         a.test(Reg::rax, Reg::rax);
         a.jcc_to(Cond::e, exit(BlockExit::exception));
         // A bus access is a barrier (IR.adoc "Slow bus paths are barriers"): what it can change
@@ -1273,8 +1276,7 @@ class X86_64NativeCode final : public NativeCode {
             // The boundary after it, checked as tier 0 checks it.
             a.cmp_byte(field(layout_.interrupt_check), 0);
             a.jcc_to(Cond::ne, exit(BlockExit::pending_exception));
-            a.mov(Reg::rcx, field(layout_.cycles));
-            a.add(Reg::rcx, static_cast<std::int32_t>(count - index - 1));
+            a.lea(Reg::rcx, Mem{Reg::r15, static_cast<std::int32_t>(count - index - 1)});
             a.cmp(Reg::rcx, Reg::rax);
             a.jcc_to(Cond::a, exit(BlockExit::run_limit));
         }
@@ -1404,11 +1406,9 @@ class X86_64NativeCode final : public NativeCode {
         const Label limit = a.label();
         a.cmp_byte(field(layout_.interrupt_check), 0);
         a.jcc(Cond::ne, pending);
-        a.mov(Reg::rax, field(layout_.cycles));
-        a.add(Reg::rax, static_cast<std::int32_t>(count));
+        a.lea(Reg::rax, Mem{Reg::r15, static_cast<std::int32_t>(count)});
         a.cmp(Reg::rax, Mem{Reg::r12, context_deadline});
         a.jcc(Cond::a, limit);
-        a.add(Mem{Reg::r12, context_blocks}, 1);
 
         Boundary boundary{.exact = false};
         Final final = Final::constant;
@@ -1548,7 +1548,7 @@ class X86_64NativeCode final : public NativeCode {
             materialize(a, block, r.index, r.boundary);
             a.mov(Reg::rdi, Reg::rbx);
             a.mov(Reg::rsi, static_cast<std::uint64_t>(r.exit.code));
-            a.call_indirect(slot(helper_raise));
+            call_helper(a, helper_raise);
             a.jmp_to(exit(BlockExit::exception));
         }
         for (const SlowPath& p : slow_paths) {
@@ -1559,8 +1559,7 @@ class X86_64NativeCode final : public NativeCode {
             a.bind(p.exit.label);
             GuestRegisters::write_back(a, layout_, p.exit.registers);
             call_operation(a, block, p.index, p.boundary);
-            a.add(field(layout_.cycles),
-                  -static_cast<std::int32_t>(p.index + 1 - p.boundary.cycles));
+            a.sub(Reg::r15, static_cast<std::int32_t>(p.index + 1 - p.boundary.cycles));
             if (p.boundary.delay_slot) {
                 a.mov(Reg::rax, field(layout_.pc));
                 a.mov(field(layout_.next_pc), Reg::rax);

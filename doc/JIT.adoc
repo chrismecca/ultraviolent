@@ -357,7 +357,14 @@ Within one block, native code checks once, at entry:
   where they can be observed: before a helper, at a side exit, and at the block's end.
 * **Cycles** are counted at the block's end and materialized before a helper or a side exit
   (the CPU's count is the block's start plus the operations completed); a helper's own
-  `end_cycle` counts its operation.
+  `end_cycle` counts its operation. Since 2026-11-02 the count lives in r15 for the whole run:
+  the entry loads it, every helper call stores it before and loads it after
+  (`call_helper`), and the shared exits store it. Profile of `cpu` before: block entry and
+  end were 19% of host time, each block adding to the count in memory, reading it back, and
+  the next block reading it again. Blocks entered are no longer counted (a counter in memory
+  per block); a run refused at its first block is the one that took no cycle (every block
+  that starts runs an operation, and every operation takes a cycle). Release, M cycles/s:
+  `cpu` 511.9 to 565.5, `fs` 270.1 to 292.7, `prom` 314.9 to 322.5, `boot` 215.1 to 217.5.
 
 == Native memory
 
