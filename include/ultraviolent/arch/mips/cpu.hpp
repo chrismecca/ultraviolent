@@ -546,6 +546,10 @@ class Cpu final : public InterruptSink {
         std::int32_t translation_context;
         // The translation context's host page tag (bits 11:3; see HostPage).
         std::int32_t context_tag;
+        // Status (32 bits), the FPU registers (32 of 64 bits), and FCSR (32 bits).
+        std::int32_t status;
+        std::int32_t fpr;
+        std::int32_t fcsr;
         std::int32_t code_changes;
         // The data host page cache (load and store fast paths): host_page_count entries of
         // host_page_size bytes, selected by bits 6+ of the virtual page number; the fields of

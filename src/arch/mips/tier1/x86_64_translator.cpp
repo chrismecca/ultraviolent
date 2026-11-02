@@ -575,6 +575,143 @@ class EmitBuilder {
         return false;
     }
 
+    // The FPU's moves, loads, and stores (JIT.adoc "FPU"), as FpuExecutor performs them with
+    // Status.FR = `fr` and coprocessor 1 usable: both are checked first, and any other Status
+    // leaves through the slow path (the whole operation through call_semantics, which raises
+    // what it must). `wide` is whether MIPS III operations are allowed (fixed by the block's
+    // translation context). Empty, with nothing emitted, for every other COP1 operation.
+    std::optional<Result> cop1(Instruction i, bool fr, bool wide) {
+        enum class Form : std::uint8_t { ldc1, sdc1, lwc1, swc1, mfc1, dmfc1, mtc1, dmtc1, mov };
+        std::optional<Form> form;
+        switch (i.opcode()) {
+        case 53:
+            form = Form::ldc1;
+            break;
+        case 61:
+            form = Form::sdc1;
+            break;
+        case 49:
+            form = Form::lwc1;
+            break;
+        case 57:
+            form = Form::swc1;
+            break;
+        case 17:
+            if (i.rs() == 0) {
+                form = Form::mfc1;
+            } else if (i.rs() == 1 && wide) {
+                form = Form::dmfc1;
+            } else if (i.rs() == 4) {
+                form = Form::mtc1;
+            } else if (i.rs() == 5 && wide) {
+                form = Form::dmtc1;
+            } else if ((i.rs() == 16 || i.rs() == 17) && i.funct() == 6) {
+                form = Form::mov;
+            }
+            break;
+        default:
+            break;
+        }
+        if (!form) {
+            return std::nullopt;
+        }
+        {
+            const Reg t = registers_.temp();
+            a_.mov32(t, Mem{Reg::rbx, layout_.status});
+            a_.and_(t, static_cast<std::int32_t>(status::cu1 | status::fr));
+            a_.cmp(t, static_cast<std::int32_t>(status::cu1 | (fr ? status::fr : 0)));
+            const Label slow = a_.label();
+            slow_.push_back({slow, registers_.state()});
+            a_.jcc(Cond::ne, slow);
+        }
+        // With FR=0 arithmetic register numbers are even, and word accesses to an odd register
+        // reach the upper half of the even one below it (FpuExecutor).
+        const auto doubleword = [&](unsigned n) {
+            return Mem{Reg::rbx, layout_.fpr + 8 * static_cast<std::int32_t>(fr ? n : n & ~1u)};
+        };
+        const auto word = [&](unsigned n) {
+            return !fr && (n & 1) != 0
+                       ? Mem{Reg::rbx, layout_.fpr + 8 * static_cast<std::int32_t>(n - 1) + 4}
+                       : Mem{Reg::rbx, layout_.fpr + 8 * static_cast<std::int32_t>(n)};
+        };
+        const auto read_word = [&](unsigned n) {
+            const Reg r = registers_.temp();
+            a_.mov32(r, word(n));
+            return reg(r);
+        };
+        const auto read_doubleword = [&](unsigned n) {
+            const Reg r = registers_.temp();
+            a_.mov(r, doubleword(n));
+            return reg(r);
+        };
+        const auto write_doubleword = [&](Mem m, Value v) {
+            if (v.is_constant && fits_int32(v.constant)) {
+                a_.mov(m, static_cast<std::int32_t>(v.constant));
+            } else {
+                a_.mov(m, materialize(v));
+            }
+        };
+        // FR=1: the whole register, its upper half cleared (UM 15.5); FR=0: the half alone.
+        const auto write_word = [&](unsigned n, Value v) {
+            if (fr) {
+                write_doubleword(word(n), zero_extend_32(v));
+            } else {
+                a_.mov32(word(n), materialize(v));
+            }
+        };
+        const auto address = [&] {
+            return add(gpr(i.rs()), constant(i.signed_immediate()));
+        };
+        switch (*form) {
+        case Form::ldc1: {
+            const auto value = load<AccessWidth::bits64, false>(address());
+            write_doubleword(doubleword(i.rt()), *value);
+            break;
+        }
+        case Form::sdc1: {
+            const Value v = read_doubleword(i.rt());
+            store<AccessWidth::bits64>(address(), v);
+            break;
+        }
+        case Form::lwc1: {
+            const auto value = load<AccessWidth::bits32, false>(address());
+            write_word(i.rt(), *value);
+            break;
+        }
+        case Form::swc1: {
+            const Value v = read_word(i.rt());
+            store<AccessWidth::bits32>(address(), v);
+            break;
+        }
+        case Form::mfc1:
+            set_gpr(i.rt(), sign_extend_32(read_word(i.rd())));
+            break;
+        case Form::dmfc1:
+            set_gpr(i.rt(), read_doubleword(i.rd()));
+            break;
+        case Form::mtc1:
+            write_word(i.rd(), gpr(i.rt()));
+            break;
+        case Form::dmtc1:
+            write_doubleword(doubleword(i.rd()), gpr(i.rt()));
+            break;
+        case Form::mov: {
+            // MOV.S and MOV.D (not arithmetic: Cause unchanged). A single result clears the
+            // upper half with FR=1 and keeps it with FR=0 (FpuExecutor::write_result).
+            const Value v = read_doubleword(i.rd());
+            if (i.rs() == 17) {
+                write_doubleword(doubleword(i.sa()), v);
+            } else if (fr) {
+                write_doubleword(doubleword(i.sa()), zero_extend_32(v));
+            } else {
+                a_.mov32(doubleword(i.sa()), v.reg);
+            }
+            break;
+        }
+        }
+        return sequential();
+    }
+
     [[nodiscard]] static Result raised() {
         return {.flow = Flow::exception};
     }
@@ -1285,7 +1422,12 @@ class X86_64NativeCode final : public NativeCode {
                 std::vector<EmitBuilder::SideExit> slow;
                 registers.begin_operation(i);
                 EmitBuilder b{a, registers, layout_, movbe_, pc, raises, slow};
-                if (const auto result = operations::translate(b, op.opcode, op.instruction)) {
+                auto result = operations::translate(b, op.opcode, op.instruction);
+                if (!result && op.opcode == DecodedOpcode::cop1 && cpu_.coprocessor_usable(1)) {
+                    result = b.cop1(op.instruction, cpu_.fpu_64bit_registers(),
+                                    cpu_.allows_64bit_operations());
+                }
+                if (result) {
                     for (auto& r : raises) {
                         raise_exits.push_back({std::move(r), i, boundary});
                     }

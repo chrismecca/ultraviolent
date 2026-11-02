@@ -300,6 +300,35 @@ blocks (`max_region_blocks`), joined as their predecessors are emitted
   repeat code (a block can be in several): `boot` translates 1.14 million blocks in 212,437
   regions, 790 MB with 11 discards.
 
+== FPU
+
+FPU operations are one decoded opcode (`cop1`) executed by `FpuExecutor` (fpu.cpp), whose
+behavior depends on Status.CU1 and Status.FR, which the translation context does not fix.
+Profile of `cpu` after the memory path work: the FPU helper (`execute_fpu`, the helper call,
+its dispatch) about 26% of host time, and the call sites of `ldc1`, `sdc1`, and `mov.d` most of
+the FPU's share of generated code. Tier 1 emits the moves, loads, and stores natively
+(`EmitBuilder::cop1`): LDC1, SDC1, LWC1, SWC1, MFC1, DMFC1, MTC1, DMTC1 (the two 64-bit moves
+only where the translation context allows MIPS III operations, as `native` does for the
+integer ones), and MOV.S and MOV.D.
+
+* **Guard.** Each first compares Status's CU1 and FR with the values the translation saw (CU1
+  set; otherwise the operation is not emitted natively); anything else takes the slow path,
+  the whole operation through call_semantics, which raises Coprocessor Unusable or uses the
+  other register numbering. A translation therefore stays exact when Status changes later.
+* **Register numbering** as FpuExecutor's: with FR=0 arithmetic and doubleword registers are
+  even, and a word access to an odd register reaches the upper half of the even register
+  below it (in the host's little-endian storage, at byte offset 4); with FR=1 word writes
+  clear the upper half (UM 15.5). MOV.S keeps the upper half with FR=0.
+* **Memory** through the integer fast path and its slow path ("Native memory"). No FCSR
+  field changes for any of them.
+
+Arithmetic, compares, conversions, and BC1 still run through call_semantics. Gate:
+`mips.tier1.fpu_moves.*` (random FPU moves, loads, and stores on odd and even registers under
+FR=1 and FR=0, interleaved with integer memory operations and FPU arithmetic, with MTC0 to
+Status switching FR and CU1 inside the program, compared with the reference including FPU
+state); mutation checks (the odd register's lower half instead of its upper half: 2 failures;
+a guard that always passes: 2). Release, M cycles/s: `cpu` 366.4 to 511.9.
+
 == Boundaries
 
 Tier 0 checks the run limit, a pending exception, and the pc at every instruction boundary.

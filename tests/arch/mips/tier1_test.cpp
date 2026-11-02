@@ -311,6 +311,92 @@ template <class Engine> void data_pages_by_context(test::Context& t) {
     t.check(d.engine.statistics().operations > 0, "blocks ran");
 }
 
+// The FPU's moves, loads, and stores, which tier 1 emits with a guard on Status (CU1, FR) and
+// the memory fast path: random registers (odd and even, which differ with FR=0), bases and
+// offsets as above (misaligned ones raise address errors), interleaved with integer memory
+// operations and FPU arithmetic (still helpers), and Status changed between FR=1, FR=0, and
+// coprocessor 1 unusable inside the program, so code translated under one Status runs under
+// another. FPU state is compared with the reference after every chunk.
+std::uint32_t fpu_operation(std::mt19937_64& rng) {
+    const auto f = [&] { return static_cast<unsigned>(rng() % 32); };
+    const unsigned base = 16 + static_cast<unsigned>(rng() % 5); // s0-s4
+    const auto offset = static_cast<std::int32_t>(rng() % 64) - 16;
+    const unsigned r = static_cast<unsigned>(rng() % 12);
+    const unsigned rt = r == 0 ? 0u : r == 1 ? 31u : r + 1;
+    switch (rng() % 16) {
+    case 0: return ldc1(f(), rng() % 4 == 0 ? offset : offset & ~7, base);
+    case 1: return sdc1(f(), rng() % 4 == 0 ? offset : offset & ~7, base);
+    case 2: return lwc1(f(), rng() % 4 == 0 ? offset : offset & ~3, base);
+    case 3: return swc1(f(), rng() % 4 == 0 ? offset : offset & ~3, base);
+    case 4: return mfc1(rt, f());
+    case 5: return dmfc1(rt, f());
+    case 6: return mtc1(rt, f());
+    case 7: return dmtc1(rt, f());
+    case 8: return mov_fmt(fmt_s, f(), f());
+    case 9: return mov_fmt(fmt_d, f(), f());
+    case 10: return add_fmt(fmt_d, f(), f(), f());
+    case 11: return mul_fmt(fmt_s, f(), f(), f());
+    case 12: return rng() % 8 == 0 ? mtc0(21 + static_cast<unsigned>(rng() % 3), cp0::status)
+                                   : memory_operation(rng);
+    default: return memory_operation(rng);
+    }
+}
+
+template <class Engine> void fpu_moves(test::Context& t) {
+    std::mt19937_64 rng{20261102};
+    constexpr std::uint64_t edges[] = {0x7fff'ffff,          0x8000'0000,        0xffff'ffff'ffff'ffff,
+                                       0x8080'8080'8080'8080, 0x0123'4567'89ab'cdef, 0x80,
+                                       0x8000,                0xffff'ffff'8000'0000, 5,
+                                       0x3ff0'0000'0000'0000};
+    for (int program = 0; program < 60; ++program) {
+        DifferentialWith<Engine> d;
+        d.load_skip_handlers();
+        std::vector<std::uint32_t> words;
+        for (int i = 0; i < 120; ++i) {
+            const std::uint32_t word = fpu_operation(rng);
+            words.push_back(word);
+            if ((word >> 26) == 16) {
+                words.push_back(nop()); // after an MTC0 to Status
+            }
+        }
+        words.push_back(beq(zero, zero, -4 * static_cast<std::int32_t>(words.size() + 1)));
+        for (const std::uint32_t word : {nop(), nop(), nop(), nop(), beq(zero, zero, -4), nop()}) {
+            words.push_back(word);
+        }
+        for (std::size_t i = 0; i < words.size(); ++i) {
+            d.load(System::code + 4 * i, kseg0(System::code) + 4 * i, {words[i]});
+        }
+        const std::uint32_t fr = program % 2 == 0 ? status::fr : 0;
+        d.both([&](System& s) {
+            s.start_kernel(kseg0(System::code), status::kx | status::cu1 | fr);
+            for (unsigned r = 2; r < 16; ++r) {
+                s.set(r, edges[(r + static_cast<unsigned>(program)) % 10]);
+            }
+            s.set(31, edges[static_cast<unsigned>(program) % 10]);
+            s.set(16, kseg0(System::data) + 0x20);
+            s.set(17, kseg0(System::data) + 0x1000);
+            s.set(18, kseg0(System::code) + 0x800);
+            s.set(19, kseg1(System::data) + 0x2000);
+            s.set(20, 0x1000'0000);
+            s.set(21, status::kx | status::cu1 | (fr ^ status::fr)); // the other FR
+            s.set(22, status::kx | fr);                              // coprocessor 1 unusable
+            s.set(23, status::kx | status::cu1 | fr);                // back
+            for (unsigned n = 0; n < 32; ++n) {
+                s.cpu.fpu().fpr[n] = edges[(n + static_cast<unsigned>(program)) % 10] ^ (n * 0x1111);
+            }
+        });
+        if (!d.run(t, 1500)) {
+            t.check(false, std::format("program {}", program));
+            return;
+        }
+    }
+}
+
+const test::Registration fpu_tier0{"mips.tier1.fpu_moves.tier0", fpu_moves<Tier0Engine>};
+const test::Registration fpu_tier1{"mips.tier1.fpu_moves.tier1", fpu_moves<Tier1Engine>};
+const test::Registration fpu_tier1_tiny{"mips.tier1.fpu_moves.tier1_tiny_cache",
+                                        fpu_moves<Tier1TinyCacheEngine>};
+
 const test::Registration data_pages_tier0{"mips.tier1.data_pages_by_context.tier0",
                                           data_pages_by_context<Tier0Engine>};
 const test::Registration data_pages_tier1{"mips.tier1.data_pages_by_context.tier1",
