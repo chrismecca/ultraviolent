@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -89,7 +90,9 @@ void usage() {
         "--realtime paces the run to the host's clock: it waits while virtual time is ahead of\n"
         "the host time since the start, so the guest's clock keeps real time and an idle guest\n"
         "leaves the host idle. A slower stretch runs unpaced and catches up by at most a\n"
-        "second. Waiting changes nothing the guest sees.\n"
+        "second. Waiting changes nothing the guest sees. The timekeeper's clock also runs\n"
+        "while the machine is off: it resumes from the --nvram file's time plus the host time\n"
+        "since the file was written.\n"
         "--stop-at-prompt ends the run when the console script is used up and the guest\n"
         "waits at a prompt (--cycles is then a limit). SIGINT, SIGUSR1, SIGTERM, or SIGHUP\n"
         "ends a run early; the snapshot, flash, NVRAM, and disk are still written.\n"
@@ -662,7 +665,18 @@ int main(int argc, char** argv) {
             std::vector<std::uint8_t> bytes(contents->size());
             std::ranges::transform(*contents, bytes.begin(),
                                    [](std::byte b) { return std::to_integer<std::uint8_t>(b); });
-            machine.load_nvram(bytes, !options->date);
+            // With --realtime the clock ran on its battery while the file sat on the host.
+            std::int64_t seconds_off = 0;
+            std::error_code error;
+            if (const auto written = std::filesystem::last_write_time(options->nvram, error);
+                options->realtime && !error) {
+                seconds_off = std::max<std::int64_t>(
+                    0, std::chrono::floor<std::chrono::seconds>(
+                           std::chrono::system_clock::now() -
+                           std::chrono::file_clock::to_sys(written))
+                           .count());
+            }
+            machine.load_nvram(bytes, !options->date, seconds_off);
         }
     }
 

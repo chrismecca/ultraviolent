@@ -840,6 +840,15 @@ ISPs and `0x0280` for the IOC3 after reset.
   `rtc-m48t35.c` adds 70 to `tm_year`; `observed`: IRIX, having set its clock to 2006 from
   the root filesystem, wrote year `0x36`). With the year read as 2000-based, the 2026 epoch
   looked like 1996 to IRIX ("Check the date to make sure it is correct").
+* The chip counts days on its own calendar: its leap years are those whose year register is
+  a multiple of 4 (ST M48T35 datasheet), from a 1970 base 1970, 1974, ..., 2026, and not 2024
+  or 2028. The model keeps the running time as seconds on that calendar since register year
+  0 (for a 1970 base, Unix time until the chip's extra day in February 2026; snapshots from
+  before 2026-11-03 hold such times). `--date` puts its date, in the real calendar, into the
+  registers. The day of week is a counter of its own that steps with the days from what was
+  written. Until 2026-11-03 the model followed the real calendar, and IRIX's correction
+  (below) then moved its date a day: a machine stopped without a shutdown after 2026-02-28
+  23:58 booted again to March 2 (now March 1, as the chip would give).
 * The 32 KB (PROM environment, clock) persists in a host file with `--nvram FILE`, as the
   chip's battery keeps it. The file is written at the end of a run, with the running time
   latched into the clock registers. On the next power-on the clock resumes from that time
@@ -853,6 +862,16 @@ ISPs and `0x0280` for the IOC3 after reset.
   `0x3883` through `get_nvreg` and warns "Check the date to make sure it is correct" unless
   it is 1 or 2. The value takes part in a leap-day correction: the chip's own leap years are
   multiples of four in the register's count, which from a 1970 base are not the real ones.
+  `observed` (disassembly of `rtodc` in slate's `/unix`, 2026-11-03): from the register year
+  r and the month, IRIX takes an expected value X: 2 when r % 4 is 0 and the month is January
+  or February, when r % 4 is 2 and the month is March or later, and when r % 4 is 3; else 1.
+  When the stored byte equals X it reads the registers as a date in the real calendar; when
+  it is larger it adds a day, when smaller it subtracts one, and then rewrites the clock
+  (`wtodc`, which stores the byte for the time it writes). IRIX also writes the clock at a
+  clean shutdown. So a clock set behind IRIX's back to a date in another phase (`--date`
+  after the byte was stored in another part of the four years) reads a day off once, until
+  IRIX rewrites it: `--date 2026-11-02` with the byte at 2 boots to November 3, and the next
+  boot to November 2.
   `wtodc` stores the byte through `set_nvreg`. That walks the nodes and writes through
   `ioc_base(node)`, which finds the BaseIO's IOC3 at hardware-graph path
   `module/%M/slot/io1/baseio/pci/2/ioc3` (or `.../io1/MotherBoard/...`). When there is no

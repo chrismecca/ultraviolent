@@ -644,8 +644,9 @@ std::span<const std::uint8_t> Ip27Machine::nvram_contents() {
     return timekeeper_.contents();
 }
 
-void Ip27Machine::load_nvram(std::span<const std::uint8_t> contents, bool resume_clock) {
-    timekeeper_.load_contents(contents, resume_clock);
+void Ip27Machine::load_nvram(std::span<const std::uint8_t> contents, bool resume_clock,
+                             std::int64_t seconds_off) {
+    timekeeper_.load_contents(contents, resume_clock, seconds_off);
 }
 
 StateImage Ip27Machine::save_state() {

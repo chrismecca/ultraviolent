@@ -299,9 +299,11 @@ class Ip27Machine {
     void connect_ethernet(EthernetLink* link);
     // The timekeeper's battery-backed NVRAM (the PROM environment and the running clock), for
     // host persistence. load_nvram replaces it before the machine runs; with `resume_clock`
-    // the clock continues from the time the contents hold.
+    // the clock continues from the time the contents hold, plus `seconds_off` (time on the
+    // battery while the machine was off; devices::M48t35::load_contents).
     [[nodiscard]] std::span<const std::uint8_t> nvram_contents();
-    void load_nvram(std::span<const std::uint8_t> contents, bool resume_clock);
+    void load_nvram(std::span<const std::uint8_t> contents, bool resume_clock,
+                    std::int64_t seconds_off = 0);
 
     // The console serial port (the BaseIO IOC3's port A) sends its output to `sink`.
     void connect_console(devices::SerialSink& sink) {
