@@ -1,5 +1,8 @@
 = RC-IP27 Release Notes
 
+These notes record the RC-IP27 demonstration of 2026-09-28 as it was. For using the current
+version, see `USING.adoc`.
+
 RC-IP27 is the first release candidate: a telnet login, from another host, to an unmodified
 IRIX 6.5.30 installed by IRIX's own tools on a virtual IP27 (Origin 200/2000-class, one
 R10000). See `RC-IP27.adoc` for the definition and `STATUS.adoc` for the evidence.

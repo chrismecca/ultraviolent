@@ -376,13 +376,14 @@ Remote telnet login to an unmodified, installed IRIX guest.
 * exact canonical IO6/XBOW widget mapping;
 * exact firmware image expectations;
 * reset defaults not explicitly documented;
-* interrupt timing/order edge cases.
+* interrupt timing/order edge cases;
+* whether the virtual hardware has a part in ESP's `configmon` core dump (Next task).
 
 == Current blocker
 
-None. The network setup below was made on the old host; on `uv-dev01` the `uv0` TAP device,
-forwarding, proxy ARP, and route (M8 above) have not been created yet, so a network run here
-needs them first.
+None. On `uv-dev01` the `uv0` TAP device exists as the private link below (made 2026-11-02;
+runtime state, gone after a host reboot); the LAN setup (forwarding, proxy ARP, route; M8
+above) was made on the old host only.
 
 The TAP interface, for reference (root):
 
@@ -445,6 +446,55 @@ Housekeeping:
 
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
+
+. **Usable VM (ROADMAP "Usable VM"; agreed with the user 2026-11-02: "do it").** Done so
+  far (2026-11-02/03):
+.. **Real time.** `--realtime` (backends::RealTimePacer, `Ip27Machine::hold_host_until`;
+   IP27.adoc "Machine loop and time"): an idle `sleep 20` took 9.7 s of host time at a full
+   core; paced it takes 21.0 s and ends at the same cycle and pc; two parallel CPUs use 7%
+   more host cycles than unpaced, not a spinning core (the event first slept under the
+   device spinlock and the other thread spun: 27.6 s of CPU for 21 s). With `--realtime`
+   the timekeeper also runs while the machine is off (from the NVRAM file's write time).
+   `--date now` takes the host's time.
+.. **The timekeeper's calendar** (IP27.adoc "IOC3"): the M48T35 counts leap years by its
+   register (2026 is one from IRIX's 1970 base), and IRIX corrects for it with NVRAM byte
+   `0x3883` (disassembly of `rtodc`). The model followed the real calendar, so dates after
+   February 2026 could boot a day ahead; now the chip's calendar, and IRIX's `date -u` sets
+   a clock that stays right. Still a hardware-faithful caveat: `--date` sets the chip behind
+   IRIX's back and can read a day off once.
+.. **Installation in one run, on today's build:** `scripts/rc-ip27-demo.py` from blank disk,
+   NVRAM, and flash to a verified telnet session and persistence check in 0.37 h (2026-09-28:
+   1.68 h); its telnet client had to follow prompts (the guest's login now times out within
+   its old fixed waits).
+.. **Soak:** `scripts/soak.py`. One CPU: 4.91 guest hours in 1.56 host hours, 3444 passes
+   all identical, clean shutdown (uptime 4:54), cold boot again. Two CPUs (`--parallel`,
+   TAP): 5.52 guest hours in 2.33 host hours, 3906 passes all identical, ping and telnet in
+   each of three segments, clean shutdown (uptime 5:31), cold boot again. Its resumed
+   segments lost 4 of 20 pings: the check started before the snapshot had loaded (a resumed
+   run answered from the second second on, every ping in under 1 ms), so the check now
+   waits for a first answer.
+.. **Found by the soaks: ESP's `configmon` dumps core** (USING.adoc "Known limits"). From
+   the second boot of an installed system on, `configmon -shmid` (started by eventmond)
+   takes SIGSEGV about a minute after boot, a NULL free-list link in its klib heap
+   (`lw $7,20($7)` at `0x10060b4c`, disassembly of the copy on the disk). Deterministic:
+   from the RC disk, a boot and clean shutdown, then any boot, on tier 1 and on the
+   reference interpreter alike, at the same cycle (so not the JIT; interactive runs had
+   suggested it, because the slower reference's sessions ended before the crash). Not the
+   CPU count (1 to 1 does it too). `configmon -k` then `-u` (an irixnet.org remedy for the
+   same core on a real 6.5.30 install) does not stop it; `chkconfig esp off` does.
+   `scripts/soak.py` now fails on any other program's core. Unknown: whether the virtual
+   hardware contributes (the NIC records are the suspect: our part numbers print with one
+   more space than slate's, and the IP27 board's part number is blank; a bisection with
+   cold boots landed on S5.2, the NICs, but older binaries see different hardware on the
+   same disk, so that is weak).
+.. **A user's guide:** `doc/USING.adoc` (README points to it).
++
+Left: whether the virtual hardware has a part in the `configmon` core. Next step there: on
+slate (read-only), `ls -l /core /usr/tmp/core*` and whether ESP is on; then in the guest,
+watch the free-list link `configmon` reads (a reference run to the crash is deterministic:
+pristine RC disk, one boot and clean shutdown, then a boot and two minutes). Then the
+release, if the user wants one (at RC-IP27 they chose no tag), and the order below (device
+loads, tier 0's share, FPU, PGO training).
 
 . **Tier-1 speed (the user, 2026-11-02: "branch here as an experiment and push on this ...
   while staying inside the architecture"; developed on branch `jit-speed`, merged into
@@ -1786,4 +1836,28 @@ Disproven: a version comparison (the PROM version is not involved).
 Unknowns: the exact error type on hardware; OVERRUN and the error stack.
 Best checkpoint: unchanged.
 Next step: Next task (the ust_change errors need evidence first).
+----
+
+----
+Date: 2026-11-02/03
+Milestone: Usable VM (ROADMAP "Usable VM")
+Hypothesis: the installed system can be used as a machine: kept at real time, left running
+  for hours, installed in one run, and documented for a user.
+Evidence: idle and paced runs (host time, thread CPU time); IRIX's `rtodc` (disassembly of
+  slate's /unix) and the M48T35 datasheet's leap rule; rc-ip27-demo.py from blank state;
+  two soaks (scripts/soak.py); for the configmon core, deterministic scripted runs on tier 1
+  and the reference, its disassembly, and an irixnet.org report of the same core.
+Changed: --realtime (backends::RealTimePacer, Ip27Machine::hold_host_until), --date now,
+  the timekeeper's own calendar and battery time; rc-ip27-demo.py's telnet client follows
+  prompts; scripts/soak.py; doc/USING.adoc; README "Running IRIX".
+Tests: real_time_pacer.*, ip27.host_hold (mutations caught), m48t35 calendar cases; dev and
+  asan green; all eleven bench digests equal v-tier1.json.
+Newly proven: paced runs end at the same cycle and pc as unpaced; installation from blank in
+  0.37 h; one CPU 4.91 and two CPUs 5.52 guest hours with every pass identical, clean
+  shutdown, and a cold boot; ESP's configmon core is the same on tier 1 and the reference.
+Disproven: that the configmon core is a JIT defect (the interactive comparison was skewed by
+  host speed); that it needs a change of CPU count; the soak's lost pings as a network fault.
+Unknowns: whether the virtual hardware contributes to the configmon core.
+Best checkpoint: unchanged (local/vm is a fresh install on today's build).
+Next step: Next task ("Usable VM", what is left).
 ----

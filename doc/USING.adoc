@@ -1,0 +1,136 @@
+= Using Ultraviolent
+:toc:
+:toclevels: 2
+
+How to install IRIX on a virtual Origin (IP27), boot it, and use it. For how the machine
+works and how it is developed, start at `README.adoc`.
+
+== What you need
+
+* A Linux x86-64 host. The reference host runs Debian 13; any recent distribution should do.
+* Clang 19 or GCC 14, CMake 3.25 or later, and Ninja. Clang and `llvm-profdata` give the
+  fastest build.
+* Your own firmware and media. Ultraviolent ships none and fetches none
+  (`assets/README.adoc`, `CLEANROOM.adoc`):
+** the IP27 PROM image, `ip27prom.img`, and the BaseIO PROM image, `io6prom.img`;
+** IRIX 6.5 Foundation 1 and 2, and the IRIX 6.5.30 Installation Tools and Overlays (three
+   discs), as ISO images.
++
+`doc/RELEASE-NOTES-RC-IP27.adoc` lists the SHA-256 of the files used for the demonstrated
+installation. Put them in `assets/firmware/` and `assets/media/` (Git ignores both).
+* About 10 GB of disk: the virtual disk is a sparse 9 GB file.
+
+== Build
+
+----
+ULTRAVIOLENT_IP27_PROM=assets/firmware/ip27prom.img scripts/build-pgo.sh
+----
+
+This builds `build/pgo/ultraviolent` with profile-guided optimization, trained on your PROM.
+Without Clang, `cmake --preset release && cmake --build --preset release` builds
+`build/release/ultraviolent`, which runs the same guest more slowly.
+
+== Install IRIX
+
+`scripts/rc-ip27-demo.py` installs IRIX from the five discs the way an operator would: it
+labels the disk with `fx`, loads the miniroot, and answers `inst` until the system restarts.
+It then cold-boots the installed system, optionally logs in over the network (below), and
+checks that a file survives a clean shutdown.
+
+----
+python3 scripts/rc-ip27-demo.py --work local/vm --media assets/media [--tap uv0]
+----
+
+Everything lands in the `--work` directory: `disk.img`, `nvram.bin` (the PROM environment and
+the time-of-day clock), `flash.bin` (the PROM's log), a console log per phase, and
+`results.txt`. The directory must not already hold a disk, NVRAM, or flash file.
+
+== Boot and use it
+
+----
+build/pgo/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img \
+    --io6prom assets/firmware/io6prom.img \
+    --flash local/vm/flash.bin --nvram local/vm/nvram.bin --disk local/vm/disk.img \
+    --realtime --interactive --cycles 100000000000000
+----
+
+The PROM runs its diagnostics and boots IRIX; the console is your terminal. If the PROM
+stops at its menu (`Option?`), `1` starts the system; `5`, then `setenv AutoLoad Yes` and
+`exit`, makes later boots automatic. Log in as `root` (no password) and answer `vt100` to the
+terminal type question.
+
+* `--realtime` makes the machine keep real time: `sleep 10` takes ten seconds, an idle
+  system leaves the host mostly idle, and the battery-backed clock runs while the machine is
+  off (it resumes from `nvram.bin` plus the time since that file was written). Without it the
+  machine runs as fast as it can, the guest's clock runs fast with it, and no time passes
+  while it is off; runs are then reproducible.
+* `--interactive` passes your keys to the guest, Ctrl-C included. Ctrl-] starts a monitor
+  command: `q` stops the machine, `cdrom FILE` changes the disc, `eject` empties the drive.
+* `--cpus 2 --parallel` gives the machine two CPUs, each on its own host thread.
+
+Set the clock once, from IRIX, in UTC (month, day, hour, minute, year):
+
+----
+date -u 110312002026
+----
+
+IRIX writes the time-of-day chip and its own leap-year bookkeeping in NVRAM together; with
+`--realtime` the clock then stays right from boot to boot. (`--date YYYY-MM-DD[THH:MM:SS]` or
+`--date now` sets the chip from the host at power-on instead, but behind IRIX's back: IRIX
+can then read it a day off once, IP27.adoc "IOC3".)
+
+To stop, shut IRIX down first, then stop the machine at the PROM:
+
+----
+shutdown -y -g0 -i0
+----
+
+then Ctrl-] and `q`. The disk, NVRAM, and flash files are written as the machine stops.
+Stopping without a shutdown is like pulling the plug.
+
+== Network
+
+The machine's Ethernet port connects to a Linux TAP interface that you own:
+
+----
+sudo ip tuntap add dev uv0 mode tap user $USER
+sudo ip addr add 192.168.77.1/24 dev uv0
+sudo ip link set uv0 up
+----
+
+Add `--ethernet tap:uv0` to the boot command. In IRIX:
+
+----
+ifconfig ef0 inet 192.168.77.2 netmask 255.255.255.0 up
+----
+
+Then `telnet 192.168.77.2` from the host. To make the address permanent, put
+`192.168.77.2 IRIS` in `/etc/hosts` and `netmask 0xffffff00` in
+`/etc/config/ifconfig-1.options`. To put the machine on your LAN instead, give it an unused
+LAN address and route to it with proxy ARP (`RELEASE-NOTES-RC-IP27.adoc` "Network setup").
+
+== Snapshots
+
+`--save-state FILE` writes the whole machine when it stops; `--load-state FILE` resumes it,
+with the same disk file it was saved with (a snapshot holds memory, not the disk). Snapshots
+are for experiments; the disk, NVRAM, and flash files are the machine's lasting state.
+
+== Known limits
+
+* The console is a serial terminal. There is no keyboard, mouse, or graphics. (X clients
+  displaying on another machine over the network should work but have not been tried.)
+* One system disk and one CD-ROM drive.
+* Two CPUs on one node board. Two node boards (`--nodes 2`) boot, with an "Error in
+  ust_change" message from IRIX (`STATUS.adoc`).
+* IRIX prints "Inventory table ID value is 0", "Some CPUs have old firmware", and, with one
+  CPU, "update_klcfg_cpuinfo: Couldn't find my structure" at boot; all are harmless.
+* From the second boot on, IRIX's Embedded Support Partner (ESP) leaves a core dump of
+  `configmon` at `/core` about a minute after boot, and each shutdown prints "Moving /core
+  to /usr/tmp/core.postinst_detected". The same happens with both execution engines, and an
+  IRIX 6.5.30 user has reported it outside Ultraviolent; whether the virtual hardware has a
+  part in it is not yet known (`STATUS.adoc`). ESP only reports to SGI support, so turning
+  it off stops the dumps: `chkconfig esp off`, then reboot. (`configmon -k` and
+  `configmon -u`, a remedy suggested for real systems, do not stop them.)
+* `--realtime` catches up by at most a second when the machine falls behind (a boot can run
+  slower than real time with two CPUs); the guest's clock then trails the host's by the rest
+  until IRIX's clock is set again (with `date`, or by a network time service).

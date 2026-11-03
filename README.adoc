@@ -60,7 +60,13 @@ RC-IP27 targets one deliberately small IP27 machine:
 * persistent NVRAM/flash where required
 * original PROMs and unmodified IRIX supplied locally by the user
 
-The initial execution engine is an interpreter.
+The reference interpreter is permanent. Decoded blocks (tier 0) and native x86-64 code
+(tier 1, `doc/JIT.adoc`) run the same guest faster, and are tested against it.
+
+== Running IRIX
+
+To install IRIX on the virtual machine, boot it, and use it, see `doc/USING.adoc`. You supply
+the PROM images and IRIX media yourself.
 
 == Build host
 
@@ -77,6 +83,7 @@ See `doc/REPOSITORY.adoc` for the intended tree.
 
 Start here, in order:
 
+. `doc/USING.adoc` (to run IRIX; the rest is for development)
 . `doc/VISION.adoc`
 . `doc/ARCHITECTURE.adoc`
 . `doc/CORE.adoc`
