@@ -311,14 +311,20 @@ def boot_to_shell(guest, timeout=7200):
 
 
 def telnet_session(host, commands, timeout=60):
-    """A minimal telnet client (refuses every option): logs in as root and runs `commands`."""
+    """A minimal telnet client (refuses every option): logs in as root and runs `commands`.
+
+    Each line goes as soon as its prompt appears: the guest's login gives up after a minute of
+    guest time, which an unpaced run passes in seconds of host time."""
     iac, dont, do, wont, will, sb, se = 255, 254, 253, 252, 251, 250, 240
     sock = socket.create_connection((host, 23), timeout=timeout)
     out = bytearray()
 
-    def pump(wait):
+    def pump(until, mark=0, wait=timeout):
+        """Reads until the output after `mark` ends with the pattern `until`, or `wait` s."""
         end = time.time() + wait
         while time.time() < end:
+            if re.search(until, out[mark:].decode("latin-1")):
+                return True
             sock.settimeout(max(0.1, end - time.time()))
             try:
                 data = sock.recv(4096)
@@ -343,16 +349,20 @@ def telnet_session(host, commands, timeout=60):
                     continue
                 out.append(b)
                 i += 1
+        return False
 
-    pump(30)
-    sock.send(b"root\r\n")
-    pump(30)
-    if b"TERM" in out[-80:]:  # root's .login asks only when the session has no terminal type
-        sock.send(b"vt100\r\n")
-        pump(20)
-    for line, wait in [(c, 30) for c in commands] + [("exit", 10)]:
+    def send(line, until):
+        mark = len(out)
         sock.send(line.encode() + b"\r\n")
-        pump(wait)
+        return pump(until, mark)
+
+    pump(r"login: $")
+    send("root", r"(# |TERM = \([^)]*\) )$")
+    if b"TERM" in out[-80:]:  # root's .login asks only when the session has no terminal type
+        send("vt100", r"# $")
+    for line in commands:
+        send(line, r"# $")
+    send("exit", r"$^")
     sock.close()
     return out.decode("latin-1").replace("\r", "")
 
@@ -371,7 +381,7 @@ def phase_c(args, results):
         session = telnet_session(args.guest_ip, ["uname -a", "hinv", "id", "pwd", "date", "df -k"])
         results.write("=== telnet session from the host\n" + session + "\n")
         results.flush()
-        if "IRIX" not in session or "login" not in session:
+        if "IRIX64" not in session or "uid=0(root)" not in session:
             raise RuntimeError("no IRIX login over telnet")
     guest.send("shutdown -y -g0 -i0")
     guest.wait_for(r"IP27 PROM", 3600, quiet=0)
