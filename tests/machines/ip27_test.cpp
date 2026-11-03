@@ -15,6 +15,7 @@
 #include <initializer_list>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -118,7 +119,22 @@ const test::Registration board_nic{
         t.check_equal(unsigned{memory[0]}, 1u); // format
         t.check(text(1, 6) == "UVX002");
         t.check_equal(unsigned{memory[7]}, unsigned{' '}); // space padding
-        t.check(text(11, 12) == "030-0734-003");
+        // The part number ends the 25-character field: its last six characters in page 1.
+        t.check(text(11, 13) == std::string(13, ' '));
+        t.check(text(24, 6) == "030-07");
+        t.check(text(32, 6) == "34-003");
+        // IRIX joins the two pieces, dropping spaces, and writes one space for a piece with
+        // no text (IP27.adoc "NICs"); a part number left in page 0 alone read "030-0734-003 ".
+        const auto irix_text = [](std::string_view piece) {
+            std::string kept;
+            for (const char c : piece) {
+                if (c != ' ' && c != '\xff') {
+                    kept += c;
+                }
+            }
+            return kept.empty() ? std::string{" "} : kept;
+        };
+        t.check_equal(irix_text(text(11, 19)) + irix_text(text(32, 6)), std::string{"030-0734-003"});
         t.check(text(32 + 6, 1) == "A");
         t.check_equal(unsigned{memory[32 + 10]}, 0xffu); // group
         t.check_equal(unsigned{memory[32 + 11]}, 0x12u); // capability, most significant first

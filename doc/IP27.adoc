@@ -1050,12 +1050,28 @@ read or write-1 slot, longer a write-0 slot, 0 a wait.
   the record is parsed when A[0] is 1: A[1..10] serial (barcode), A[11..29] then B[0..5]
   part number, B[6..9] revision, B[10] group, B[11..14] capability, B[15] variety, B[16..29]
   name. IRIX formats it as
-  `Part:...;Name:...;Serial:...;Revision:...;Group:..;Capability:..;Variety:..;Laser:...;`,
-  keeping printable characters. The PROM prints the same fields ("Found family 0x0b Mfg.
-  Board data", "Serial #", "Part #", "Revision", "Group/Capability/Variety", "Part Name").
-  `ip27::board_nic_memory` builds the record. Text is padded with spaces (`observed`: slate's
-  `hinv -mvv` shows spaces after a barcode, where NUL padding shows as dots). `hypothesis`:
-  the other bytes are unprogrammed.
+  `Part:...;Name:...;Serial:...;Revision:...;Group:..;Capability:..;Variety:..;Laser:...;`
+  (`observed`, `nic_read_mfg`'s text copy; the IP27 PROM's copy is the same): each piece
+  drops spaces and `0xff`, shows other control and high bytes as `.` and `:` or `;` as `?`,
+  and a piece left with no text is written as one space. The part number is two pieces
+  (A[11..29], then B[0..5]), so a part number in page A alone reads with a trailing space,
+  and an empty field reads as two spaces. The PROM prints the same fields ("Found family
+  0x0b Mfg. Board data", "Serial #", "Part #", "Revision", "Group/Capability/Variety", "Part
+  Name"). `ip27::board_nic_memory` builds the record. Text is padded with spaces
+  (`observed`: slate's `hinv -mvv` shows spaces after a barcode, where NUL padding shows as
+  dots). slate's part numbers read with no trailing space (`hinv` prints `part %12s`:
+  "030-1066-002 rev", where a trailing space gives two), so page B holds text: the part
+  number ends the 25-character field (`hypothesis`: right-justified; any split with text in
+  page B reads the same). `hypothesis`: the other bytes are unprogrammed.
+* Why the text matters (`observed`, 2026-11-03): ESP's `configmon` stores each board's
+  fields in its database (MySQL 3.23, which drops trailing spaces) and compares them with
+  the live ones at every boot. With the trailing spaces every boot found the boards changed,
+  and the replace path (`replace_hwcomponent`, then a tree copy that reads a freed
+  component; core at `alloc_block`, by disassembly of the core) dumped core from the second
+  boot of a system on. With the part numbers right-justified and a part number and revision
+  on the IP27 board, `configmon -u` reports "Nothing to do!" and no core appears, also
+  across a change from one CPU to two; a system installed before the change dumps core once,
+  on its first boot after it, while its database is brought up to date.
 * The BaseIO's NIC bus (BRIDGE_NIC) holds its two board NICs as DS2502 parts with slate's
   records (OBS-SLATE-0004) and synthetic serials: MIO (laser `0x1`, barcode UVX001,
   030-0880-003 rev C) and BASEIO (laser `0x2`, UVX002, 030-0734-003 rev A), group `ff`,
@@ -1068,8 +1084,9 @@ read or write-1 slot, longer a write-0 slot, 0 a wait.
   (`hypothesis` default `08:00:69:0e:17:01`, SGI's OUI; not slate's) stored so that Linux's
   reader finds it (address byte j at memory byte 11 − j).
 * Each node board's MicroLAN (Hub MD_MLAN_CTL, `Node::mlan`) holds its board NIC: a DS2502
-  with a record named "IP27" (`hypothesis`, after slate's "IP31" node boards; the part
-  number is unknown and left blank), barcode UVX005 for n1 and UVX006 for n2, laser
+  with a record named "IP27" (`hypothesis`, after slate's "IP31" node boards; the real
+  part number is unknown: a synthetic 030-9999-001 rev A, as slate's node boards have a part
+  number and revision and blank ones read as spaces), barcode UVX005 for n1 and UVX006 for n2, laser
   `0x5` and `0x6`. In a deskside module n1's bus also holds the module's NICs, as slate's
   (OBS-SLATE-0004): MODULEID (barcode K0000001, no part number, laser `0x3`) and the
   midplane 4P1G5_MPLN (030-1066-002 rev K, barcode UVX004, laser `0x4`); serials are

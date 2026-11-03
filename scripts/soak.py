@@ -12,8 +12,8 @@ The values after the pass number must be the same on every pass. The run is cut 
 segments of at most --segment-minutes of host time (each saved with --save-state and resumed
 with --load-state, so no host process runs long); with --tap, each segment also pings the
 guest and logs in over telnet. After the last segment the loop is interrupted, IRIX is shut
-down cleanly and cold-booted again; the second boot must reach a shell, and no program but
-ESP's configmon may have dumped core (USING.adoc "Known limits"). Everything is
+down cleanly and cold-booted again; the second boot must reach a shell, and no program may
+dump core in it. Everything is
 written under --work: the copies, a console log per segment, and results.txt.
 
   scripts/soak.py --from local/vm --work local/soak --guest-hours 4 [--cpus 2] [--tap uv0]
@@ -94,7 +94,7 @@ def main():
     parser.add_argument("--guest-hours", type=float, default=4)
     parser.add_argument("--segment-minutes", type=float, default=45)
     parser.add_argument("--cpus", type=int, default=1)
-    parser.add_argument("--binary", default="build/pgo/ultraviolent")
+    parser.add_argument("--binary", default=demo.default_binary())
     parser.add_argument("--prom", default=os.environ.get("ULTRAVIOLENT_IP27_PROM",
                                                          "assets/firmware/ip27prom.img"))
     parser.add_argument("--io6prom", default=os.path.join(
@@ -182,14 +182,14 @@ def main():
         guest.finish()
         guest = demo.Guest(command(args, []), os.path.join(args.work, "reboot.log"))
         demo.boot_to_shell(guest)
-        # Core dumps since the first boot: ESP's configmon leaves one on every boot after the
-        # first (USING.adoc "Known limits"); any other program's fails the soak.
-        guest.send("sleep 120; file /core /usr/tmp/core.postinst_detected")
+        # A core dump from this boot fails the soak (earlier ones were moved to /usr/tmp at
+        # shutdown; a system installed before 2026-11-03 leaves one there from its first
+        # boot on today's version, USING.adoc "Known limits").
+        guest.send("sleep 120; file /core")
         guest.wait_for(r"# $", 600)
         for name in sorted(set(re.findall(r"core dump of '([^']+)'", guest.since_mark()))):
             results.write(f"core dump of {name}\n")
-            if name != "configmon":
-                failures.append(f"{name} dumped core")
+            failures.append(f"{name} dumped core")
         guest.send("shutdown -y -g0 -i0")
         guest.wait_for(r"IP27 PROM", 3600, quiet=0)
         guest.finish()

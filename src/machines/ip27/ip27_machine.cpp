@@ -10,6 +10,7 @@
 #include <format>
 #include <limits>
 #include <span>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -191,7 +192,12 @@ std::array<std::uint8_t, devices::Nic::memory_size> board_nic_memory(const Board
     // and skip the rest: A[1..10] serial, A[11..29] then B[0..5] part, B[6..9] revision,
     // B[16..29] name; hex fields B[10] group, B[11..14] capability, B[15] variety.
     // Text is padded with spaces (observed: slate's hinv shows spaces after a barcode; NUL
-    // padding shows as dots). hypothesis: unused bytes are unprogrammed (0xff).
+    // padding shows as dots). IRIX joins the part number's two pieces, dropping spaces, and
+    // writes one space for a piece with no text (observed: nic_read_mfg's text copy, by
+    // disassembly; the IP27 PROM's is the same). slate's part numbers read with no trailing
+    // space (hinv's "part %12s", OBS-SLATE-0004), so page 1's six bytes hold text: the part
+    // number ends the field (hypothesis: right-justified; any split with text in page 1 reads
+    // the same). hypothesis: unused bytes are unprogrammed (0xff).
     std::array<std::uint8_t, devices::Nic::memory_size> memory{};
     memory.fill(0xff);
     const auto put = [&memory](std::size_t at, std::size_t length, std::string_view text) {
@@ -201,10 +207,13 @@ std::array<std::uint8_t, devices::Nic::memory_size> board_nic_memory(const Board
     };
     constexpr std::size_t page_b = devices::Nic::page_size;
     constexpr std::size_t part_in_a = 19;
+    constexpr std::size_t part_length = part_in_a + 6;
+    const std::string part = std::string(part_length - std::min(board.part.size(), part_length), ' ') +
+                             std::string{board.part.substr(0, part_length)};
     memory[0] = 1;
     put(1, 10, board.serial);
-    put(11, part_in_a, board.part.substr(0, std::min(board.part.size(), part_in_a)));
-    put(page_b, 6, board.part.size() > part_in_a ? board.part.substr(part_in_a) : "");
+    put(11, part_in_a, std::string_view{part}.substr(0, part_in_a));
+    put(page_b, 6, std::string_view{part}.substr(part_in_a));
     put(page_b + 6, 4, board.revision);
     memory[page_b + 10] = board.group;
     for (std::size_t i = 0; i < 4; ++i) {
@@ -273,11 +282,13 @@ Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
     cpu_a.cpu.set_reset_rendezvous(&reset_rendezvous);
     reset_rendezvous.add(cpu_a.cpu);
     // hypothesis: an IP27 node board's record is named "IP27", like slate's IP31 boards'
-    // "IP31" (OBS-SLATE-0004); its part number is not known, so it is left blank. The
-    // barcode is synthetic.
+    // "IP31" (OBS-SLATE-0004). Its real part number is not known; like slate's node boards
+    // it has one and a revision (blank fields read as spaces, which ESP's configmon stores
+    // without, so it saw a changed board on every boot and dumped core: IP27.adoc "NICs").
+    // The barcode and part number are synthetic.
     board_nic.memory() = board_nic_memory(
-        {.serial = std::format("UVX{:03}", 5 + node_index), .part = "", .revision = "",
-         .name = "IP27"});
+        {.serial = std::format("UVX{:03}", 5 + node_index), .part = "030-9999-001",
+         .revision = "A", .name = "IP27"});
     mlan.attach(board_nic);
     hub.connect_mlan(mlan);
     if (owner.config_.cpus == 2) {
