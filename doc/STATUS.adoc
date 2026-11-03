@@ -499,6 +499,17 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
    tag/release.. in that order"): `doc/RELEASE-NOTES-0.1.adoc`, tag `v0.1.0`. Checked by a
    fresh install from blank on the release commit (0.36 h, telnet login, persistence, no
    core dumps).
+.. **A second host** (the user's KVM hypervisor, 2026-11-03): a Debian 13 guest, 4 vCPUs of a
+   Xeon E5-2620 v2 (Ivy Bridge: no MOVBE, no AVX2), set up from the README's quick start at
+   `v0.1.0`. `ctest` passes (tier 1 takes the non-MOVBE path on real hardware); the PGO
+   build takes 3.5 min; installation from blank 0.78 h (2.2 times the reference host). The
+   machine runs with two parallel CPUs on its own LAN address through proxy ARP on the
+   host (an ifupdown stanza for the TAP link), boots unattended (AutoLoad), and answers
+   telnet and ssh. Found: IRIX's ssh server (`openssh.sw.server`, Overlays 3) is not a
+   default subsystem, so the scripted installation leaves it out; a modern OpenSSH client
+   needs `KexAlgorithms +diffie-hellman-group14-sha1` and `HostKeyAlgorithms +ssh-rsa` for
+   its 3.9p1. IRIX's `eject` fails ("Unable to eject"; the CD-ROM's START STOP UNIT eject
+   is not modeled); the monitor's `eject` works.
 +
 Next: with the user, a two-CPU machine run on a cloud host ("build a working smp sgi 'in the
 cloud'"); then the order below (device loads, tier 0's share, FPU, PGO training).

@@ -42,8 +42,11 @@ device. The `dev`, `gcc`, `asan`, and `release` presets build and pass `ctest`.
 == Assets
 
 The release was checked with the firmware and discs listed in
-`RELEASE-NOTES-RC-IP27.adoc` "Private assets" (names, sizes, SHA-256), at the paths
-`USING.adoc` "What you need" gives.
+`RELEASE-NOTES-RC-IP27.adoc` "Private assets" (names and sizes), at the paths `USING.adoc`
+"What you need" gives. Their SHA-256 match that table except Overlays 2 (`IRIX 6.5.30
+Overlays (2 of 3).iso`, 407363584 bytes), which hashes to
+`c5342430a58532800cea918b02af07d30d4c6d395c6b9d8e536d8869683f2b0b` (2026-11-03); why it
+differs from the RC-IP27 record is not known. It is the image with the one unreadable file.
 
 == How it was checked
 
