@@ -45,6 +45,28 @@ MEDIA = {
 }
 
 
+def default_binary():
+    """The profile-guided build if there is one, else the release build (USING.adoc "Build")."""
+    for path in ("build/pgo/ultraviolent", "build/release/ultraviolent"):
+        if os.path.exists(path):
+            return path
+    return "build/pgo/ultraviolent"
+
+
+def preflight(args):
+    """Names every missing input before anything runs."""
+    missing = [path for path in (args.binary, args.prom) if not os.path.exists(path)]
+    if args.io6prom and not os.path.exists(args.io6prom):
+        missing.append(args.io6prom)
+    if args.from_phase in "AB":
+        missing += [os.path.join(args.media, name) for name in MEDIA.values()
+                    if not os.path.exists(os.path.join(args.media, name))]
+    if args.tap and not os.path.exists(f"/sys/class/net/{args.tap}"):
+        missing.append(f"TAP interface {args.tap} (USING.adoc \"Network\")")
+    if missing:
+        sys.exit("missing:\n  " + "\n  ".join(missing))
+
+
 class Guest:
     """One emulator run: console output collected from standard output, input written to
     standard input."""
@@ -411,7 +433,7 @@ def main():
     parser.add_argument("--media", default=os.environ.get("ULTRAVIOLENT_IRIX_MEDIA", "assets/media"))
     parser.add_argument("--prom", default=os.environ.get("ULTRAVIOLENT_IP27_PROM",
                                                          "assets/firmware/ip27prom.img"))
-    parser.add_argument("--binary", default="build/pgo/ultraviolent")
+    parser.add_argument("--binary", default=default_binary())
     parser.add_argument("--io6prom", default=os.path.join(
         os.path.dirname(os.environ.get("ULTRAVIOLENT_IP27_PROM", "assets/firmware/ip27prom.img")),
         "io6prom.img"), help="the BaseIO flash PROM image (empty for none)")
@@ -421,6 +443,7 @@ def main():
     parser.add_argument("--install-hours", type=float, default=16)
     parser.add_argument("--from-phase", default="A", choices="ABCD")
     args = parser.parse_args()
+    preflight(args)
     os.makedirs(args.work, exist_ok=True)
     LOG = open(os.path.join(args.work, "driver.log"), "a")
     results = open(os.path.join(args.work, "results.txt"), "a")

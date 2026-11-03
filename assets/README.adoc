@@ -1,55 +1,40 @@
 = Private Assets
 
-This directory documents required asset roles. It does not contain SGI or IRIX binaries.
+This directory is where your own SGI firmware and IRIX media go. Git ignores everything in
+it except this README; Ultraviolent ships no SGI or IRIX binaries and never downloads them
+(`doc/CLEANROOM.adoc`).
 
-Do not place private assets here if there is any chance of accidentally committing them.
+== Layout
 
-Use the repository-ignored `local/` directory or an external path.
-
-== Suggested local layout
+The scripts look here by default (`doc/USING.adoc` "What you need"):
 
 ----
-local/
+assets/
 ├── firmware/
-│   ├── ip27/
-│   └── io6/
-├── media/
-│   └── irix-6.5.30/
-├── disks/
-├── state/
-└── traces-private/
+│   ├── ip27prom.img      the IP27 node board's PROM image
+│   └── io6prom.img       the BaseIO board's PROM image
+└── media/
+    ├── IRIX-6.5-Foundation1.iso
+    ├── IRIX-6.5-Foundation2.iso
+    ├── IRIX 6.5.30 Installation Tools and Overlays (1 of 3).iso
+    ├── IRIX 6.5.30 Overlays (2 of 3).iso
+    └── IRIX 6.5.30 Overlays (3 of 3).iso
 ----
 
-== Likely RC-IP27 inputs
+Elsewhere works too: `ULTRAVIOLENT_IP27_PROM` names the IP27 PROM (the BaseIO PROM is
+looked for beside it), `ULTRAVIOLENT_IRIX_MEDIA` or `--media` the disc directory.
 
-The selected IP27 configuration will likely require some subset of:
-
-* IP27 system PROM image;
-* IO6/BaseIO firmware/PROM image if executed by the model;
-* any system-controller firmware only if the canonical machine actually requires it;
-* IRIX 6.5.30 installation media owned by the user;
-* blank writable virtual SCSI disk;
-* persistent flash/NVRAM files initialized by Ultraviolent or from a documented seed.
-
-Do not require firmware that the emulated configuration does not execute.
-
-== IRIX media
-
-For a full IRIX 6.5.30 installation, keep the user's original media privately.
-
-Exact disc requirements depend on installation selection, but the common installation set
-includes Foundation media plus Installation Tools/Overlays media.
-
-Ultraviolent must not redistribute, auto-download, or silently fetch these images.
+Installed machines (disk, NVRAM, and flash files) belong in the ignored `local/` directory,
+for example `local/vm/`, not here.
 
 == Integrity
 
-Use SHA-256 to identify local assets during reproducible testing:
+`doc/RELEASE-NOTES-RC-IP27.adoc` lists the SHA-256 of the files the installation was
+demonstrated with:
 
 [source,shell]
 ----
-sha256sum local/firmware/ip27/*
-sha256sum local/media/irix-6.5.30/*
+sha256sum assets/firmware/* assets/media/*
 ----
 
-Keep private asset paths out of portable test expectations.
+Keep private asset paths and hashes of your own hardware out of portable test expectations.

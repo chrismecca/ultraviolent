@@ -20,9 +20,12 @@ hardware-compatible machine personalities while allowing the implementation bene
 those interfaces to use modern CPUs, storage, networking, graphics APIs, or physical
 hardware.
 
-The first machine personality is a minimal SGI Origin 2000 / IP27 system. The first
-public release, *RC-IP27*, is earned when unmodified IRIX can be installed, booted,
-networked, and logged into over telnet from another host.
+The first machine personality is an SGI Origin 200/2000-class IP27 system. Today it
+installs unmodified IRIX 6.5.30 from its own discs with IRIX's own tools, boots it on one or
+two R10000s (one runs faster than a real 180 MHz R10000 on a modest 2012 host, two about
+as fast), keeps real time, and
+takes telnet logins over a virtual Ethernet. It has run for hours under load without a
+fault (`doc/STATUS.adoc`).
 
 Ultraviolent is not an IRIX port. It is not an application compatibility layer. It is not
 a cycle-accurate R10000 simulator. It is a virtual machine whose contract is the
@@ -44,29 +47,32 @@ Backends own host integration.
 A physical SGI device may be represented by software today, a Vulkan backend tomorrow,
 or an FPGA later. IRIX must continue to see the same hardware contract.
 
-== Initial scope
+== What the machine has
 
-RC-IP27 targets one deliberately small IP27 machine:
-
-* one IP27 node
-* one R10000-class CPU
-* one Hub
-* enough Xtalk/XIO/XBOW topology to represent the real machine correctly
-* one IO6/BaseIO path
-* Bridge/PCI
-* IOC3 serial and Ethernet
-* ISP1020/SCSI
-* one system disk and installation CD-ROM
-* persistent NVRAM/flash where required
-* original PROMs and unmodified IRIX supplied locally by the user
+* one IP27 node board (two with `--nodes 2`), each with one or two R10000 CPUs and 512 MB
+  of memory by default
+* Hub, Crossbow, and a BaseIO board: Bridge/PCI, two QL1040B SCSI controllers, IOC3 serial
+  console and Fast Ethernet, the M48T35 timekeeper and NVRAM
+* a SCSI system disk and CD-ROM drive, backed by files
+* the flash PROM log and NVRAM kept in files between runs
+* original PROMs and unmodified IRIX, supplied by you
 
 The reference interpreter is permanent. Decoded blocks (tier 0) and native x86-64 code
 (tier 1, `doc/JIT.adoc`) run the same guest faster, and are tested against it.
 
-== Running IRIX
+== Quick start
 
-To install IRIX on the virtual machine, boot it, and use it, see `doc/USING.adoc`. You supply
-the PROM images and IRIX media yourself.
+You supply the PROM images and IRIX discs (`assets/README.adoc`); then, on Debian or Ubuntu
+x86-64:
+
+----
+sudo apt install clang llvm cmake ninja-build python3
+ULTRAVIOLENT_IP27_PROM=assets/firmware/ip27prom.img scripts/build-pgo.sh
+python3 scripts/rc-ip27-demo.py --work local/vm     # installs IRIX: about half an hour
+scripts/boot.sh local/vm                            # log in as root
+----
+
+`doc/USING.adoc` explains each step, the network, and the rest of everyday use.
 
 == Build host
 

@@ -376,8 +376,7 @@ Remote telnet login to an unmodified, installed IRIX guest.
 * exact canonical IO6/XBOW widget mapping;
 * exact firmware image expectations;
 * reset defaults not explicitly documented;
-* interrupt timing/order edge cases;
-* whether the virtual hardware has a part in ESP's `configmon` core dump (Next task).
+* interrupt timing/order edge cases.
 
 == Current blocker
 
@@ -473,27 +472,29 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
    segments lost 4 of 20 pings: the check started before the snapshot had loaded (a resumed
    run answered from the second second on, every ping in under 1 ms), so the check now
    waits for a first answer.
-.. **Found by the soaks: ESP's `configmon` dumps core** (USING.adoc "Known limits"). From
-   the second boot of an installed system on, `configmon -shmid` (started by eventmond)
-   takes SIGSEGV about a minute after boot, a NULL free-list link in its klib heap
-   (`lw $7,20($7)` at `0x10060b4c`, disassembly of the copy on the disk). Deterministic:
-   from the RC disk, a boot and clean shutdown, then any boot, on tier 1 and on the
-   reference interpreter alike, at the same cycle (so not the JIT; interactive runs had
-   suggested it, because the slower reference's sessions ended before the crash). Not the
-   CPU count (1 to 1 does it too). `configmon -k` then `-u` (an irixnet.org remedy for the
-   same core on a real 6.5.30 install) does not stop it; `chkconfig esp off` does.
-   `scripts/soak.py` now fails on any other program's core. Unknown: whether the virtual
-   hardware contributes (the NIC records are the suspect: our part numbers print with one
-   more space than slate's, and the IP27 board's part number is blank; a bisection with
-   cold boots landed on S5.2, the NICs, but older binaries see different hardware on the
-   same disk, so that is weak).
+.. **ESP's `configmon` core dump, found by the soaks and fixed** (IP27.adoc "NICs";
+   the user, 2026-11-03: "lets fix configmon"). From the second boot of an installed system
+   on, `configmon -shmid` took SIGSEGV about a minute after boot. Deterministic, the same on
+   tier 1 and the reference interpreter (not the JIT; interactive runs had suggested it
+   because the slower reference's sessions ended first). Cause, from the core (stack,
+   heap) and disassembly of `configmon` and of IRIX's NIC text copy: our NIC part numbers
+   sat in page A alone, so IRIX's text read them with a trailing space (and the IP27
+   board's blank part and revision as spaces); ESP's database drops trailing spaces, so
+   every boot found the boards changed and took `configmon`'s replace path, which copies a
+   freed component. Fix: the part number ends its field (slate's `hinv` prints no trailing
+   space; `hinv` is `part %12s`), and the IP27 board has a synthetic part number and
+   revision. Proven: `hinv -mvv` lines now read like slate's; from the RC disk three boots,
+   from the soak disk boots two and three, and a change from one CPU to two give no core and
+   "Nothing to do!" from `configmon -u`; a system installed before dumps core once (USING.adoc
+   "Known limits"). Digests: the six power-on workloads change (the NICs; prom and boot
+   equal on all three engines), the snapshot workloads do not; new baseline
+   `local/bench/r3600/w-tier1.json` (one run each). `scripts/soak.py` fails on any core in
+   its last boot. Also found, not
+   used by IRIX: INQUIRY ignores EVPD (SCSI-2 8.2.5 wants the page or ILLEGAL REQUEST).
 .. **A user's guide:** `doc/USING.adoc` (README points to it).
 +
-Left: whether the virtual hardware has a part in the `configmon` core. Next step there: on
-slate (read-only), `ls -l /core /usr/tmp/core*` and whether ESP is on; then in the guest,
-watch the free-list link `configmon` reads (a reference run to the crash is deterministic:
-pristine RC disk, one boot and clean shutdown, then a boot and two minutes). Then the
-release, if the user wants one (at RC-IP27 they chose no tag), and the order below (device
+Left: a documentation pass for getting started, then the release (the user, 2026-11-03:
+"fix configmon... and then we'll create a tag/release.. in that order"), and the order below (device
 loads, tier 0's share, FPU, PGO training).
 
 . **Tier-1 speed (the user, 2026-11-02: "branch here as an experiment and push on this ...
@@ -1860,4 +1861,32 @@ Disproven: that the configmon core is a JIT defect (the interactive comparison w
 Unknowns: whether the virtual hardware contributes to the configmon core.
 Best checkpoint: unchanged (local/vm is a fresh install on today's build).
 Next step: Next task ("Usable VM", what is left).
+----
+
+----
+Date: 2026-11-03
+Milestone: Usable VM: ESP's configmon core, getting started
+Hypothesis: the configmon core is guest software reacting to something the virtual hardware
+  presents differently from real hardware.
+Evidence: the core (registers, stack, heap: two component trees, live and from the
+  database); disassembly of configmon, of IRIX's nic_read_mfg text copy (slate's /unix) and
+  the IP27 PROM's; the kernel's NIC strings (attr -g _nic); hinv's format (`part %12s`);
+  slate's hinv -mvv (OBS-SLATE-0004); Linux drivers/sn/ioc3.c (page layout, space padding).
+Changed: board NIC part numbers right-justified in their field; the IP27 board has a
+  synthetic part number and revision; rc-ip27-demo.py checks its inputs first and falls
+  back to the release build; scripts/boot.sh; soak.py fails on any core in its last boot;
+  USING.adoc rewritten as a getting-started guide; README (state, quick start);
+  assets/README.adoc (the layout the scripts use).
+Tests: ip27.board_nic_record (IRIX's text rule as oracle; fails with the old layout); dev
+  and asan green; snapshot workload digests unchanged; power-on workload digests changed
+  (the NICs), equal on tier 1, tier 0, and the reference (prom, boot); baseline
+  local/bench/r3600/w-tier1.json (one run each).
+Newly proven: IRIX writes one space for an empty NIC text piece; with the fix configmon
+  reports no change and dumps no core over three boots, from a fresh install and an old one
+  (after one last core), and across a change from one CPU to two.
+Disproven: that IRIX would see space padding in page B as nothing.
+Unknowns: real NICs' exact split of the part number between pages; the IP27 board's real
+  part number.
+Best checkpoint: unchanged.
+Next step: the release (tag), then the cloud SMP machine with the user.
 ----
