@@ -493,9 +493,15 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
    used by IRIX: INQUIRY ignores EVPD (SCSI-2 8.2.5 wants the page or ILLEGAL REQUEST).
 .. **A user's guide:** `doc/USING.adoc` (README points to it).
 +
-Left: a documentation pass for getting started, then the release (the user, 2026-11-03:
-"fix configmon... and then we'll create a tag/release.. in that order"), and the order below (device
-loads, tier 0's share, FPU, PGO training).
+.. **Getting started:** README quick start, `scripts/boot.sh`, an installer that checks its
+   inputs, USING.adoc as a step-by-step guide.
+.. **Release 0.1** (the user, 2026-11-03: "fix configmon... and then we'll create a
+   tag/release.. in that order"): `doc/RELEASE-NOTES-0.1.adoc`, tag `v0.1.0`. Checked by a
+   fresh install from blank on the release commit (0.36 h, telnet login, persistence, no
+   core dumps).
++
+Next: with the user, a two-CPU machine run on a cloud host ("build a working smp sgi 'in the
+cloud'"); then the order below (device loads, tier 0's share, FPU, PGO training).
 
 . **Tier-1 speed (the user, 2026-11-02: "branch here as an experiment and push on this ...
   while staying inside the architecture"; developed on branch `jit-speed`, merged into

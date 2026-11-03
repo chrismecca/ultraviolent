@@ -1,0 +1,95 @@
+= Ultraviolent 0.1 Release Notes
+
+Ultraviolent 0.1 is the first tagged release: a virtual SGI Origin (IP27) that installs
+unmodified IRIX 6.5.30 from its own discs with IRIX's own tools, and that you can use day
+to day. `USING.adoc` is the guide; this page records what the release is and how it was
+checked.
+
+Ultraviolent ships no SGI firmware, media, or disk images. You supply your own PROM images
+and IRIX discs (`assets/README.adoc`).
+
+== What it does
+
+* Installs IRIX 6.5.30 from blank files in one scripted run, as an operator would
+  (`scripts/rc-ip27-demo.py`), and boots it with one command (`scripts/boot.sh`).
+* One IP27 node board with one or two R10000s (`--cpus 2 --parallel`, each on its own host
+  thread); two node boards and four CPUs boot as well (`--nodes 2`).
+* Keeps real time (`--realtime`): the guest's clock follows the host, an idle guest leaves
+  the host idle, and the battery-backed clock runs while the machine is off.
+* Serial console on the terminal; Fast Ethernet through a Linux TAP interface (telnet, FTP).
+* SCSI disk and CD-ROM backed by files; the PROM's flash log and the NVRAM kept between runs.
+* Three execution engines that run the guest identically: the reference interpreter, decoded
+  blocks (tier 0), and native x86-64 code (tier 1, the default; `JIT.adoc`).
+
+Since the RC-IP27 demonstration (2026-09-28, `RELEASE-NOTES-RC-IP27.adoc`): native code,
+two CPUs and two nodes, real time, the timekeeper's own calendar, an installer that checks
+its inputs, a soak test, and a fix that stops IRIX's ESP `configmon` from dumping core on
+every boot (`IP27.adoc` "NICs").
+
+== Build
+
+[cols="1,3"]
+|===
+| Ultraviolent | tag `v0.1.0`
+| Host | Debian GNU/Linux 13 (trixie), Linux 6.12 x86-64 (Intel Core i5-3470T)
+| Compilers | Clang 19.1.7 (`scripts/build-pgo.sh`); GCC 14.2 (`gcc` preset)
+| CMake | 3.31
+|===
+
+No third-party dependencies: the C++23 standard library and the Linux headers for the TAP
+device. The `dev`, `gcc`, `asan`, and `release` presets build and pass `ctest`.
+
+== Assets
+
+The release was checked with the firmware and discs listed in
+`RELEASE-NOTES-RC-IP27.adoc` "Private assets" (names, sizes, SHA-256), at the paths
+`USING.adoc` "What you need" gives.
+
+== How it was checked
+
+* `ctest` on the `dev` and `asan` presets: all suites pass.
+* Benchmark workloads (`scripts/bench.py`, `local/bench/r3600/w-tier1.json`): each ends at
+  the same cycle with the same console output on every run; the power-on workloads give the
+  same digests on all three engines.
+* Installation from blank on the release commit (`scripts/rc-ip27-demo.py --tap uv0`): PROM
+  log set up, five discs installed, cold boot, console and telnet logins, a file kept
+  across a clean shutdown, in 0.36 hours of host time (the install itself 16.9 minutes);
+  no core dumps.
+* Soaks (`scripts/soak.py`): one CPU, 4.91 guest hours, 3444 load passes all identical; two
+  parallel CPUs with the network, 5.52 guest hours, 3906 passes, ping and telnet every 45
+  minutes; each ended with a clean shutdown and a cold boot.
+
+== Performance
+
+Virtual time runs at 180 MHz R10000 cycles; "x real" is guest time over host time on the
+reference host (PGO build, one run each).
+
+[cols="2,1,1"]
+|===
+| Workload | M cycles/s | x real
+
+| PROM power-on to its menu | 401 | 2.23
+| IRIX boot to `login:`, one CPU | 266 | 1.48
+| integer loop, one CPU | 401 | 2.23
+| file system walk, one CPU | 350 | 1.94
+| IRIX boot, two CPUs | 252 | 0.70
+| two integer loops, two CPUs | 464 | 1.29
+| file system walk and loop, two CPUs | 386 | 1.07
+| IRIX boot, four CPUs in two nodes | 247 | 0.34
+|===
+
+The two- and four-CPU rows are the reproducible mode, the CPUs taking turns on one host
+thread. With `--parallel` (each CPU on its own thread; what `USING.adoc` recommends) the
+same workloads ran at 3.48x real (two loops), 2.01x (walk and loop), 1.05x (boot, two
+CPUs), and 0.97x (boot, four CPUs) before this release (`STATUS.adoc`).
+
+== Known limits
+
+See `USING.adoc` "Known limits": serial console only (no graphics), one system disk, two
+CPUs per node, harmless boot messages, and a one-time `configmon` core on systems installed
+with an earlier version.
+
+== Next
+
+The roadmap continues with multiprocessor and device work (`ROADMAP.adoc`, `STATUS.adoc`
+"Next task").
