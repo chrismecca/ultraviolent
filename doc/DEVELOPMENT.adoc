@@ -88,6 +88,13 @@ It needs Clang and `llvm-profdata`. Guest behavior is identical to `release`; on
 reference host it is about 1.6 times faster. The profile is derived from a proprietary
 image and stays in `build/`. Use it for long boot runs; use `dev` and `release` for tests.
 
+With `ULTRAVIOLENT_PGO_MACHINE=DIR`, a machine with IRIX installed (the install script's
+`--work` directory), the training also cold-boots a copy of that machine to `login:`, so the
+profile covers IRIX's code as well as the PROM's; DIR is only read. Measured 2026-11-05
+(best of 3, against the PROM-only build, trained on another machine's disk than the
+benchmark fixture's): `boot` 1.11x, `fs` 1.07x, `prom` 1.04x, `cpu` 1.02x. The build then
+takes about two minutes on the reference host.
+
 == GCC build
 
 The secondary compiler has its own preset:

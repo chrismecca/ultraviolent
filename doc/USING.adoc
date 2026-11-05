@@ -62,6 +62,14 @@ cmake --preset release && cmake --build --preset release
 builds `build/release/ultraviolent`, which runs the same guest more slowly. The scripts below
 use the PGO build if it exists and the release build otherwise.
 
+Once IRIX is installed (below), building again with the machine makes IRIX itself faster
+(about 5-10%): the training then boots a copy of it as well.
+
+----
+ULTRAVIOLENT_IP27_PROM=assets/firmware/ip27prom.img ULTRAVIOLENT_PGO_MACHINE=local/vm \
+    scripts/build-pgo.sh
+----
+
 == Install IRIX
 
 ----
