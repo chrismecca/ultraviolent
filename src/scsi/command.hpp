@@ -34,6 +34,8 @@ inline constexpr std::uint8_t write_10 = 0x2a;
 inline constexpr std::uint8_t seek_10 = 0x2b;
 inline constexpr std::uint8_t verify_10 = 0x2f;
 inline constexpr std::uint8_t synchronize_cache = 0x35;
+// Toshiba vendor-unique caddy eject (xmcd OP_VT_EJECT).
+inline constexpr std::uint8_t toshiba_eject = 0xc4;
 
 // Sense keys and additional sense codes.
 inline constexpr std::uint8_t not_ready = 0x02;
@@ -44,11 +46,13 @@ inline constexpr std::uint8_t data_protect = 0x07;
 inline constexpr std::uint8_t medium_may_have_changed = 0x28;
 inline constexpr std::uint8_t unrecovered_read_error = 0x11;
 inline constexpr std::uint8_t invalid_opcode = 0x20;
+inline constexpr std::uint8_t invalid_field_in_cdb = 0x24;
 inline constexpr std::uint8_t lba_out_of_range = 0x21;
 inline constexpr std::uint8_t lun_not_supported = 0x25;
 inline constexpr std::uint8_t invalid_field_in_parameters = 0x26;
 inline constexpr std::uint8_t write_protected = 0x27;
 inline constexpr std::uint8_t medium_not_present = 0x3a;
+inline constexpr std::uint8_t medium_removal_prevented = 0x53; // qualifier 0x02
 inline constexpr std::uint8_t write_error = 0x0c;
 
 inline std::uint8_t at(std::span<const std::byte> bytes, std::size_t i) {
@@ -94,6 +98,13 @@ struct Identity {
     std::string_view product;
     std::string_view revision;
 };
+
+// Whether an INQUIRY asks for the standard data. Vital product data is optional (SCSI-2
+// 8.2.5.2) and these targets implement none: an INQUIRY with EVPD set, or with a page code
+// but no EVPD, fails with ILLEGAL REQUEST, INVALID FIELD IN CDB (8.2.5.1).
+inline bool standard_inquiry(std::span<const std::byte> cdb) {
+    return (at(cdb, 1) & 0x01) == 0 && at(cdb, 2) == 0;
+}
 
 inline void send_inquiry(DataPhase& data, const Identity& identity, unsigned lun,
                          std::size_t allocation) {

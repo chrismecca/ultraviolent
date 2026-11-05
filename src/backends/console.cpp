@@ -12,6 +12,7 @@ namespace {
 constexpr std::string_view disc_directive = "@cdrom ";
 constexpr std::string_view expect_directive = "@expect ";
 constexpr std::string_view stop_directive = "@stop";
+constexpr std::string_view keyswitch_off_directive = "@off";
 constexpr std::size_t expect_window = 8192;
 
 } // namespace
@@ -35,7 +36,8 @@ void ScriptedConsole::release_line() {
 }
 
 // "@expect A|B|..." holds the script until one of the alternatives has appeared in the
-// output since the previous line or directive; "@stop" asks the machine to stop.
+// output since the previous line or directive; "@stop" asks the machine to stop; "@off"
+// turns its keyswitch off.
 void ScriptedConsole::run_directives() {
     while (pending_.empty() && !lines_.empty()) {
         const std::string& line = lines_.front();
@@ -60,6 +62,11 @@ void ScriptedConsole::run_directives() {
             std::fflush(output_);
             if (stop_) {
                 stop_();
+            }
+        } else if (line == keyswitch_off_directive) {
+            lines_.pop_front();
+            if (keyswitch_off_) {
+                keyswitch_off_();
             }
         } else {
             return;

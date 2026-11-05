@@ -125,6 +125,29 @@ const test::Registration cdrom_identity{
         t.check_equal(byte_at(again.received, 2), 0x00u);
     }};
 
+const test::Registration vital_product_data{
+    "scsi.inquiry_evpd_is_not_implemented", [](test::Context& t) {
+        // SCSI-2 8.2.5: vital product data is optional; a target without it rejects EVPD,
+        // and a page code without EVPD, with ILLEGAL REQUEST, INVALID FIELD IN CDB.
+        Bench b;
+        scsi::CdRom drive{b.tracer, "cd"};
+        MemoryStore store{4096, true};
+        scsi::Disk disk{b.tracer, "disk", store};
+        for (scsi::Target* target : {static_cast<scsi::Target*>(&drive),
+                                     static_cast<scsi::Target*>(&disk)}) {
+            for (const auto& request : {cdb({0x12, 1, 0, 0, 36, 0}), cdb({0x12, 1, 0x80, 0, 36, 0}),
+                                        cdb({0x12, 0, 0x80, 0, 36, 0})}) {
+                Initiator inquiry;
+                t.check(target->execute(0, request, inquiry) == scsi::Status::check_condition);
+                t.check(inquiry.received.empty(), "no data");
+                Initiator sense;
+                target->execute(0, cdb({0x03, 0, 0, 0, 18, 0}), sense);
+                t.check_equal(byte_at(sense.received, 2), 0x05u);
+                t.check_equal(byte_at(sense.received, 12), 0x24u);
+            }
+        }
+    }};
+
 const test::Registration cdrom_read{
     "scsi.cdrom_read_and_block_length", [](test::Context& t) {
         Bench b;
@@ -161,6 +184,53 @@ const test::Registration cdrom_read{
         Initiator capacity2;
         drive.execute(0, cdb({0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0}), capacity2);
         t.check_equal(byte_at(capacity2.received, 3), 1u);
+    }};
+
+const test::Registration cdrom_eject{
+    "scsi.cdrom_eject_and_prevent", [](test::Context& t) {
+        Bench b;
+        MemoryStore disc{std::size_t{8} * 512, false};
+        scsi::CdRom drive{b.tracer, "cd"};
+        int ejected = 0;
+        drive.on_eject([&] { ++ejected; });
+        drive.insert(&disc);
+        Initiator attention;
+        drive.execute(0, cdb({0x00, 0, 0, 0, 0, 0}), attention); // UNIT ATTENTION once
+        const auto sense_of = [&](std::uint8_t expected_key, std::uint8_t expected_asc) {
+            Initiator sense;
+            drive.execute(0, cdb({0x03, 0, 0, 0, 18, 0}), sense);
+            t.check_equal(byte_at(sense.received, 2), unsigned{expected_key});
+            t.check_equal(byte_at(sense.received, 12), unsigned{expected_asc});
+        };
+        // While removal is prevented, IRIX's eject (Toshiba 0xc4) fails: ILLEGAL REQUEST,
+        // MEDIUM REMOVAL PREVENTED (53/02).
+        Initiator prevent;
+        t.check(drive.execute(0, cdb({0x1e, 0, 0, 0, 1, 0}), prevent) == scsi::Status::good);
+        Initiator refused;
+        t.check(drive.execute(0, cdb({0xc4, 1, 0, 0, 0, 0, 0, 0, 0, 0}), refused) ==
+                scsi::Status::check_condition);
+        sense_of(0x05, 0x53);
+        t.check_equal(ejected, 0);
+        // Allowed: the disc comes out, and the drive is empty.
+        Initiator allow;
+        drive.execute(0, cdb({0x1e, 0, 0, 0, 0, 0}), allow);
+        Initiator eject;
+        t.check(drive.execute(0, cdb({0xc4, 1, 0, 0, 0, 0, 0, 0, 0, 0}), eject) ==
+                scsi::Status::good);
+        t.check_equal(ejected, 1);
+        Initiator empty;
+        t.check(drive.execute(0, cdb({0x00, 0, 0, 0, 0, 0}), empty) ==
+                scsi::Status::check_condition);
+        sense_of(0x02, 0x3a);
+        // START STOP UNIT with LoEj and not Start ejects as well; loading changes nothing.
+        drive.insert(&disc);
+        drive.execute(0, cdb({0x00, 0, 0, 0, 0, 0}), attention);
+        Initiator load;
+        t.check(drive.execute(0, cdb({0x1b, 0, 0, 0, 3, 0}), load) == scsi::Status::good);
+        t.check_equal(ejected, 1);
+        Initiator unload;
+        t.check(drive.execute(0, cdb({0x1b, 1, 0, 0, 2, 0}), unload) == scsi::Status::good);
+        t.check_equal(ejected, 2);
     }};
 
 const test::Registration disk_read_write{

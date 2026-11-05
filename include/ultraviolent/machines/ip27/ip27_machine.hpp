@@ -265,6 +265,17 @@ class Ip27Machine {
         stop_requested_ = true;
     }
 
+    // The module's keyswitch turned to OFF, as an operator stops the machine: the system
+    // controller tells IRIX, which shuts down and has the controller remove power; the run
+    // then ends (IP27.adoc "System controller"). Call it from an event.
+    void turn_keyswitch_off() {
+        elsc_.turn_keyswitch_off();
+    }
+    // Whether the system controller has removed power.
+    [[nodiscard]] bool powered_off() const {
+        return elsc_.powered_off();
+    }
+
     // Host pacing (for interactive use, main's --realtime): the run's host threads wait until
     // host time `until` before they go on, each where it holds no lock (a CPU thread at the top
     // of its loop, parked). Usable from an event. Nothing the guest sees changes.
@@ -316,6 +327,10 @@ class Ip27Machine {
     // machine or be removed first.
     void insert_cdrom(BlockStore* disc) {
         cdrom_.insert(disc);
+    }
+    // Called when the guest ejects the disc (IRIX's eject); the drive is then empty.
+    void on_cdrom_eject(std::function<void()> ejected) {
+        cdrom_.on_eject(std::move(ejected));
     }
     // The system disk (SCSI bus 0, ID 1) on `store`, which must outlive the machine. Call
     // before running.

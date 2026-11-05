@@ -63,7 +63,11 @@ In use:
 * PCF8584: Philips/NXP datasheet (`doc/PCF8584.pdf`, not committed) and Linux
   `i2c-algo-pcf.h`.
 * System controller: Linux history tree (git.kernel.org tglx/history.git)
-  `include/asm-ia64/sn/ksys/elsc.h` (v2.5.20) and `ksys/i2c.h` (v2.5.0), IRIX-derived. The
+  `include/asm-ia64/sn/ksys/elsc.h` (v2.5.20) and `ksys/i2c.h` (v2.5.0), IRIX-derived, and
+  Linux 2.4.3's `ksys/elsc.h` (ELSC_I2C_ADDR, ELSC_PACKET_MAX). Its command protocol and
+  messages are observed in IRIX's own driver (`elsc_command`, `elsc_parse`, `elsc_process`,
+  `sysctlr.c`), disassembled from slate's unstripped `/unix` as an observation of the
+  software the hardware runs, as for `configmon` (IP27.adoc "System controller"). The
   same tree's `arch/ia64/sn/io/` has IRIX-derived xbow.c, xtalk.c, and pcibr.c (SN1 era),
   leads for M3.
 * Serial EEPROM: 24C16 protocol (for example the Atmel AT24C16 datasheet).
@@ -76,7 +80,9 @@ In use:
 * ISP1020: Linux v2.6.12 `drivers/scsi/qlogicisp.c` and `qlogicisp_asm.c` (register map,
   mailbox commands and parameter counts, handshake, IOCB layouts, firmware image format),
   public driver source; ISP1040 HCCR read bits from Linux `drivers/scsi/qla1280.h`.
-* SCSI: ANSI X3.131-1994 (SCSI-2) for CDBs, INQUIRY, sense data, and mode pages.
+* SCSI: ANSI X3.131-1994 (SCSI-2) for CDBs, INQUIRY, sense data, and mode pages. Toshiba
+  CD-ROM vendor-unique commands (the caddy eject, 0xc4): the public CD players xmcd 2.5
+  (`libdi_d/vu_tosh.c`, `vu_tosh.h`) and WorkMan 1.3a (`drv_toshiba.c`).
 * Local copies of these public files are in `local/sources/` (git-ignored).
 
 == Observational evidence

@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
 
@@ -15,8 +16,11 @@ namespace ultraviolent::scsi {
 // A SCSI-2 CD-ROM drive (IP27.adoc "SCSI"), logical unit 0, with a disc image in a
 // BlockStore (none: no disc). Commands: TEST UNIT READY, REQUEST SENSE, INQUIRY, READ(6),
 // READ(10), READ CAPACITY, MODE SENSE(6), MODE SELECT(6) (block length), START STOP UNIT,
-// PREVENT ALLOW MEDIUM REMOVAL. Others fail with ILLEGAL REQUEST. Sources: ANSI X3.131-1994
-// (SCSI-2) chapters 7, 8, and 13.
+// PREVENT ALLOW MEDIUM REMOVAL, and Toshiba's vendor-unique caddy eject (0xc4). Others fail
+// with ILLEGAL REQUEST. Sources: ANSI X3.131-1994 (SCSI-2) chapters 7, 8, and 13; for 0xc4
+// the public xmcd (libdi_d/vu_tosh.c, OP_VT_EJECT: a 10-byte CDB, byte 1 bit 0 immediate, no
+// data) and WorkMan (drv_toshiba.c) CD players, and IRIX 6.5.30's eject, which sends it to
+// this drive (observed: INQUIRY, PREVENT ALLOW MEDIUM REMOVAL, 0xc4).
 //
 // Identity: slate's drive, TOSHIBA CD-ROM XM-6201TA revision 1037, ANSI version 2 with
 // relative addressing, synchronous transfer, and linked commands (OBS-SLATE-0002).
@@ -34,6 +38,11 @@ class CdRom final : public Target {
         disc_ = disc;
         unit_attention_ = true;
     }
+    // Called when the initiator ejects the disc (the caddy comes out; the drive is then
+    // empty until a disc is inserted).
+    void on_eject(std::function<void()> ejected) {
+        ejected_ = std::move(ejected);
+    }
 
     Status execute(unsigned lun, std::span<const std::byte> cdb, DataPhase& data) override;
 
@@ -44,6 +53,7 @@ class CdRom final : public Target {
   private:
     Status check_condition(std::uint8_t key, std::uint8_t asc, std::uint8_t ascq = 0);
     Status read(std::uint64_t block, std::uint32_t count, DataPhase& data);
+    Status eject();
     [[nodiscard]] std::uint64_t block_count() const;
 
     Tracer& tracer_;
@@ -51,6 +61,9 @@ class CdRom final : public Target {
     BlockStore* disc_{};
     std::uint32_t block_length_{default_block_length};
     bool unit_attention_{};
+    // PREVENT ALLOW MEDIUM REMOVAL's prevent bit (SCSI-2 9.2.4).
+    bool prevented_{};
+    std::function<void()> ejected_;
     // Sense data for the next REQUEST SENSE: key, additional sense code and qualifier.
     std::array<std::uint8_t, 3> sense_{};
 };

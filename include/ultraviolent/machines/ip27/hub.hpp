@@ -68,6 +68,15 @@ class Hub final {
     // A PIO by the CPU in `slice` of this node that no crosstalk widget answered, at physical
     // `address`: PI_ERR_STATUS0 of that slice records it (IP27.adoc "PIO errors").
     void record_pio_error(unsigned slice, std::uint64_t address, bool write);
+    // The module system controller has a message: INT_PEND1 bit 63 (MSC_PANIC_INTR among the
+    // INT_PEND1 bits the IRIX-derived Linux sn/intr.h lists as hard-coded; IRIX's sysctlr.c
+    // msc_intr fetches the message on it). inferred: the controller sets the bit and IRIX
+    // clears it, as it clears every INT_PEND1 bit before its handler (IP27.adoc "System
+    // controller").
+    void raise_system_controller_interrupt() {
+        raise_interrupt(system_controller_level);
+    }
+    static constexpr unsigned system_controller_level = 127;
     // PI_RT_COUNT's offset in the Hub's register window.
     static constexpr std::uint64_t rt_count_offset = 0x03'0100;
     // Host threads, without the device lock (SMP.adoc "S4"): PI_RT_COUNT at `time`, the

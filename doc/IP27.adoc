@@ -574,7 +574,39 @@ slate's controller (read-only `sn0msc -r` reads of its NVRAM).
   24C16-style EEPROM at `0x50 | address[10:8]`, under a software lock in MD_PERF_CNT0 bit 15.
   The probe checks for magic `0x37` at `0x700` (else ELSC_ERROR_NVMAGIC, -124), bytes
   `0x700`–`0x70f` are cached, and the SN0 module number is byte `0x708`.
-* Commands go to `0x20` and messages to `0x08`.
+* The PROM addresses `0x08` and `0x20`; which is which is settled by IRIX's driver below.
+
+`observed` in IRIX 6.5.30's controller driver (slate's unstripped `/unix`, disassembled
+with its debug information; `io/elsc.c`, `io/i2c.c`, `ml/SN/SN0/sysctlr.c`):
+
+* Commands (`elsc_command`): the node writes a packet to `0x08` (ELSC_I2C_ADDR in the
+  Linux 2.4.3 `ksys/elsc.h`), then reads the answer with a repeated START addressed for
+  reading. Both packets are a length byte, that many bytes of ASCII text, and a checksum byte
+  that makes the packet's bytes sum to zero (mod 256); answers hold at most 96 bytes. The
+  answer is `ok` or `err` with `csum`, `cmd`, `arg`, `perm`, or `pwr_state`
+  (ELSC_ERROR_CMD_CHECKSUM to ELSC_ERROR_CMD_STATE, `elsc_parse`). Command texts in the
+  driver: `get`, `ver`, `tas`, `dsc`, `dsp`, `pwr q`, `pwr r`, `pwr d %x`, `pwr c`, `rst`,
+  `rsw`, `nic`, `hbt %d %d`.
+* `0x20` is a separate port (`elsc_ust_read`, `elsc_ust_write`: one byte each way), the one
+  the PROM's `ust_change` uses.
+* Arbitration in the kernel's `i2c_arb` waits for token `0xe0`, or `0xe8` with the message
+  flag, whatever the CPU. A command sent "only if a message waits" returns at once without
+  the flag.
+* Messages: `sysctlr_init` connects interrupt level 127, INT_PEND1 bit 63 (MSC_PANIC_INTR in
+  the Linux `sn/intr.h`), on one CPU per module. Its handler `msc_intr` raises software level
+  9 on the master CPU, whose handler `process_message` sends `get` only if a message waits
+  and looks the answer up in a table of 22 messages. Among them: `pd off` "Module keyswitch
+  turned OFF" and `pd remote` "Remote power-down command" (both shut the system down), `ac`
+  "AC power lost", `fan fail`, `pd temp`, `nmi`, `rst` "External system reset". An empty
+  answer is "MSC interrupt without message" and is ignored. `intpend1` clears each INT_PEND1
+  bit (a PI_INT_PEND_MOD write) before calling its handler, and nothing in the kernel sets
+  level 127 itself.
+* Shutdown (`msc_shutdown`, a kernel thread): IRIX prints "module 1 MSC: Module keyswitch
+  turned OFF (shutdown pending)", signals init (`sigtopid(1, SIGINT)`), and every second asks
+  the controller to remove power in 8 seconds (`pwr d 8`), so that power stays on while the
+  system shuts down. At the end of the shutdown `restart()` (`ml/SN/klarcs.c`) calls
+  `sysctlr_power_off`, which shows "Removing power." and sends `pwr d 1`. A shutdown that the
+  controller did not ask for (`shutdown -i0`) does not remove power.
 
 Real hardware (slate, module 1): the NVRAM is 2048 bytes; `0x700`–`0x70f` hold `'7'`, "none"
 (the password), zeros, the module number `0x01` at `0x708`, and `0x78` at `0x70b`; `0x000`
@@ -585,19 +617,29 @@ Model:
 * `devices::I2cEeprom` (24C16 protocol) holds the NVRAM, initially erased except for the
   `0x700` block as slate has it, with `Ip27Config::module_number` (default 1) at `0x708`
   (`initial_controller_nvram`).
-* `devices::Elsc` models arbitration only. `hypothesis`: it offers the eight node-CPU tokens
-  (`0xe0`–`0xe7`) in turn, 1 ms each, while the bus is idle; it never has a message; it frees
-  the bus 100 µs after being addressed at `0x7f`. Its command and message addresses do not
-  answer, so ELSC commands (display, DIP switches, NIC, heartbeat) fail fast with
-  I2C_ERROR_NAK and the PROM carries on ("MSC DIP switches unavailable").
+* `devices::Elsc` models arbitration, the command packets, and the keyswitch.
+  `hypothesis`: it offers the eight node-CPU tokens (`0xe0`–`0xe7`) in turn, 1 ms each,
+  while the bus is idle, each plus 8 while a message waits; it frees the bus 100 µs after
+  being addressed at `0x7f`. It answers `get` (the waiting message, or an empty answer) and
+  `pwr d N` (power off in N seconds, hexadecimal; `ok`), and `err csum` to a bad checksum.
+  To any other command it does not acknowledge the read address, so those commands
+  (display, DIP switches, NIC, heartbeat, reset) fail with I2C_ERROR_NAK, as when no command
+  was modeled, and the PROM carries on ("MSC DIP switches unavailable"). `0x20` does not
+  answer.
+* The keyswitch (`Ip27Machine::turn_keyswitch_off`, main's SIGPWR and monitor `off`, the
+  console script's `@off`): the controller queues `pd off`, raises INT_PEND1 bit 63 on every
+  node's Hub, and removes power 10 s later unless the system asks otherwise (`hypothesis`:
+  the real grace time is not known; IRIX first asks about two seconds after the message).
+  Removing power ends the run, which then writes the disk, NVRAM, and flash as at any other
+  end.
 * The NVRAM is not persisted across runs yet.
 * `observed` with two nodes: the PROM's `ust_change` (`0x1fc4899c`, run on one node of a
   multi-node SN0 system) reads one byte at the command address `0x20` (`0x1fc39c14`), sets
   or clears bits 6 and 7 by a klconfig field, and writes it back (`0x1fc39bac`). The model
   does not answer, so the PROM prints "Error in ust_change: Addressed slave not responding"
-  twice and continues; slate's prints nothing. Not modeled until the controller's command
-  interface is (a PCF8574-style port there was tried and withdrawn: `0x20` is the
-  controller's own command address).
+  twice and continues; slate's prints nothing. Not modeled: what the `0x20` port holds is
+  not known (a PCF8574-style port there was tried and withdrawn; IRIX calls it the
+  controller's "ust" port).
 
 Before this model the PROM spent 5 s waiting at I2CINIT and 21 s retrying the controller,
 and module voting failed (modid -1).
@@ -1017,6 +1059,24 @@ through the initiator's `scsi::DataPhase`. Host storage is a `BlockStore` (backe
   place; `truncate -s 9G` makes a blank one).
 * A disc change makes the CD-ROM's next command (other than INQUIRY and REQUEST SENSE) fail
   with UNIT ATTENTION, NOT READY TO READY CHANGE (06/28/00).
+* Eject. `observed` (2026-11-04, `--trace scsi`): IRIX 6.5.30's `eject` sends INQUIRY twice,
+  PREVENT ALLOW MEDIUM REMOVAL (allow), and then 0xc4, Toshiba's vendor-unique caddy eject
+  (OP_VT_EJECT in the public xmcd CD player's `libdi_d/vu_tosh.c`, also in WorkMan's
+  `drv_toshiba.c`: a 10-byte CDB, byte 1 bit 0 immediate, no data), never START STOP UNIT.
+  Before the drive answered 0xc4 it failed with ILLEGAL REQUEST and `eject` printed "Unable to
+  eject. Try hardware eject." The drive now ejects on 0xc4 and on START STOP UNIT with LoEj
+  and not Start (SCSI-2 9.2.17), and leaves the drive empty (NOT READY, MEDIUM NOT PRESENT).
+  While PREVENT ALLOW MEDIUM REMOVAL has removal prevented, both fail with ILLEGAL REQUEST,
+  MEDIUM REMOVAL PREVENTED (53/02; `hypothesis` for 0xc4). `hypothesis`: a caddy drive cannot
+  load, so LoEj with Start changes nothing. Checked with IRIX: `eject` succeeds and `mediad`
+  unmounts `/CDROM`; a disc inserted afterwards (monitor `cdrom FILE`) is mounted again, and
+  ejects again.
+* INQUIRY with EVPD set, or with a page code and EVPD clear, fails on both targets with
+  ILLEGAL REQUEST, INVALID FIELD IN CDB (24/00): vital product data is optional (SCSI-2
+  8.2.5) and none is modeled. IRIX does not ask for it.
+* Not modeled, and failing with ILLEGAL REQUEST when IRIX sends them to the CD-ROM: READ TOC
+  (0x43), GET CONFIGURATION (0x46), and the vendor-unique 0xc9 (not in xmcd's Toshiba
+  table).
 * Not modeled: disconnection, tagged queuing, transfer timing, unit attention after reset.
 
 `observed` with the user's PROM and IRIX 6.5.30 media: the BASEIO PROM walks both adapters
@@ -1156,7 +1216,7 @@ BASEIO PROM drains typeahead just before its "press <enter>" prompts, so a line 
 the first poll is lost). On a run resumed from a snapshot the
 first line is typed at the first input poll. A script line `@cdrom FILE` is not typed: when
 its turn comes the disc changes (the CD-ROM then reports UNIT ATTENTION) and the next line
-follows. `--stop-at-prompt` ends the run when the script is used up and the guest waits at a
+follows; `@off` turns the keyswitch off in the same way (System controller). `--stop-at-prompt` ends the run when the script is used up and the guest waits at a
 prompt, so snapshots land at the next question. The UART takes an input byte when software reads LSR or RBR with
 its receiver empty, so input depends only on guest behavior: runs stay deterministic.
 

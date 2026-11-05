@@ -32,6 +32,9 @@ Status CdRom::execute(unsigned lun, std::span<const std::byte> cdb, DataPhase& d
         return Status::good;
     }
     if (opcode == inquiry) {
+        if (!standard_inquiry(cdb)) {
+            return check_condition(illegal_request, invalid_field_in_cdb);
+        }
         send_inquiry(data, identity, lun, at(cdb, 4));
         return Status::good;
     }
@@ -46,7 +49,16 @@ Status CdRom::execute(unsigned lun, std::span<const std::byte> cdb, DataPhase& d
     case test_unit_ready:
         return disc_ != nullptr ? Status::good : check_condition(not_ready, medium_not_present);
     case start_stop_unit:
+        // LoEj with Start clear ejects (SCSI-2 9.2.17). hypothesis: a caddy drive cannot load,
+        // so LoEj with Start set, and Start alone, change nothing.
+        if ((at(cdb, 4) & 0x03) == 0x02) {
+            return eject();
+        }
+        return Status::good;
+    case toshiba_eject:
+        return eject();
     case prevent_allow:
+        prevented_ = (at(cdb, 4) & 0x01) != 0;
         return Status::good;
     case read_capacity: {
         if (disc_ == nullptr) {
@@ -95,6 +107,23 @@ Status CdRom::execute(unsigned lun, std::span<const std::byte> cdb, DataPhase& d
     }
 }
 
+Status CdRom::eject() {
+    // SCSI-2 9.2.17: removal while prevented fails with ILLEGAL REQUEST, MEDIUM REMOVAL
+    // PREVENTED. hypothesis: Toshiba's eject obeys the same rule.
+    if (prevented_) {
+        return check_condition(illegal_request, medium_removal_prevented, 0x02);
+    }
+    if (disc_ == nullptr) {
+        return check_condition(not_ready, medium_not_present);
+    }
+    tracer_.log(TraceCategory::scsi, "{} eject", name_);
+    disc_ = nullptr;
+    if (ejected_) {
+        ejected_();
+    }
+    return Status::good;
+}
+
 Status CdRom::read(std::uint64_t block, std::uint32_t count, DataPhase& data) {
     if (disc_ == nullptr) {
         return check_condition(not_ready, medium_not_present);
@@ -119,6 +148,7 @@ void CdRom::save_state(StateImage& image, const std::string& key) const {
     const std::uint32_t registers[] = {block_length_, sense_[0], sense_[1], sense_[2]};
     image.put(key + ".cdrom", registers);
     image.put(key + ".unit_attention", unit_attention_);
+    image.put(key + ".prevented", prevented_);
 }
 
 void CdRom::load_state(const StateImage& image, const std::string& key) {
@@ -129,6 +159,7 @@ void CdRom::load_state(const StateImage& image, const std::string& key) {
                   static_cast<std::uint8_t>(registers[3])};
     }
     image.get(key + ".unit_attention", unit_attention_);
+    image.get(key + ".prevented", prevented_);
 }
 
 } // namespace ultraviolent::scsi

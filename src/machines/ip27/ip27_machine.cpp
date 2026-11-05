@@ -345,6 +345,14 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
         set_execution_engine(mips::ExecutionEngine::tier0);
     }
     i2c_bus_.attach(controller_nvram_);
+    // The system controller's message interrupt reaches every node in the module, and when
+    // it removes power the run ends (IP27.adoc "System controller").
+    elsc_.connect_message_interrupt([this] {
+        for (const auto& n : nodes_) {
+            n->hub.raise_system_controller_interrupt();
+        }
+    });
+    elsc_.connect_power_off([this] { request_stop(); });
     if (nodes_.size() == 2) {
         // slate's two Hubs are cabled to each other without a router (SMP.adoc "S5").
         nodes_[0]->hub.connect_link(nodes_[1]->hub);

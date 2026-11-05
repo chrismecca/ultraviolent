@@ -15,7 +15,7 @@ namespace ultraviolent::backends {
 // lines, each released when the guest waits for input after printing a prompt (output ending
 // in "> ", "] ", "? ", ": ", ") ", "# ", "$ ", or "% " and 200 input polls without output, or
 // any output and 20000 polls), then fed a byte at a time as the guest asks for it. Lines
-// starting with '@' are directives: "@cdrom FILE", "@expect A|B", "@stop".
+// starting with '@' are directives: "@cdrom FILE", "@expect A|B", "@stop", "@off".
 // Deterministic: input depends only on guest behavior. Once the script is used up, input can
 // pass to another source (an interactive terminal; see then_read).
 class ScriptedConsole final : public devices::SerialSink, public devices::SerialSource {
@@ -37,6 +37,11 @@ class ScriptedConsole final : public devices::SerialSink, public devices::Serial
     void on_stop(std::function<void()> stop) {
         stop_ = std::move(stop);
     }
+    // Called for a script line "@off" (the machine's keyswitch turned off); the next line
+    // follows at once.
+    void on_keyswitch_off(std::function<void()> off) {
+        keyswitch_off_ = std::move(off);
+    }
 
     // When the script is used up, input comes from `source`, and output is flushed before
     // each read so that prompts without a newline appear.
@@ -56,6 +61,7 @@ class ScriptedConsole final : public devices::SerialSink, public devices::Serial
     std::function<void(const std::string&)> change_disc_;
     std::function<void()> script_done_;
     std::function<void()> stop_;
+    std::function<void()> keyswitch_off_;
     devices::SerialSource* after_{};
     bool unflushed_{};
     // Output since the last line or directive, for "@expect".

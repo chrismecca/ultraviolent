@@ -26,6 +26,9 @@ Status Disk::execute(unsigned lun, std::span<const std::byte> cdb, DataPhase& da
         return Status::good;
     }
     if (opcode == inquiry) {
+        if (!standard_inquiry(cdb)) {
+            return fail(sense_, illegal_request, invalid_field_in_cdb);
+        }
         send_inquiry(data, identity, lun, at(cdb, 4));
         return Status::good;
     }

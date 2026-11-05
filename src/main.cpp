@@ -46,6 +46,14 @@ extern "C" void request_stop(int /*signal*/) {
     stop_requested = 1;
 }
 
+// Set by SIGPWR: turn the module's keyswitch off, so that IRIX shuts down and the system
+// controller removes power, which ends the run (USING.adoc "Every day").
+volatile std::sig_atomic_t keyswitch_off_requested = 0;
+
+extern "C" void request_keyswitch_off(int /*signal*/) {
+    keyswitch_off_requested = 1;
+}
+
 constexpr int exit_usage = 2;
 constexpr int exit_asset = 3;
 
@@ -74,8 +82,9 @@ void usage() {
         "the clock resumes from the time FILE holds unless --date is given.\n"
         "--cdrom puts a disc image in the CD-ROM drive (SCSI bus 0, ID 6); a --console line\n"
         "\"@cdrom FILE\" changes the disc when its turn comes, \"@expect A|B\" waits for one of\n"
-        "the strings in the output, \"@stop\" ends the run. --disk attaches an\n"
-        "existing image file as the system disk (bus 0, ID 1), written in place.\n"
+        "the strings in the output, \"@stop\" ends the run, \"@off\" turns the keyswitch\n"
+        "off. --disk attaches an existing image file as the system disk (bus 0, ID 1),\n"
+        "written in place.\n"
         "--sample-pc NS prints the program counter every NS ns of virtual time.\n"
         "--io6prom FILE loads the BaseIO's own flash PROM (for example io6prom.img); without it\n"
         "the IP27 PROM uses its internal copy of the BASEIO PROM.\n"
@@ -95,7 +104,9 @@ void usage() {
         "since the file was written.\n"
         "--stop-at-prompt ends the run when the console script is used up and the guest\n"
         "waits at a prompt (--cycles is then a limit). SIGINT, SIGUSR1, SIGTERM, or SIGHUP\n"
-        "ends a run early; the snapshot, flash, NVRAM, and disk are still written.\n"
+        "ends a run early; the snapshot, flash, NVRAM, and disk are still written. SIGPWR\n"
+        "turns the module's keyswitch off: IRIX shuts down, the system controller removes\n"
+        "power, and the run ends.\n"
         "--date YYYY-MM-DD[THH:MM:SS] sets the time-of-day clock at power-on (UTC; default\n"
         "2026-01-01): virtual time runs it from there. --date now takes the host's time.\n"
         "--engine reference|tier0|tier1 selects the execution engine (default tier1, native\n"
@@ -558,6 +569,7 @@ int main(int argc, char** argv) {
         console.on_script_done([&machine] { machine.request_stop(); });
     }
     console.on_stop([&machine] { machine.request_stop(); });
+    console.on_keyswitch_off([&machine] { machine.turn_keyswitch_off(); });
     // After the script, an interactive run reads the user's terminal (standard input).
     std::optional<backends::TerminalInput> terminal;
     if (options->interactive) {
@@ -602,6 +614,7 @@ int main(int argc, char** argv) {
         changed_discs.push_back(std::move(disc));
     };
     console.on_disc_change(change_disc);
+    machine.on_cdrom_eject([] { std::fprintf(stderr, "the guest ejected the disc\n"); });
     // Monitor commands after Ctrl-] in an interactive run.
     if (terminal) {
         terminal->on_command([&](std::string_view line) {
@@ -611,9 +624,14 @@ int main(int argc, char** argv) {
                 change_disc(std::string{line.substr(6)});
             } else if (line == "eject") {
                 change_disc("");
+            } else if (line == "off") {
+                std::fprintf(stderr, "keyswitch off: IRIX shuts down, then the power goes off\n");
+                machine.turn_keyswitch_off();
             } else {
                 std::fprintf(stderr, "monitor commands: q (end the run; the snapshot, flash, "
-                                     "NVRAM, and disk are still written), cdrom FILE, eject\n");
+                                     "NVRAM, and disk are still written), off (turn the "
+                                     "keyswitch off: IRIX shuts down and the run ends), cdrom "
+                                     "FILE, eject\n");
             }
         });
     }
@@ -740,6 +758,10 @@ int main(int argc, char** argv) {
             machine.request_stop();
             return;
         }
+        if (keyswitch_off_requested != 0) {
+            keyswitch_off_requested = 0;
+            machine.turn_keyswitch_off();
+        }
         if (pacer) {
             const auto host_now = backends::RealTimePacer::Clock::now();
             if (const auto wait = pacer->wait(machine.now(), host_now); wait.count() > 0) {
@@ -753,10 +775,14 @@ int main(int argc, char** argv) {
     std::signal(SIGUSR1, request_stop);
     std::signal(SIGTERM, request_stop);
     std::signal(SIGHUP, request_stop);
+    std::signal(SIGPWR, request_keyswitch_off);
 
     machine.run(options->cycles);
     scheduler.cancel(stop_check); // snapshots carry no host events
     terminal.reset();             // the user's terminal back to normal before any messages
+    if (machine.powered_off()) {
+        std::fprintf(stderr, "the system controller removed power\n");
+    }
     if (options->sample_pc_ns != 0) {
         scheduler.cancel(sample);
     }

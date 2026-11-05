@@ -98,6 +98,17 @@ const test::Registration expect{"console.expect_and_stop_directives", [](test::C
                                     t.check_equal(b.poll(1000), 'g');
                                 }};
 
+const test::Registration off{"console.keyswitch_off_directive", [](test::Context& t) {
+                                 Bench b{{"@expect login: ", "@off", "root"}};
+                                 int offs = 0;
+                                 b.console.on_keyswitch_off([&] { ++offs; });
+                                 b.print("IRIS login: ");
+                                 // The directive runs where the guest waits, and the next
+                                 // line follows at once.
+                                 t.check_equal(b.poll(1000), 'r');
+                                 t.check_equal(offs, 1);
+                             }};
+
 const test::Registration resumed{"console.snapshot_resume_types_at_once", [](test::Context& t) {
                                      Bench b{{"y"}, true};
                                      t.check_equal(b.poll(1), 'y');
