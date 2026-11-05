@@ -238,7 +238,11 @@ R10000 default) and refuse another.
   state as an unpaced one (`ip27.host_hold`, and the idle measurement in STATUS.adoc). When
   the host falls behind, the run goes unpaced until it catches up, by at most a second; older
   lag is forgotten (a boot that runs slower than real time, a stopped process), so the guest's
-  clock then trails the host's by that much.
+  clock then trails the host's by that much. `--realtime-catch-up SECONDS` sets the bound
+  (2026-11-05: on the second host, a slower one with two CPUs, the forgotten lag reached 35
+  minutes in two days); a run prints what it forgot. Measured with the release build, two
+  parallel CPUs, a cold boot and idle to 250 virtual seconds: 18.6 s forgotten (269 s of host
+  time) with the default, none (250 s) with a bound of 600 s.
 
 == Hub
 

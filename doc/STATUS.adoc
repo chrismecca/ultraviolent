@@ -555,7 +555,9 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
     twice the reference host's, as its CPU is about half as fast), `systemctl start` reached
     `login:` in 165 s. Observed: IRIX's clock there was 35 minutes behind the host's after two
     days: each two-CPU boot runs slower than real time on that host, and `--realtime` makes
-    up at most a second (USING.adoc "Known limits"); IRIX's clock has not been reset.
+    up at most a second (USING.adoc "Known limits"); IRIX's clock has not been reset. Since
+    2026-11-05 `--realtime-catch-up SECONDS` sets that bound (IP27.adoc "Machine loop and
+    time"), and a run prints the lag it forgot; the second host does not use it yet.
 ... Digests (`local/bench/r3600/y-tier1.json`, `y-tier1-multi.json`, one run each): the
     power-on workloads change (the PROM's controller commands now take their bytes before
     the NAK), equal on tier 1, tier 0, and the reference (prom, boot); the snapshot workloads
@@ -567,8 +569,7 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
 +
 The two-CPU machine on a second host ("build a working smp sgi 'in the cloud'", the user
 2026-11-03) is that machine, above. Next: the order below (device loads, tier 0's share, FPU,
-PGO training); the clock lag on slower hosts is a candidate (what a hardware-faithful
-catch-up would be, or a time service inside IRIX).
+PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-05).
 
 . **Tier-1 speed (the user, 2026-11-02: "branch here as an experiment and push on this ...
   while staying inside the architecture"; developed on branch `jit-speed`, merged into
@@ -2061,4 +2062,25 @@ Unknowns: the gain on other hosts (the second host's Ivy Bridge).
 Best checkpoint: unchanged (local/release-check-011c).
 Next step: Next task's tier-1 list (tier 0's share, the FPU's helpers), or direct links
   across calls (J6).
+----
+
+----
+Date: 2026-11-05
+Milestone: Usable VM: the guest's clock on a slower host
+Hypothesis: the second host's 35-minute clock lag is the pacer's forgotten lag (it keeps at
+  most a second), not the timekeeper.
+Evidence: release build, two parallel CPUs, --realtime, a cold boot and idle to 250 virtual
+  seconds: 269 s of host time, 18.6 s forgotten (the new exit message); with
+  --realtime-catch-up 600, 250 s, none. IRIX 6.5.30 installs NTP 4.1.1 (off; chkconfig ntp),
+  but ntpd cannot follow a clock that runs at half speed under load (its frequency
+  correction is at most 500 ppm).
+Changed: main: --realtime-catch-up SECONDS (the pacer's bound, default 1 s) and the message
+  at the end of a run; USING.adoc (options, known limits), IP27.adoc.
+Tests: real_time_pacer.* (the bound's behavior, existing); the measurement above.
+Newly proven: the lag is the forgotten lag; a larger bound removes it.
+Disproven: none.
+Unknowns: how fast the second host's idle guest catches up.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: the user's choice of `--realtime-catch-up 3600` on the second host (its unit's
+  ExecStart); then Next task's tier-1 list.
 ----

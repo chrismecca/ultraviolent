@@ -184,6 +184,12 @@ Enter.
   off (it resumes from `nvram.bin` plus the time since that file was written). Without it the
   machine runs as fast as it can, the guest's clock runs fast with it, and no time passes
   while it is off; runs are then reproducible.
+* `--realtime-catch-up SECONDS` (with `--realtime`): how far the machine may fall behind the
+  host's clock and still catch up (default 1). Where it runs slower than real time for long
+  stretches, two CPUs on a slower host for example, add `--realtime-catch-up 3600` to
+  `scripts/boot.sh`: the guest's clock then stays with the host's, and after a slow stretch
+  the machine runs faster than real time until it has caught up. When a run ends, it prints
+  how far the guest's clock fell behind, if it did.
 * `--interactive` passes your keys to the guest.
 * `--date YYYY-MM-DD[THH:MM:SS]` or `--date now` sets the clock chip from the host at
   power-on, behind IRIX's back: IRIX can then read it a day off once (IP27.adoc "IOC3").
@@ -264,4 +270,6 @@ are for experiments; the disk, NVRAM, and flash files are the machine's lasting 
   /usr/tmp/core.postinst_detected` then tidies up.
 * `--realtime` catches up by at most a second when the machine falls behind (a boot can run
   slower than real time with two CPUs); the guest's clock then trails the host's by the rest
-  until IRIX's clock is set again (with `date`, or by a network time service).
+  until IRIX's clock is set again (with `date`, or by a network time service). On a host
+  where that adds up (35 minutes in two days on the second test host), use
+  `--realtime-catch-up` (What the options mean).

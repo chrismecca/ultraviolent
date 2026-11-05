@@ -65,7 +65,8 @@ void usage() {
         "                    [--nvram FILE] [--io6prom FILE]\n"
         "                    [--console LINE]... [--cdrom FILE] [--disk FILE]\n"
         "                    [--sample-pc NS] [--date DATE] [--stop-at-prompt]\n"
-        "                    [--interactive] [--realtime] [--ethernet tap:IFNAME|pcap:FILE]\n"
+        "                    [--interactive] [--realtime] [--realtime-catch-up SECONDS]\n"
+        "                    [--ethernet tap:IFNAME|pcap:FILE]\n"
         "                    [--engine reference|tier0|tier1] [--engine-statistics]\n"
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
         "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
@@ -99,7 +100,10 @@ void usage() {
         "--realtime paces the run to the host's clock: it waits while virtual time is ahead of\n"
         "the host time since the start, so the guest's clock keeps real time and an idle guest\n"
         "leaves the host idle. A slower stretch runs unpaced and catches up by at most a\n"
-        "second. Waiting changes nothing the guest sees. The timekeeper's clock also runs\n"
+        "second, or by --realtime-catch-up SECONDS: on a host that falls behind for long\n"
+        "(two CPUs on a slower host) a larger bound keeps the guest's clock with the host's,\n"
+        "at the cost of a guest that runs fast while it catches up. Waiting changes nothing\n"
+        "the guest sees. The timekeeper's clock also runs\n"
         "while the machine is off: it resumes from the --nvram file's time plus the host time\n"
         "since the file was written.\n"
         "--stop-at-prompt ends the run when the console script is used up and the guest\n"
@@ -270,6 +274,7 @@ struct Options {
     bool stop_at_prompt{};
     bool interactive{};
     bool realtime{};
+    std::chrono::nanoseconds realtime_catch_up{backends::RealTimePacer::default_max_lag};
     // Unset: the machine's default (tier 1 where the host has a backend, else tier 0).
     std::optional<mips::ExecutionEngine> engine;
     bool engine_statistics{};
@@ -381,6 +386,13 @@ std::optional<Options> parse(std::span<char*> arguments) {
                              static_cast<int>(value.size()), value.data());
                 return std::nullopt;
             }
+        } else if (flag == "--realtime-catch-up") {
+            const auto number = parse_number(value);
+            if (!number || *number > 1'000'000) {
+                std::fprintf(stderr, "--realtime-catch-up takes a number of seconds\n");
+                return std::nullopt;
+            }
+            options.realtime_catch_up = std::chrono::seconds{*number};
         } else if (flag == "--sample-pc") {
             const auto number = parse_number(value);
             if (!number || *number == 0) {
@@ -751,7 +763,8 @@ int main(int argc, char** argv) {
     // --realtime, the same check holds the run while it is ahead of the host's clock.
     std::optional<backends::RealTimePacer> pacer;
     if (options->realtime) {
-        pacer.emplace(machine.now(), backends::RealTimePacer::Clock::now());
+        pacer.emplace(machine.now(), backends::RealTimePacer::Clock::now(),
+                      options->realtime_catch_up);
     }
     const EventId stop_check = scheduler.add_event("host.stop_check", [&] {
         if (stop_requested != 0) {
@@ -782,6 +795,10 @@ int main(int argc, char** argv) {
     terminal.reset();             // the user's terminal back to normal before any messages
     if (machine.powered_off()) {
         std::fprintf(stderr, "the system controller removed power\n");
+    }
+    if (pacer && pacer->forgotten().count() > 0) {
+        std::fprintf(stderr, "the guest's clock fell %.1f s behind the host's (--realtime-catch-up)\n",
+                     std::chrono::duration<double>(pacer->forgotten()).count());
     }
     if (options->sample_pc_ns != 0) {
         scheduler.cancel(sample);
