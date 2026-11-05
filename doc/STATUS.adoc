@@ -510,6 +510,50 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
    needs `KexAlgorithms +diffie-hellman-group14-sha1` and `HostKeyAlgorithms +ssh-rsa` for
    its 3.9p1. IRIX's `eject` fails ("Unable to eject"; the CD-ROM's START STOP UNIT eject
    is not modeled); the monitor's `eject` works.
+.. **Release 0.1.1** (the user, 2026-11-04: "lets do #1... unattended... march toward
+   0.1.1"; `doc/RELEASE-NOTES-0.1.1.adoc`), the fixes the second host asked for:
+... **The keyswitch** (IP27.adoc "System controller"). Observed in IRIX 6.5.30's own
+    controller driver (slate's `/unix`, disassembled with its debug information): command
+    packets to I²C address `0x08` (length, text, checksum to zero; answers `ok`/`err ...`),
+    `get` for a waiting message, the message interrupt on INT_PEND1 bit 63, the table of 22
+    messages (`pd off` "Module keyswitch turned OFF"), and the shutdown: init signaled,
+    `pwr d 8` every second, `pwr d 1` at the end. The controller now answers `get` and `pwr
+    d N` and offers the message token (plus 8); other commands still fail with
+    I2C_ERROR_NAK, now at the read address. Host side: monitor `off`, SIGPWR, console `@off`;
+    the run ends when power goes. Checked with IRIX on one CPU and on two parallel CPUs:
+    "module 1 MSC: Module keyswitch turned OFF (shutdown pending)", run level 0, the usual
+    shutdown, power removed (pc in `sysctlr_power_off`'s final loop), 26 s after the key on
+    one CPU.
+    With two CPUs IRIX also prints "Power off started from CPU 0" and "WARNING:
+    llp_pfail_barrier: expired": its last LLP power-fail switch (`restart()`) waits 500 ms for
+    the other CPU, which has stopped by then (the first switch, with both CPUs running,
+    passes). Whether real hardware prints it is unknown (slate). Host-initiated stops in
+    real time (SIGPWR; a systemd unit, as in USING.adoc, tested on this host): eleven, each
+    about half a minute, except one under systemd in which IRIX printed the message but init
+    changed run level only when a key was typed on the console (not reproduced in five
+    more, at 10-65 s after `login:`; cause unknown). USING.adoc's unit is `Type=oneshot`
+    with `RemainAfterExit`: with `Type=forking` systemd lost the tmux server and killed it.
+... **CD-ROM eject** (IP27.adoc "SCSI"). Observed: IRIX's `eject` sends Toshiba's
+    vendor-unique 0xc4 (xmcd, WorkMan), never START STOP UNIT; the drive answered ILLEGAL
+    REQUEST, hence "Unable to eject". Now 0xc4 and START STOP UNIT LoEj eject, PREVENT ALLOW
+    is kept; IRIX's `eject` succeeds, `mediad` unmounts, a new disc mounts, and ejects again.
+    The 0.1 session's `mediad` trouble after a manual `umount` was not reproduced here.
+... **ssh**: `scripts/rc-ip27-demo.py` installs `openssh.sw.server` (after the first `go`, once
+    inst has read every disc), checks it and turns on `chkconfig sshd` (inst leaves it off) in phase C,
+    and ends phase C with the keyswitch; phase D checks persistence across it and that
+    `sshd` runs, then `shutdown -i0`.
+... **INQUIRY EVPD**: ILLEGAL REQUEST, INVALID FIELD IN CDB on both targets (SCSI-2 8.2.5).
+... Checked by a fresh install from blank on the release commit (`local/release-check-011c`,
+    0.36 h): ssh server installed and running after the next boot, keyswitch power-off,
+    persistence, no core dumps. Tag `v0.1.1` is the user's to push.
+... Digests (`local/bench/r3600/y-tier1.json`, `y-tier1-multi.json`, one run each): the
+    power-on workloads change (the PROM's controller commands now take their bytes before
+    the NAK), equal on tier 1, tier 0, and the reference (prom, boot); the snapshot workloads
+    do not change. `boot2` and `reboot2` reach `login:` about 5 virtual seconds earlier
+    with byte-identical console output: the 60 ms the PROM's commands now take shifts two
+    CPUs' startup, and IRIX's startup waits end differently (disk I/O order differs in a few
+    places; compared against a v0.1.0 build, `--trace scsi`). One-CPU `boot` moves by 9 M
+    cycles.
 +
 Next: with the user, a two-CPU machine run on a cloud host ("build a working smp sgi 'in the
 cloud'"); then the order below (device loads, tier 0's share, FPU, PGO training).
@@ -593,7 +637,9 @@ cloud'"); then the order below (device loads, tier 0's share, FPU, PGO training)
   user's agreement the ISP1020 experiment. The user's cold-boot capture of 2026-09-21
   already exists (OBS-SLATE-0003). Unexplained differences
   from slate: the "1A 000:" prefix on n1's early lines, "ust_change: Addressed slave not
-  responding", and what elects the global master.
+  responding", and what elects the global master. With the user's agreement, a keyswitch
+  power-off of slate: whether IRIX prints "llp_pfail_barrier: expired" with several CPUs,
+  and how long its controller waits; and what its controller answers at `0x20`.
 . **Done: S5 (2026-10-16/17) and the review before S4 (2026-10-26).** S5.2 and S5.3
   (SMP.adoc "Progress"): the link, vector PIO, the Hub over crosstalk, and the node NICs;
   the PROM's discovery as slate's ("2 hubs, 0 routers", global master n2, "4 CPUs on 2
@@ -1906,4 +1952,32 @@ Unknowns: real NICs' exact split of the part number between pages; the IP27 boar
   part number.
 Best checkpoint: unchanged.
 Next step: the release (tag), then the cloud SMP machine with the user.
+----
+
+----
+Date: 2026-11-04
+Milestone: Usable VM: release 0.1.1 (keyswitch, CD-ROM eject, ssh, INQUIRY EVPD)
+Hypothesis: a clean host-initiated stop needs the system controller's power-off path, which
+  IRIX's own driver shows; IRIX's eject fails on a command the drive does not answer.
+Evidence: slate's /unix disassembled with its debug information (io/elsc.c, io/i2c.c,
+  ml/SN/SN0/sysctlr.c, ml/SN/intr.c intpend1, ml/SN/klarcs.c restart); Linux 2.4.3
+  ksys/elsc.h and sn/intr.h; --trace scsi of IRIX's eject; xmcd vu_tosh.c and WorkMan
+  drv_toshiba.c (0xc4); SCSI-2 8.2.5, 9.2.4, 9.2.17.
+Changed: devices::Elsc command packets, get, pwr d, message token, power-off;
+  Hub::raise_system_controller_interrupt; Ip27Machine::turn_keyswitch_off and powered_off;
+  main's SIGPWR, monitor off, console @off; scsi::CdRom 0xc4, START STOP UNIT eject, PREVENT
+  ALLOW; INQUIRY EVPD rejected; rc-ip27-demo.py installs the ssh server and uses the
+  keyswitch; USING.adoc (stop, service, CDs, ssh); release notes 0.1.1.
+Tests: elsc.* (packets, pwr d timing, unmodeled commands, keyswitch and grace, snapshot),
+  console.keyswitch_off_directive, scsi.cdrom_eject_and_prevent,
+  scsi.inquiry_evpd_is_not_implemented; dev and asan green; digests as in Next task.
+Newly proven: IRIX shuts down and powers off from the keyswitch on one CPU and on two
+  parallel CPUs; IRIX's eject and mediad work with the drive.
+Disproven: that IRIX ejects with START STOP UNIT; the old note that the PROM's commands go
+  to 0x20 (IRIX's commands go to 0x08; 0x20 is the "ust" port).
+Unknowns: the controller's real grace time; its answers to other commands; whether slate
+  prints llp_pfail_barrier: expired.
+Best checkpoint: local/release-check-011c (fresh install from blank on the 0.1.1 commit,
+  0.36 h, every check passed).
+Next step: the user pushes and tags v0.1.1; then the cloud SMP machine.
 ----

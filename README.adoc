@@ -23,8 +23,9 @@ hardware.
 The first machine personality is an SGI Origin 200/2000-class IP27 system. Today it
 installs unmodified IRIX 6.5.30 from its own discs with IRIX's own tools, boots it on one or
 two R10000s (one runs faster than a real 180 MHz R10000 on a modest 2012 host, two about
-as fast), keeps real time, and
-takes telnet logins over a virtual Ethernet. It has run for hours under load without a
+as fast), keeps real time,
+takes telnet and ssh logins over a virtual Ethernet, and shuts down cleanly when its
+keyswitch is turned off. It has run for hours under load without a
 fault (`doc/STATUS.adoc`).
 
 Ultraviolent is not an IRIX port. It is not an application compatibility layer. It is not
@@ -55,6 +56,8 @@ or an FPGA later. IRIX must continue to see the same hardware contract.
   console and Fast Ethernet, the M48T35 timekeeper and NVRAM
 * a SCSI system disk and CD-ROM drive, backed by files
 * the flash PROM log and NVRAM kept in files between runs
+* the module's system controller, far enough for its keyswitch to shut IRIX down and
+  remove power
 * original PROMs and unmodified IRIX, supplied by you
 
 The reference interpreter is permanent. Decoded blocks (tier 0) and native x86-64 code
@@ -101,6 +104,7 @@ Start here, in order:
 . `doc/IP27-TARGET.adoc`
 . `doc/ROADMAP.adoc`
 . `doc/RC-IP27.adoc`
+. `doc/RELEASE-NOTES-0.1.1.adoc`
 . `doc/RELEASE-NOTES-0.1.adoc`
 . `doc/RELEASE-NOTES-RC-IP27.adoc`
 . `doc/ENGINEERING.adoc`

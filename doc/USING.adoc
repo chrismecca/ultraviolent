@@ -69,9 +69,10 @@ python3 scripts/rc-ip27-demo.py --work local/vm
 ----
 
 The script installs IRIX the way an operator would, from blank files: it labels the disk with
-`fx`, loads the miniroot, answers `inst` through the five discs, and lets the system
-restart. It then cold-boots the installed system, logs in on the console, and checks that a
-file survives a clean shutdown. It checks first that every file it needs exists, and names
+`fx`, loads the miniroot, answers `inst` through the five discs (inst's default selection,
+plus the ssh server), and lets the system restart. It then cold-boots the installed system,
+logs in on the console, turns the keyswitch off, and checks that a file survives that
+shutdown. It checks first that every file it needs exists, and names
 any that is missing. It took 0.37 hours on the reference host (an Intel Core i5-3470T).
 
 Everything lands in the `--work` directory, which must not already hold a machine:
@@ -114,19 +115,56 @@ With `--realtime` it then stays right from boot to boot, including while the mac
 
 === Every day
 
-* **Stop:** shut IRIX down first, then stop the machine at the PROM:
+* **Stop:** turn the machine's keyswitch off: Ctrl-] and `off`, or from another shell
++
+----
+kill -PWR PID
+----
++
+where PID is the `ultraviolent` process (`scripts/boot.sh` runs it under its own PID).
+IRIX shuts down cleanly ("Module keyswitch turned OFF"), the system controller removes
+power, and the run ends; the disk, NVRAM, and flash files are written as the machine stops.
+At the PROM the power goes off after 10 seconds. You can also shut IRIX down yourself and
+stop the machine at the PROM:
 +
 ----
 shutdown -y -g0 -i0
 ----
 +
-then Ctrl-] and `q`. The disk, NVRAM, and flash files are written as the machine stops.
-Stopping without a shutdown is like pulling the plug: IRIX recovers its file system at the
-next boot.
+then Ctrl-] and `q`. Stopping without a shutdown (`q` while IRIX runs, or SIGTERM or
+SIGINT to the process) is like pulling the plug: IRIX recovers its file system at the next
+boot.
+* **As a service:** a systemd unit can run the machine in a tmux session and stop it with
+the keyswitch. For example, for a machine in `/var/lib/irix` with its TAP interface `uv0`:
++
+----
+[Unit]
+Description=IRIX on Ultraviolent
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/tmux new-session -d -s irix /opt/ultraviolent/scripts/boot.sh /var/lib/irix --cpus 2 --parallel --ethernet tap:uv0
+ExecStop=/bin/sh -c 'pkill -PWR -f "[u]ltraviolent .*--disk /var/lib/irix/disk.img"; while tmux has-session -t irix 2>/dev/null; do sleep 1; done'
+TimeoutStopSec=600
+
+[Install]
+WantedBy=multi-user.target
+----
++
+`tmux attach -t irix` shows the console. Set `AutoLoad` (The first time) so that the machine
+boots without an operator. `systemctl stop` then takes about half a minute. Once in the
+tests (one of eleven stops) IRIX printed the keyswitch message but its shutdown began only
+when a key was pressed on the console; if a stop takes long, `tmux attach -t irix` and press
+Enter.
 * **Two CPUs:** `scripts/boot.sh local/vm --cpus 2 --parallel`, each CPU on its own host
   thread. Changing the count between boots is like adding or removing a CPU.
-* **Ctrl-] commands:** `q` stops the machine, `cdrom FILE` inserts a disc image, `eject`
-  empties the drive, `?` lists them. Every other key, Ctrl-C included, goes to the guest.
+* **Ctrl-] commands:** `off` turns the keyswitch off (above), `q` stops the machine at
+  once, `cdrom FILE` inserts a disc image, `eject` empties the drive, `?` lists them. Every
+  other key, Ctrl-C included, goes to the guest.
+* **CDs:** IRIX mounts a disc at `/CDROM` by itself, and IRIX's `eject` ejects it; then
+  insert the next with `cdrom FILE`.
 * **Copies:** the machine is its three files. Stop it, then copy the directory (`cp
   --sparse=always`, or `cp --reflink` on XFS or Btrfs) to back it up or clone it.
 
@@ -160,7 +198,17 @@ Boot with `scripts/boot.sh local/vm --ethernet tap:uv0`. In IRIX:
 ifconfig ef0 inet 192.168.77.2 netmask 255.255.255.0 up
 ----
 
-Then `telnet 192.168.77.2` from the host. FTP works as well (IRIX refuses root over FTP
+Then `telnet 192.168.77.2` from the host. A machine installed by the script also runs IRIX's
+ssh server (OpenSSH 3.9p1; the script turns on `chkconfig sshd`), which lets root in once
+root has a password; a current OpenSSH client needs the old
+algorithms it offers:
+
+----
+ssh -o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa \
+    -o PubkeyAcceptedAlgorithms=+ssh-rsa root@192.168.77.2
+----
+
+FTP works as well (IRIX refuses root over FTP
 unless root is removed from `/etc/ftpusers`). To make the address permanent, put
 `192.168.77.2 IRIS` in `/etc/hosts` and `netmask 0xffffff00` in
 `/etc/config/ifconfig-1.options`. To put the machine on your LAN instead, give it an unused
@@ -196,7 +244,9 @@ are for experiments; the disk, NVRAM, and flash files are the machine's lasting 
 * Two CPUs on one node board. Two node boards (`--nodes 2`) boot, with an "Error in
   ust_change" message from IRIX (`STATUS.adoc`).
 * IRIX prints "Inventory table ID value is 0", "Some CPUs have old firmware", and, with one
-  CPU, "update_klcfg_cpuinfo: Couldn't find my structure" at boot; all are harmless.
+  CPU, "update_klcfg_cpuinfo: Couldn't find my structure" at boot; all are harmless. With
+  two CPUs, the keyswitch's power-off ends with "WARNING: llp_pfail_barrier: expired", also
+  harmless.
 * A system installed with an Ultraviolent older than 2026-11-03 left a core dump of ESP's
   `configmon` at `/core` on every boot ("Moving /core to /usr/tmp/core.postinst_detected"
   at shutdown): the virtual boards' identification read with trailing spaces, so IRIX saw

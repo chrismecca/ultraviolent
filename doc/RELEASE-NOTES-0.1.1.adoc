@@ -1,0 +1,65 @@
+= Ultraviolent 0.1.1 Release Notes
+
+Ultraviolent 0.1.1 fixes what running 0.1 as a day-to-day machine on a second host showed
+(`STATUS.adoc` "A second host"): the machine can be stopped cleanly from the host, IRIX's
+`eject` works, and a scripted installation answers ssh. `USING.adoc` is the guide.
+
+Ultraviolent ships no SGI firmware, media, or disk images. You supply your own PROM images
+and IRIX discs (`assets/README.adoc`).
+
+== What changed
+
+* **The keyswitch.** The module's system controller (ELSC) now answers the commands a power
+  switch needs, as IRIX's own driver uses them (`IP27.adoc` "System controller"). Turning the
+  keyswitch off (Ctrl-] then `off`, SIGPWR to the process, or `@off` in a console script)
+  makes IRIX print "module 1 MSC: Module keyswitch turned OFF (shutdown pending)" and shut
+  down; the controller keeps power on while IRIX asks for more time and removes it when IRIX
+  is done, and the run ends with "the system controller removed power". `USING.adoc` "Every
+  day" has a systemd unit that stops the machine this way.
+* **CD-ROM eject.** IRIX's `eject` sends the drive's Toshiba vendor-unique caddy eject
+  (0xc4), which the drive now answers, obeying PREVENT ALLOW MEDIUM REMOVAL; START STOP
+  UNIT ejects as well. `eject` succeeds, `mediad` unmounts `/CDROM`, and the next disc
+  (`cdrom FILE`) is mounted again. Before, `eject` printed "Unable to eject".
+* **ssh after a scripted installation.** `scripts/rc-ip27-demo.py` installs
+  `openssh.sw.server` with inst's default selection (IRIX's ssh server is not a default
+  subsystem) and turns it on (`chkconfig sshd on`; inst leaves it off). `USING.adoc`
+  "Network" gives the client options its OpenSSH 3.9p1 needs.
+* **INQUIRY with EVPD** fails with ILLEGAL REQUEST, INVALID FIELD IN CDB, as SCSI-2 asks of
+  a target without vital product data (IRIX does not use it).
+
+Systems installed with 0.1 keep working; an existing installation gets ssh with `inst`
+from the Overlays 3 disc (`install openssh.sw.server`) and `chkconfig sshd on`.
+
+== Build
+
+As 0.1 (`RELEASE-NOTES-0.1.adoc` "Build"): tag `v0.1.1`, Debian 13 on the reference host,
+Clang 19.1.7 (`scripts/build-pgo.sh`) and GCC 14.2, CMake 3.31, no third-party dependencies.
+
+== How it was checked
+
+* `ctest` on the `dev` and `asan` presets: all suites pass, with new tests for the
+  controller's packets, power-off timing, keyswitch, and snapshots, the `@off` directive,
+  the eject and PREVENT ALLOW rules, and INQUIRY with EVPD.
+* IRIX and the keyswitch: shut down and powered off on one CPU and on two parallel CPUs,
+  at a shell and at `login:`, scripted and in real time, and through a systemd unit like the
+  one in `USING.adoc`; a stop takes about half a minute. Once in eleven host-initiated stops
+  (under systemd) IRIX's shutdown began only after a key was typed on the console; it did
+  not happen again (`STATUS.adoc`).
+* IRIX and the CD-ROM: `eject`, a new disc mounted by `mediad`, and `eject` again.
+* Benchmark workloads (`local/bench/r3600/y-tier1.json`, `y-tier1-multi.json`): the
+  power-on workloads' digests change, since the PROM's controller commands now take their
+  bytes before failing; they are the same on all three engines (prom, boot). The snapshot
+  workloads' digests do not change. The two-CPU boots reach `login:` about five virtual
+  seconds earlier with the same console output (`STATUS.adoc`). Speed is as 0.1's.
+* Installation from blank on the release commit (`scripts/rc-ip27-demo.py --tap uv0`): PROM
+  log set up, five discs installed with the ssh server, cold boot, console and telnet
+  logins, the keyswitch shutdown and power-off, a file kept across it, `sshd` running after
+  the next cold boot, and `shutdown -i0`, in 0.36 hours of host time (the install itself
+  16.9 minutes); no core dumps.
+
+== Known limits
+
+As 0.1 (`USING.adoc` "Known limits"). The system controller answers only `get` and `pwr d`;
+its other commands (display, DIP switches, heartbeat, reset) fail as before, and the PROM and
+IRIX carry on without them. The time it waits for IRIX after the keyswitch turns off (10
+seconds unless IRIX asks for more) is a guess.

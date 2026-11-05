@@ -7,7 +7,8 @@
 #   scripts/boot.sh local/vm
 #   scripts/boot.sh local/vm --cpus 2 --parallel --ethernet tap:uv0
 #
-# Ctrl-] then q stops the machine; shut IRIX down first (shutdown -y -g0 -i0).
+# Ctrl-] then off (or SIGPWR to this process) turns the keyswitch off: IRIX shuts down and
+# the machine powers off. Ctrl-] then q stops the machine at once.
 set -eu
 
 if [ $# -lt 1 ]; then

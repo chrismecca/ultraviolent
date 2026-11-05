@@ -8,11 +8,13 @@ From new, blank persistent state (flash, NVRAM, and disk files created here), it
   B. power-on with the Installation Tools CD: the Command Monitor boots fx.64 from the CD to
      label the disk, "Install System Software" loads the miniroot, IRIX makes the root file
      system, inst reads the five CDs, declines the overlay conflicts whose base products are
-     not on them, installs, and restarts;
+     not on them, installs inst's default selection and the ssh server, and restarts;
   C. cold boot of the installed disk: multiuser, a console login, ef0 configured on the TAP
-     link, a telnet login from this host that runs the contract's commands, and a clean
-     shutdown;
-  D. cold start again, checking that a file written in C survived.
+     link, a telnet login from this host that runs the contract's commands, a check that the
+     ssh server is installed (and chkconfig sshd on), and the keyswitch turned off: IRIX
+     shuts down and the system controller removes power;
+  D. cold start again, checking that a file written in C survived and that sshd runs, and
+     shutdown -i0.
 
 The guest is driven as an operator would drive it: each answer waits for the guest's prompt.
 Console input goes through --interactive (standard input), disc changes through the monitor
@@ -43,6 +45,10 @@ MEDIA = {
     "foundation1": "IRIX-6.5-Foundation1.iso",
     "foundation2": "IRIX-6.5-Foundation2.iso",
 }
+
+# Installed besides inst's default selection: the ssh server, so that a new machine answers
+# ssh as well as telnet.
+EXTRA_SUBSYSTEMS = ["openssh.sw.server"]
 
 
 def default_binary():
@@ -132,6 +138,18 @@ class Guest:
             time.sleep(0.5)
         raise RuntimeError(f"timed out waiting for {pattern!r}; tail:\n{self.tail(800)}")
 
+    def power_off(self, timeout=1800):
+        """Turns the keyswitch off (monitor off) and waits until IRIX has shut down and the
+        system controller has removed power; returns whether it did."""
+        self.monitor("off")
+        try:
+            self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        self.err.flush()
+        with open(self.err.name, "rb") as err:
+            return b"the system controller removed power" in err.read()
+
     def finish(self, timeout=600):
         """Ends the run as an operator would (monitor q) and waits for the files to be written."""
         if self.alive():
@@ -204,7 +222,7 @@ def phase_b(args):
     guest = Guest(emulator(args, [], cdrom=disc(args, "tools")),
                   os.path.join(args.work, "b-install.log"))
     state = {"labeled": False, "repartitioned": False, "fx_started": False,
-             "install_started": False, "went": False, "installing": False,
+             "install_started": False, "selected": False, "went": False, "installing": False,
              "discs": ["overlays2", "overlays3", "foundation1", "foundation2"],
              "swapped_at": -1, "restarted": False, "inst_mark": 0, "last": ""}
     # Operator answers, keyed on the prompt the guest is waiting at.
@@ -284,8 +302,14 @@ def phase_b(args):
             if state["installing"] and ("successful" in segment or "Errors occurred" in segment):
                 command = "quit"
             elif not state["went"]:
+                # The first go reads the discs (the "Install software from" prompts).
                 state["went"] = True
                 command = "go"
+            elif not state["selected"]:
+                # With every disc read: the default selection, plus the ssh server (Overlays
+                # 3), which is not a default subsystem.
+                state["selected"] = True
+                command = "install " + " ".join(EXTRA_SUBSYSTEMS)
             elif choices:
                 # Overlay products whose base products are on CDs the user does not have.
                 state["installing"] = False
@@ -405,24 +429,42 @@ def phase_c(args, results):
         results.flush()
         if "IRIX64" not in session or "uid=0(root)" not in session:
             raise RuntimeError("no IRIX login over telnet")
-    guest.send("shutdown -y -g0 -i0")
-    guest.wait_for(r"IP27 PROM", 3600, quiet=0)
+    # inst installs the ssh server with chkconfig sshd off; it starts from the next boot.
+    guest.send("versions openssh.sw.server; chkconfig sshd on")
+    guest.wait_for(r"# $", 600)
+    ssh = re.search(r"^I\s+openssh\.sw\.server\s", guest.since_mark(), re.M) is not None
+    results.write(f"=== ssh server installed: {ssh}\n")
+    results.flush()
+    # The keyswitch: IRIX shuts down and the system controller removes power.
+    powered_off = guest.power_off()
+    results.write(f"=== keyswitch off, IRIX shut down and power removed: {powered_off}\n")
+    results.flush()
     guest.finish()
+    if not ssh:
+        raise RuntimeError("openssh.sw.server is not installed")
+    if not powered_off:
+        raise RuntimeError("the keyswitch did not shut IRIX down and remove power")
 
 
 def phase_d(args, results):
-    note("D. cold start after the clean shutdown")
+    note("D. cold start after the keyswitch shutdown; shutdown -i0")
     guest = Guest(emulator(args, []), os.path.join(args.work, "d-restart.log"))
     boot_to_shell(guest)
     guest.send("cat /usr/tmp/rc-ip27-demo")
     guest.wait_for(r"# $", 600)
     persisted = "rc-ip27-persist" in guest.since_mark()
-    results.write(f"=== persistence across clean shutdown and cold start: {persisted}\n")
+    results.write(f"=== persistence across the keyswitch shutdown and cold start: {persisted}\n")
+    guest.send("ps -e | grep 'ss[h]d'")
+    guest.wait_for(r"# $", 600)
+    sshd = re.search(r"\ssshd\s*$", guest.since_mark(), re.M) is not None
+    results.write(f"=== ssh server running after the cold start: {sshd}\n")
     guest.send("shutdown -y -g0 -i0")
     guest.wait_for(r"IP27 PROM", 3600, quiet=0)
     guest.finish()
     if not persisted:
         raise RuntimeError("the file written before shutdown is missing")
+    if not sshd:
+        raise RuntimeError("sshd is not running")
 
 
 def main():
