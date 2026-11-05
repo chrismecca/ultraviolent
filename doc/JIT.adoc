@@ -364,6 +364,31 @@ the key, so a read in the window returns what the conversion would. Test
 cycles too long fails it). Three runs, release, M cycles/s: `boot` 238.2 to 249.5, `prom`
 374.8 and 373.2 (unchanged: its reads are further apart).
 
+**Device pages that collided (2026-11-05).** perf of `prom` showed `load_slow` taking the full
+translation and bus path for about a fifth of host time, and a count of those loads by page
+(a throwaway build) found 38 million in one `prom`, nearly all at three Hub register pages:
+PI_RT_COUNT's (`0x9200000001030000`), `0x9200000001600000`, and `0x9200000001a20000`. The
+CPU's 16 device pages (cpu.hpp) were indexed by address bits 15:12, and Hub register regions
+are 64 KB apart, so all three took entry 0 and the firmware's delay loops displaced one with another on
+every access. The index now folds in bits 19:16 and 23:20 (`Cpu::device_page_slot`); test
+`mips.device_pages_hold_registers_64k_apart` (three pages 64 KB apart, read three times,
+filled once each; seven fills before). `--engine-statistics` prints the fills
+(`Cpu::device_page_fills`): 245,617 in `prom`. PGO, best of 3, against the same commit
+without the change, two PGO builds: `prom` 399.7 to 448.6 and 450.4 M cycles/s (1.12-1.13x),
+`boot` 267.6 to 277.7 and 270.9 (1.01-1.04x), `cpu` and `fs` unchanged
+(`local/bench/r3600/z-tier1.json`); every digest equal, one to four CPUs
+(`z-tier1-multi.json`).
+
+Measured and not kept: a slow-path helper per integer load width that made a device page's
+read and the operation's cycle without the operation's dispatch (`complete_cycle`, the opcode
+switch, `ld`, `load_as`), falling back to `call_semantics` for any other address: 1.01x on
+`prom`, nothing on `boot`. With the pages fixed, `prom` runs at about 2.9 host instructions
+per cycle with almost no mispredictions; its instructions are 46% generated code (the delay
+loop calls a PROM routine that reads PI_RT_COUNT and divides, and returns through dispatch on
+every iteration) and 54% the device read itself, spread over the synchronized target, the
+Hub's count window, `device_read`, and the checks after a helper. The larger remaining step is
+direct links across calls and returns (J6), not a lighter helper.
+
 == FPU
 
 FPU operations are one decoded opcode (`cop1`) executed by `FpuExecutor` (fpu.cpp), whose

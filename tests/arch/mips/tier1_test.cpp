@@ -318,6 +318,54 @@ template <class Engine> void memory_operations(test::Context& t) {
     }
 }
 
+// Reads give a value from the offset and the number of reads so far, so a read made twice, or
+// not made, changes every later value; the doubleword at 0xff8 answers with an error.
+class CountingDevice final : public MmioTarget {
+  public:
+    std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
+                                                        AccessWidth width) override {
+        ++reads;
+        if ((offset & 0xfff) == 0xff8) {
+            return std::unexpected(AccessFault::unmapped);
+        }
+        const std::uint64_t value = 0xf0e1'd2c3'b4a5'9687 + offset * 0x0101 + reads * 0x1111;
+        return width == AccessWidth::bits64
+                   ? value
+                   : value & ((std::uint64_t{1} << (8 * byte_count(width))) - 1);
+    }
+    std::expected<void, AccessFault> mmio_write(std::uint64_t /*offset*/, AccessWidth /*width*/,
+                                                std::uint64_t /*value*/) override {
+        return {};
+    }
+    std::uint64_t reads{};
+};
+
+// Loads of every width and sign from device pages, through tier 1's slow path: results, sign
+// extension, r0 as destination, a bus error, a second page, and a load in a delay slot.
+template <class Engine> void device_loads(test::Context& t) {
+    constexpr std::uint64_t device = 0x20'0000;
+    DifferentialWith<Engine> d;
+    d.max_chunk = 500;
+    CountingDevice reference_device;
+    CountingDevice candidate_device;
+    t.check(d.reference.bus.map_mmio({PhysicalAddress{device}, 0x2000}, reference_device)
+                .has_value());
+    t.check(d.candidate.bus.map_mmio({PhysicalAddress{device}, 0x2000}, candidate_device)
+                .has_value());
+    d.load_skip_handlers();
+    d.load(System::code, kseg0(System::code),
+           {lb(t0, 1, s0), lbu(t1, 0x13, s0), lh(t2, 0x22, s0), lhu(t3, 0x36, s0),
+            lw(t4, 0x44, s0), lwu(t5, 0x5c, s0), ld(t6, 0x60, s0), ld(zero, 0x68, s0),
+            daddu(t7, t7, t6), ld(t8, 0xff8, s0), lw(t9, 0x1004, s0), lw(v1, 0x48, s0),
+            beq(zero, zero, -4 * 13), ld(v0, 0x70, s0)});
+    d.both([&](System& s) {
+        s.start_kernel();
+        s.set(s0, kseg0(device));
+    });
+    t.check(d.run(t, 3000), "matches the reference");
+    t.check_equal(candidate_device.reads, reference_device.reads);
+}
+
 // The inline host page path tests the entry's translation context: one user virtual page,
 // mapped by two non-global TLB entries (ASIDs 1 and 2) to two frames, loaded and stored in
 // turn under each ASID. Without the test, a host page filled under one ASID would serve the
@@ -566,6 +614,13 @@ const test::Registration data_pages_tier0{"mips.tier1.data_pages_by_context.tier
                                           data_pages_by_context<Tier0Engine>};
 const test::Registration data_pages_tier1{"mips.tier1.data_pages_by_context.tier1",
                                           data_pages_by_context<Tier1Engine>};
+
+const test::Registration device_loads_tier0{"mips.tier1.device_loads.tier0",
+                                            device_loads<Tier0Engine>};
+const test::Registration device_loads_tier1{"mips.tier1.device_loads.tier1",
+                                            device_loads<Tier1Engine>};
+const test::Registration device_loads_regions{"mips.tier1.device_loads.regions",
+                                              device_loads<Tier1RegionEngine>};
 
 const test::Registration memory_tier0{"mips.tier1.memory_operations.tier0",
                                       memory_operations<Tier0Engine>};

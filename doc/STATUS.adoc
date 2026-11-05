@@ -587,9 +587,13 @@ catch-up would be, or a time service inside IRIX).
   (1.07x), boot4 242.6 (1.10x), cpu4 326.6 (1.90x), reboot4 239.2 (1.12x); every digest
   equal. Parallel (`x-parallel.json`, one run, against S4.3's): cpu2 3.48x real (2.14x),
   mix2 2.01 (1.48x), boot2 1.05 (1.06x), reboot2 1.07 (1.09x), cpu4 2.71 (1.80x), boot4
-  0.97 (1.08x), reboot4 0.86 (1.06x). Next, by measured share: device loads through a lighter
-  helper than call_semantics (`boot`: 675 million in one boot, mostly the PROM's delay
-  loops); tier 0's share of `fs` and `boot` (about a tenth: code that runs fewer than 64
+  0.97 (1.08x), reboot4 0.86 (1.06x). Device loads (2026-11-05, JIT.adoc "Device time"): the
+  CPU's device pages collided (three Hub register pages 64 KB apart in one entry, 38 million
+  full-path loads in `prom`); the index now folds in higher bits: `prom` 1.12-1.13x, `boot`
+  1.01-1.04x, every digest equal (`z-tier1.json`, `z-tier1-multi.json`). A lighter device-load
+  helper than call_semantics was measured at 1.01x and not kept; what remains of the PROM's
+  delay loops is generated code returning through dispatch on every call (J6, direct links)
+  and the device read itself. Next, by measured share: tier 0's share of `fs` and `boot` (about a tenth: code that runs fewer than 64
   times, and translation); the FPU operations still in helpers (other conversions, SQRT,
   ABS, NEG, conditional moves, COP1X, conditions other than 0); PGO training that includes
   IRIX workloads (the PGO build trains on the PROM only, and `fs` gains less from it than
@@ -2010,4 +2014,27 @@ Disproven: none.
 Unknowns: how much of the 35-minute clock lag each boot contributes on that host.
 Best checkpoint: unchanged (local/release-check-011c).
 Next step: Next task (device loads, then the order there); the clock lag is a candidate.
+----
+
+----
+Date: 2026-11-05
+Milestone: Usable VM, then tier-1 speed (Next task): device loads
+Hypothesis: the PROM's delay loops' device loads cost most in the helper path around them
+  (STATUS's next item: a lighter helper than call_semantics).
+Evidence: perf of prom (cycles and instructions, frame pointers, perf map, JIT dump); a count
+  of full-path loads by page in a throwaway build; perf stat (IPC 2.9, 28 thousand return and
+  388 thousand indirect mispredictions in prom).
+Changed: Cpu::device_page_slot (the device pages' index folds in address bits 19:16 and
+  23:20); Cpu::device_page_fills, printed by --engine-statistics.
+Tests: mips.device_pages_hold_registers_64k_apart (fails before: 7 fills for 3); the
+  mips.tier1.device_loads differential tests (every load width and sign from device pages,
+  r0, a bus error, a delay slot; on tier 0, tier 1, and regions); dev and asan green; every
+  digest equal, one to four CPUs.
+Newly proven: the device pages' index made three Hub register pages share one entry, and 38
+  million prom loads took the full path.
+Disproven: that a lighter helper would save much: 1.01x, not kept.
+Unknowns: none new.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: Next task's tier-1 list (tier 0's share, the FPU's helpers, PGO training with
+  IRIX workloads), or direct links across calls (J6) for the delay loops.
 ----

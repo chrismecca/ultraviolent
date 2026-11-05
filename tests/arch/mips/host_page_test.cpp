@@ -232,6 +232,33 @@ const test::Registration device_offsets{
         t.check_equal(s.cpu.dmfc0(cp0::epc), testing::kseg0(System::code));
     }};
 
+const test::Registration device_neighbors{
+    "mips.device_pages_hold_registers_64k_apart", [](test::Context& t) {
+        // A Hub's register regions are 64 KB apart (IP27.adoc "Hub"), and the firmware's delay
+        // loops alternate between them: their pages must not displace each other (measured
+        // 2026-11-05: with the index taken from address bits 15:12 alone, PI_RT_COUNT's page
+        // and two others shared one entry, and 38 million `prom` loads took the full path).
+        System s;
+        Echo a{0x1000'0000};
+        t.check(s.bus.map_mmio({PhysicalAddress{device_a}, 0x10'0000}, a).has_value());
+        s.set(a0, kseg0(device_a + 0x3'0000));
+        s.set(a1, kseg0(device_a + 0x6'0000));
+        s.set(a2, kseg0(device_a + 0xa'2000));
+        const auto loads = [&] {
+            s.run_program({ld(t0, 0x100, a0), ld(t1, 0x8, a1), ld(t2, 0x10, a2)});
+        };
+        loads();
+        const std::uint64_t fills = s.cpu.device_page_fills();
+        t.check_equal(fills, std::uint64_t{3});
+        loads();
+        loads();
+        t.check_equal(s.cpu.device_page_fills(), fills);
+        t.check_equal(s.gpr(t0), std::uint64_t{0x1003'0100});
+        t.check_equal(s.gpr(t1), std::uint64_t{0x1006'0008});
+        t.check_equal(s.gpr(t2), std::uint64_t{0x100a'2010});
+        t.check_equal(a.reads, std::uint64_t{9});
+    }};
+
 const test::Registration device_tlb{
     "mips.device_pages_follow_tlb_writes", [](test::Context& t) {
         System s;

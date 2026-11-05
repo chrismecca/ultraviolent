@@ -587,7 +587,8 @@ void Cpu::remember_device_page(std::uint64_t address, const Translation& transla
     if (!range) {
         return;
     }
-    DevicePage& entry = device_pages_[(address >> 12) % device_page_count];
+    ++device_page_fills_;
+    DevicePage& entry = device_pages_[device_page_slot(address)];
     const bool stores = kind == AccessKind::store || (entry.page == page && entry.stores &&
                                                        entry.context == translation_context());
     entry = {.page = page,

@@ -811,6 +811,8 @@ int main(int argc, char** argv) {
     if (options->engine_statistics) {
         print_block_statistics(machine.block_statistics(), machine.marked_code_frames(),
                                machine.cpu().code_frame_stores());
+        std::fprintf(stderr, "cpu: %llu device page fills\n",
+                     static_cast<unsigned long long>(machine.cpu().device_page_fills()));
         if (const mips::NativeCode* native = machine.native_code()) {
             const mips::NativeStatistics& n = native->statistics();
             const mips::BlockStatistics& b = machine.block_statistics();

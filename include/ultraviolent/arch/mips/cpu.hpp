@@ -434,6 +434,11 @@ class Cpu final : public InterruptSink {
     [[nodiscard]] std::uint64_t code_frame_stores() const {
         return code_frame_stores_;
     }
+    // Device pages filled (remember_device_page): each fill is an access that took the full
+    // translation and bus path.
+    [[nodiscard]] std::uint64_t device_page_fills() const {
+        return device_page_fills_;
+    }
 
     // Set by every access that reaches the bus (read, write): the access left the host fast
     // path and may have synchronized devices. Execution engines clear it before an
@@ -804,6 +809,7 @@ class Cpu final : public InterruptSink {
     // Set while load_slow and store_slow make the access that fills the host page cache.
     bool filling_{};
     std::uint64_t code_frame_stores_{};
+    std::uint64_t device_page_fills_{};
     std::array<std::uint64_t, Tlb::entry_count> tlb_generations_{};
     std::uint64_t code_epoch_{};
     std::uint64_t code_changes_{};
@@ -899,8 +905,14 @@ class Cpu final : public InterruptSink {
         bool stores{};
     };
     static constexpr std::size_t device_page_count = 16;
+    // The entry for a page: its page number folded with bits 19:16 and 23:20, so that pages
+    // 64 KB or 1 MB apart, as a Hub's register regions are, take different entries.
+    [[nodiscard]] static std::size_t device_page_slot(std::uint64_t address) {
+        const std::uint64_t page = address >> 12;
+        return (page ^ (page >> 4) ^ (page >> 8)) % device_page_count;
+    }
     [[nodiscard]] const DevicePage* device_page(std::uint64_t address, bool store) const {
-        const DevicePage& page = device_pages_[(address >> 12) % device_page_count];
+        const DevicePage& page = device_pages_[device_page_slot(address)];
         if (page.page != (address & ~page_offset_mask) || page.context != translation_context() ||
             (store && !page.stores)) {
             return nullptr;
