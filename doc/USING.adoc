@@ -154,7 +154,8 @@ WantedBy=multi-user.target
 ----
 +
 `tmux attach -t irix` shows the console. Set `AutoLoad` (The first time) so that the machine
-boots without an operator. `systemctl stop` then takes about half a minute. Once in the
+boots without an operator. `systemctl stop` then takes about half a minute (a minute on a
+host with half the reference host's speed). Once in the
 tests (one of eleven stops) IRIX printed the keyswitch message but its shutdown began only
 when a key was pressed on the console; if a stop takes long, `tmux attach -t irix` and press
 Enter.

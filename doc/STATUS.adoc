@@ -545,7 +545,17 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
 ... **INQUIRY EVPD**: ILLEGAL REQUEST, INVALID FIELD IN CDB on both targets (SCSI-2 8.2.5).
 ... Checked by a fresh install from blank on the release commit (`local/release-check-011c`,
     0.36 h): ssh server installed and running after the next boot, keyswitch power-off,
-    persistence, no core dumps. Tag `v0.1.1` is the user's to push.
+    persistence, no core dumps. The user pushed `main` and tag `v0.1.1` and published the
+    release (2026-11-05).
+... **The second host on 0.1.1** (2026-11-05, with the user's agreement): its machine was shut
+    down from IRIX, its checkout moved to `v0.1.1` (PGO build there), and it now runs under
+    the USING.adoc unit (adapted to its paths, enabled at boot). Its
+    first boot on 0.1.1: `login:` in 175 s, "No System change detected" (configmon), ping
+    and sshd answer. `systemctl stop` took 63 s (the keyswitch shutdown and power-off; about
+    twice the reference host's, as its CPU is about half as fast), `systemctl start` reached
+    `login:` in 165 s. Observed: IRIX's clock there was 35 minutes behind the host's after two
+    days: each two-CPU boot runs slower than real time on that host, and `--realtime` makes
+    up at most a second (USING.adoc "Known limits"); IRIX's clock has not been reset.
 ... Digests (`local/bench/r3600/y-tier1.json`, `y-tier1-multi.json`, one run each): the
     power-on workloads change (the PROM's controller commands now take their bytes before
     the NAK), equal on tier 1, tier 0, and the reference (prom, boot); the snapshot workloads
@@ -555,8 +565,10 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
     places; compared against a v0.1.0 build, `--trace scsi`). One-CPU `boot` moves by 9 M
     cycles.
 +
-Next: with the user, a two-CPU machine run on a cloud host ("build a working smp sgi 'in the
-cloud'"); then the order below (device loads, tier 0's share, FPU, PGO training).
+The two-CPU machine on a second host ("build a working smp sgi 'in the cloud'", the user
+2026-11-03) is that machine, above. Next: the order below (device loads, tier 0's share, FPU,
+PGO training); the clock lag on slower hosts is a candidate (what a hardware-faithful
+catch-up would be, or a time service inside IRIX).
 
 . **Tier-1 speed (the user, 2026-11-02: "branch here as an experiment and push on this ...
   while staying inside the architecture"; developed on branch `jit-speed`, merged into
@@ -1980,4 +1992,22 @@ Unknowns: the controller's real grace time; its answers to other commands; wheth
 Best checkpoint: local/release-check-011c (fresh install from blank on the 0.1.1 commit,
   0.36 h, every check passed).
 Next step: the user pushes and tags v0.1.1; then the cloud SMP machine.
+----
+
+----
+Date: 2026-11-05
+Milestone: Usable VM: the second host on 0.1.1
+Hypothesis: the USING.adoc systemd unit runs and stops the machine on another host as on
+  the reference host.
+Evidence: the second host (Debian 13 KVM guest, 4 vCPUs): systemctl status and journal, the
+  console in tmux, ping, the sshd banner, IRIX's date -u against the host's.
+Changed: the second host's checkout at v0.1.1 with its own PGO build; the unit installed
+  and enabled. Repository: STATUS, USING.adoc (stop time on a slower host).
+Tests: none new; the release's.
+Newly proven: on the second host the unit boots the machine to login: (165-175 s) and
+  systemctl stop shuts IRIX down and powers off through the keyswitch (63 s).
+Disproven: none.
+Unknowns: how much of the 35-minute clock lag each boot contributes on that host.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: Next task (device loads, then the order there); the clock lag is a candidate.
 ----
