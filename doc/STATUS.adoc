@@ -599,7 +599,14 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   an installed machine to `login:`; trained on `local/release-check-011c`, against the
   PROM-only build: `boot` 1.11x, `fs` 1.07x, `prom` 1.04x, `cpu` 1.02x (best of 3). A run
   from the benchmark's shell snapshot (ls, sum, awk) gave no more on `cpu` and `fs` (1.05x,
-  1.08x) and less on `prom` and `boot`. Next, by measured share: tier 0's share of `fs` and `boot` (about a tenth: code that runs fewer than 64
+  1.08x) and less on `prom` and `boot`. Where `fs` goes (2026-11-05, perf, PGO-trained
+  build): generated code 34% (dispatch 6.8% of it, so direct links would save about 2%),
+  the host kernel and libc 30% (the snapshot load: 0.92 s of the workload's 4.4 s, memory
+  copied three times and zeroed once in `StateImage::deserialize`, `Node`'s construction, and
+  `load_state`; and the disk reads), tier 0's `run_block` 9.3% for the 2.5% of operations it
+  runs, `operation_helper` 3%, `build_block` 1.9%. `cpu` and `fs` include the 0.92 s load,
+  which a faster snapshot load would remove from their times (not from a running guest's).
+  Next, by measured share: tier 0's share of `fs` and `boot` (about a tenth: code that runs fewer than 64
   times, and translation); the FPU operations still in helpers (other conversions, SQRT,
   ABS, NEG, conditional moves, COP1X, conditions other than 0).
 
