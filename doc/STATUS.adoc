@@ -557,7 +557,13 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
     days: each two-CPU boot runs slower than real time on that host, and `--realtime` makes
     up at most a second (USING.adoc "Known limits"); IRIX's clock has not been reset. Since
     2026-11-05 `--realtime-catch-up SECONDS` sets that bound (IP27.adoc "Machine loop and
-    time"), and a run prints the lag it forgot; the second host does not use it yet.
+    time"), and a run prints the lag it forgot. On 2026-11-06 (the user: the second host is a
+    playground) its checkout moved to `main` with a PGO build trained on a copy of its own
+    disk (taken with the machine shut down), and its unit's ExecStart gained
+    `--realtime-catch-up 3600`; IRIX's clock was set with `date -u`. A restart then reached
+    `login:` in 159 s (165 s before) with the clock 73 s behind (the boot's slow stretch),
+    caught up within five minutes, and stayed 4 s behind (the setting's typing delay) for
+    the next 12 minutes.
 ... Digests (`local/bench/r3600/y-tier1.json`, `y-tier1-multi.json`, one run each): the
     power-on workloads change (the PROM's controller commands now take their bytes before
     the NAK), equal on tier 1, tier 0, and the reference (prom, boot); the snapshot workloads
