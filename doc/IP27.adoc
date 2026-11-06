@@ -1307,6 +1307,9 @@ resumed run is bit-identical to an uninterrupted one (`ip27.snapshot_resumes_exa
 A two-CPU snapshot adds `machine.cpus` and CPU B's fields under `slice_b.`; a two-node one
 adds `machine.nodes` and the second node's CPUs, Hub, PCF8584, flash, directory, and memory
 under `node1.` (`ip27.two_nodes.snapshot`). A machine of another shape refuses it.
+Loading reads the file straight into its fields and copies memory pages once into RAM,
+which is untouched until then (MemoryBlock); a 562 MB snapshot of a root shell (the
+benchmarks' fixture) loads in 0.46 s on the reference host.
 
 Snapshots only shorten exploration (for example, skipping the 26 s ELSC wait). A checkpoint
 in STATUS.adoc is established only by a run from power-on.

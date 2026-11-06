@@ -51,6 +51,20 @@ class RecordingTarget final : public MmioTarget {
     std::vector<Access> accesses;
 };
 
+// A block's contents start zeroed (MemoryBlock), however large: a machine's RAM is one.
+const test::Registration memory_block_starts_zeroed{
+    "memory_block.starts_zeroed", [](test::Context& t) {
+        for (const std::size_t size :
+             {std::size_t{1}, std::size_t{0x1000}, std::size_t{64} << 20}) {
+            MemoryBlock block{size};
+            t.check_equal(block.size(), size);
+            const auto bytes = block.bytes();
+            t.check(std::ranges::all_of(bytes, [](std::byte b) { return b == std::byte{0}; }));
+            bytes[size - 1] = std::byte{1};
+            t.check(block.bytes()[size - 1] == std::byte{1}, "writable");
+        }
+    }};
+
 const test::Registration ram_is_big_endian_lanes{
     "address_space.ram_uses_big_endian_lanes", [](test::Context& t) {
         MemoryBlock ram{0x1000};

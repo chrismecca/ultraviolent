@@ -2,7 +2,11 @@
 
 #include <ultraviolent/core/state_image.hpp>
 
+#include <algorithm>
 #include <cstdint>
+#include <optional>
+#include <span>
+#include <vector>
 
 namespace {
 
@@ -70,6 +74,52 @@ const test::Registration prefixed{
         t.check(back.get("hub.x", value) && value == 5, "the prefix is removed");
         t.check(!back.get("node1.hub.x", value), "only the prefixed fields");
         t.check(image.sub_image("node2.").serialize() == StateImage{}.serialize(), "none match");
+    }};
+
+} // namespace
+
+namespace {
+
+// Feeds `data` to the streaming deserialize in the pieces it asks for, counting the bytes.
+std::optional<StateImage> deserialize_in_pieces(std::span<const std::byte> data, std::uint64_t size,
+                                                std::uint64_t& read) {
+    read = 0;
+    return StateImage::deserialize(size, [&](std::span<std::byte> out) {
+        if (data.size() - read < out.size()) {
+            return false;
+        }
+        std::copy_n(data.begin() + static_cast<std::ptrdiff_t>(read), out.size(), out.begin());
+        read += out.size();
+        return true;
+    });
+}
+
+const test::Registration streamed{
+    "state_image.streamed", [](test::Context& t) {
+        StateImage image;
+        image.put("a", std::uint64_t{0x1122'3344'5566'7788});
+        std::vector<std::byte> memory(0x20000);
+        memory[0x1'0001] = std::byte{9};
+        image.put_sparse("m", memory);
+        const auto bytes = image.serialize();
+        std::uint64_t read = 0;
+        const auto parsed = deserialize_in_pieces(bytes, bytes.size(), read);
+        if (!t.check(parsed.has_value())) {
+            return;
+        }
+        t.check(parsed->serialize() == bytes, "the same fields as the span form");
+        t.check_equal(read, std::uint64_t{bytes.size()});
+
+        t.check(!deserialize_in_pieces(bytes, bytes.size() - 1, read).has_value(),
+                "a size that ends inside a field");
+        t.check(!deserialize_in_pieces(std::span{bytes}.first(bytes.size() - 1), bytes.size(), read)
+                     .has_value(),
+                "a reader that runs out");
+        // A field length past the declared size is rejected before its bytes are read.
+        auto huge = bytes;
+        huge[8 + 4 + 1 + 7] = std::byte{0x7f}; // the top byte of key "a"'s value length
+        t.check(!deserialize_in_pieces(huge, huge.size(), read).has_value());
+        t.check(read < 32, "only the header and the key were read");
     }};
 
 } // namespace

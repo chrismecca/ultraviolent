@@ -604,8 +604,13 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   the host kernel and libc 30% (the snapshot load: 0.92 s of the workload's 4.4 s, memory
   copied three times and zeroed once in `StateImage::deserialize`, `Node`'s construction, and
   `load_state`; and the disk reads), tier 0's `run_block` 9.3% for the 2.5% of operations it
-  runs, `operation_helper` 3%, `build_block` 1.9%. `cpu` and `fs` include the 0.92 s load,
-  which a faster snapshot load would remove from their times (not from a running guest's).
+  runs, `operation_helper` 3%, `build_block` 1.9%. `cpu` and `fs` included the 0.92 s load.
+  The snapshot load (2026-11-06, IP27.adoc "Snapshots"): the file goes straight into its
+  fields, guest RAM comes from calloc (zero pages from the host, untouched until used), and
+  `get_sparse` zeroes only pages it does not restore and that are not already zero; the
+  benchmark's 562 MB snapshot loads in 0.46 s (0.91), any process starts in 0.03 s (0.18)
+  with 4 K page faults instead of 91 K. Against the build before: `cpu` 1.12x, `fs` 1.10x,
+  `prom` 1.02x, `boot` 1.01x, every digest equal (best of 3).
   Next, by measured share: tier 0's share of `fs` and `boot` (about a tenth: code that runs fewer than 64
   times, and translation); the FPU operations still in helpers (other conversions, SQRT,
   ABS, NEG, conditional moves, COP1X, conditions other than 0).
@@ -2090,4 +2095,29 @@ Unknowns: how fast the second host's idle guest catches up.
 Best checkpoint: unchanged (local/release-check-011c).
 Next step: the user's choice of `--realtime-catch-up 3600` on the second host (its unit's
   ExecStart); then Next task's tier-1 list.
+----
+
+----
+Date: 2026-11-06
+Milestone: Usable VM: the second host's clock; snapshot loading
+Hypothesis: with `--realtime-catch-up 3600` the second host's guest clock stays with the
+  host's across a restart; the snapshot load's 0.92 s is copies and page faults, not parsing.
+Evidence: the second host (above): 73 s behind at `login:`, caught up within five minutes,
+  steady afterwards. Snapshot load (perf, `--load-state` of the benchmark's shell snapshot
+  with `--cycles 1`): 0.9 s, 0.64 s of it in the kernel, 345 K page faults; memset 37%
+  (RAM zeroed at construction and again by get_sparse, the file buffer zeroed), memmove 36%
+  (the file buffer into the fields, the fields into RAM), read 15%, munmap 7%.
+Changed: StateImage::deserialize(size, read) reads fields in place (fields' storage is not
+  zeroed first; the span form uses it); main reads snapshots through it; MemoryBlock's
+  storage comes from calloc; get_sparse zeroes only unsaved pages that are not zero.
+Tests: state_image.streamed (same fields as the span form; a size or reader that ends early;
+  a value length past the size is refused before its bytes are read),
+  memory_block.starts_zeroed; mutation-checked (no gap zeroing fails
+  state_image.sparse_round_trip; no length bound crashes state_image.streamed). dev and asan
+  green.
+Newly proven: load 0.46 s, process start 0.03 s; `cpu` 1.12x, `fs` 1.10x, digests equal.
+Disproven: none.
+Unknowns: none new.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: Next task's tier-1 list (tier 0's share, the FPU's helpers).
 ----

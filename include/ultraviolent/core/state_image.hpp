@@ -3,7 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <memory>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -59,9 +62,30 @@ class StateImage {
 
     [[nodiscard]] std::vector<std::byte> serialize() const;
     [[nodiscard]] static std::optional<StateImage> deserialize(std::span<const std::byte> data);
+    // The same from a snapshot of `size` bytes read in order: `read` fills each span it is
+    // given, or returns false. A snapshot file then goes straight into its fields, without a
+    // copy of the whole file first (guest memory is most of it).
+    [[nodiscard]] static std::optional<StateImage>
+    deserialize(std::uint64_t size, const std::function<bool(std::span<std::byte>)>& read);
 
   private:
-    std::map<std::string, std::vector<std::byte>, std::less<>> fields_;
+    // Field storage whose new bytes are left unset rather than zeroed: they are filled at once.
+    template <class T> struct FillLater : std::allocator<T> {
+        template <class U> struct rebind {
+            using other = FillLater<U>;
+        };
+        FillLater() = default;
+        template <class U> FillLater(const FillLater<U>&) noexcept {}
+        template <class U> void construct(U* p) {
+            ::new (static_cast<void*>(p)) U;
+        }
+        template <class U, class... Args> void construct(U* p, Args&&... args) {
+            ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
+        }
+    };
+    using Bytes = std::vector<std::byte, FillLater<std::byte>>;
+
+    std::map<std::string, Bytes, std::less<>> fields_;
 };
 
 } // namespace ultraviolent

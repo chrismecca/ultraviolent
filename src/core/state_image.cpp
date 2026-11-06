@@ -4,6 +4,7 @@
 #include <ultraviolent/core/invariant.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <utility>
 
@@ -28,8 +29,7 @@ void append_integer(std::vector<std::byte>& out, std::uint64_t value, std::size_
 void StateImage::put_bytes(std::string key, std::span<const std::byte> bytes) {
     // Two components saving under one key would lose one silently.
     const bool inserted =
-        fields_.try_emplace(std::move(key), std::vector<std::byte>(bytes.begin(), bytes.end()))
-            .second;
+        fields_.try_emplace(std::move(key), Bytes(bytes.begin(), bytes.end())).second;
     invariant(inserted, "a snapshot key was saved twice");
 }
 
@@ -93,7 +93,20 @@ bool StateImage::get_sparse(const std::string& key, std::span<std::byte> bytes) 
                             [&](std::uint64_t page) { return page * sparse_page >= size; })) {
         return false;
     }
-    std::ranges::fill(bytes, std::byte{0});
+    // Pages not saved become zero; those already zero are left untouched, so that a fresh
+    // machine's memory is not written twice (MemoryBlock).
+    std::vector<bool> saved((size + sparse_page - 1) / sparse_page);
+    for (const std::uint64_t page : indices) {
+        saved[page] = true;
+    }
+    for (std::uint64_t page = 0; page < saved.size(); ++page) {
+        const auto chunk = bytes.subspan(
+            page * sparse_page, std::min<std::size_t>(sparse_page, size - page * sparse_page));
+        if (!saved[page] &&
+            std::ranges::any_of(chunk, [](std::byte b) { return b != std::byte{0}; })) {
+            std::ranges::fill(chunk, std::byte{0});
+        }
+    }
     for (std::size_t i = 0; i < count; ++i) {
         const std::uint64_t offset = indices[i] * sparse_page;
         const std::size_t length = std::min<std::uint64_t>(sparse_page, size - offset);
@@ -119,40 +132,54 @@ std::vector<std::byte> StateImage::serialize() const {
 }
 
 std::optional<StateImage> StateImage::deserialize(std::span<const std::byte> data) {
-    if (data.size() < magic.size()) {
+    std::size_t offset = 0;
+    return deserialize(data.size(), [&](std::span<std::byte> out) {
+        std::memcpy(out.data(), data.data() + offset, out.size());
+        offset += out.size();
+        return true;
+    });
+}
+
+std::optional<StateImage>
+StateImage::deserialize(std::uint64_t size, const std::function<bool(std::span<std::byte>)>& read) {
+    std::uint64_t remaining = size;
+    // Reads the next out.size() bytes, which must be within `size`.
+    const auto take = [&](std::span<std::byte> out) {
+        if (remaining < out.size()) {
+            return false;
+        }
+        remaining -= out.size();
+        return out.empty() || read(out);
+    };
+    std::array<std::byte, magic.size()> header{};
+    if (!take(header) || !std::ranges::equal(header, magic, {}, {},
+                                             [](char c) { return static_cast<std::byte>(c); })) {
         return std::nullopt;
     }
-    for (std::size_t i = 0; i < magic.size(); ++i) {
-        if (data[i] != static_cast<std::byte>(magic[i])) {
-            return std::nullopt;
-        }
-    }
     StateImage image;
-    std::size_t offset = magic.size();
-    while (offset < data.size()) {
-        if (data.size() - offset < 4) {
+    while (remaining != 0) {
+        std::array<std::byte, 4> key_size{};
+        if (!take(key_size)) {
             return std::nullopt;
         }
-        const std::uint64_t key_size = load_unsigned(data.subspan(offset, 4), ByteOrder::little);
-        offset += 4;
-        if (data.size() - offset < key_size + 8) {
+        const std::uint64_t key_length = load_unsigned(key_size, ByteOrder::little);
+        if (remaining < key_length) {
             return std::nullopt;
         }
-        std::string key(key_size, '\0');
-        for (std::size_t i = 0; i < key_size; ++i) {
-            key[i] = static_cast<char>(data[offset + i]);
-        }
-        offset += key_size;
-        const std::uint64_t value_size = load_unsigned(data.subspan(offset, 8), ByteOrder::little);
-        offset += 8;
-        if (data.size() - offset < value_size) {
+        std::string key(key_length, '\0');
+        std::array<std::byte, 8> value_size{};
+        if (!take(std::as_writable_bytes(std::span{key})) || !take(value_size)) {
             return std::nullopt;
         }
-        if (image.fields_.contains(key)) {
-            return std::nullopt; // malformed: a key twice
+        const std::uint64_t length = load_unsigned(value_size, ByteOrder::little);
+        if (remaining < length || image.fields_.contains(key)) {
+            return std::nullopt; // truncated, or malformed: a key twice
         }
-        image.put_bytes(std::move(key), data.subspan(offset, value_size));
-        offset += value_size;
+        Bytes value(length);
+        if (!take(value)) {
+            return std::nullopt;
+        }
+        image.fields_.emplace(std::move(key), std::move(value));
     }
     return image;
 }

@@ -3,6 +3,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <memory>
+#include <new>
 #include <span>
 #include <vector>
 
@@ -12,25 +15,27 @@ namespace ultraviolent {
 // address of its own; an AddressSpace maps ranges of it, possibly more than once (aliases).
 //
 // Contents start zeroed so that runs are deterministic. Real DRAM contents at power-on are
-// undefined, so guest software cannot legitimately depend on this choice.
+// undefined, so guest software cannot legitimately depend on this choice. The storage comes
+// from calloc, which takes fresh pages from the host already zeroed: a machine's RAM costs
+// host memory and time only as it is touched.
 //
 // Not copyable or movable: mappings refer to the block's storage for its whole lifetime.
 class MemoryBlock {
   public:
-    explicit MemoryBlock(std::size_t size) : bytes_(size) {}
+    explicit MemoryBlock(std::size_t size) : bytes_{allocate(size)}, size_{size} {}
     MemoryBlock(const MemoryBlock&) = delete;
     MemoryBlock& operator=(const MemoryBlock&) = delete;
 
     [[nodiscard]] std::size_t size() const {
-        return bytes_.size();
+        return size_;
     }
 
     // Direct access for loading ROM images and for host-side inspection.
     [[nodiscard]] std::span<std::byte> bytes() {
-        return bytes_;
+        return {bytes_.get(), size_};
     }
     [[nodiscard]] std::span<const std::byte> bytes() const {
-        return bytes_;
+        return {bytes_.get(), size_};
     }
 
     // Code-frame tracking for execution engines (IR.adoc "Keeping blocks valid"). An engine
@@ -83,7 +88,21 @@ class MemoryBlock {
     }
 
   private:
-    std::vector<std::byte> bytes_;
+    struct Free {
+        void operator()(std::byte* bytes) const {
+            std::free(bytes);
+        }
+    };
+    static std::unique_ptr<std::byte[], Free> allocate(std::size_t size) {
+        auto* bytes = static_cast<std::byte*>(std::calloc(size == 0 ? 1 : size, 1));
+        if (bytes == nullptr) {
+            throw std::bad_alloc{};
+        }
+        return std::unique_ptr<std::byte[], Free>{bytes};
+    }
+
+    std::unique_ptr<std::byte[], Free> bytes_;
+    std::size_t size_;
     std::vector<std::atomic<std::uint8_t>> code_marks_ =
         std::vector<std::atomic<std::uint8_t>>(frames());
     std::vector<std::atomic<std::uint64_t>> code_generations_ =
@@ -91,7 +110,7 @@ class MemoryBlock {
     std::atomic<std::size_t> marked_frames_{};
 
     [[nodiscard]] std::size_t frames() const {
-        return (bytes_.size() + frame_size - 1) / frame_size;
+        return (size_ + frame_size - 1) / frame_size;
     }
 };
 

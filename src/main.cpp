@@ -245,6 +245,20 @@ std::optional<std::vector<std::byte>> read_file(const std::string& path) {
     return result;
 }
 
+// A snapshot file, read straight into its fields (StateImage::deserialize).
+std::optional<StateImage> read_snapshot(const std::string& path) {
+    std::ifstream stream{path, std::ios::binary | std::ios::ate};
+    const std::streamoff size = stream ? std::streamoff{stream.tellg()} : -1;
+    if (size < 0) {
+        return std::nullopt;
+    }
+    stream.seekg(0);
+    return StateImage::deserialize(static_cast<std::uint64_t>(size), [&](std::span<std::byte> out) {
+        return static_cast<bool>(stream.read(reinterpret_cast<char*>(out.data()),
+                                             static_cast<std::streamsize>(out.size())));
+    });
+}
+
 struct Options {
     std::string machine;
     std::string prom;
@@ -711,8 +725,7 @@ int main(int argc, char** argv) {
     }
 
     if (!options->load_state.empty()) {
-        const auto data = read_file(options->load_state);
-        const auto image = data ? StateImage::deserialize(*data) : std::nullopt;
+        const auto image = read_snapshot(options->load_state);
         if (!image) {
             std::fprintf(stderr, "cannot read snapshot %s\n", options->load_state.c_str());
             return exit_asset;
