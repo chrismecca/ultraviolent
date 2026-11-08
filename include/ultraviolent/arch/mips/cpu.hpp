@@ -568,6 +568,21 @@ class Cpu final : public InterruptSink {
         std::uint32_t host_page_count;
         std::uint32_t host_page_size;
         ByteOrder byte_order;
+        // The device pages (held reads, JIT.adoc "Device time"): device_page_count entries of
+        // device_page_size bytes, selected as Cpu::device_page_slot does; the fields of an
+        // entry; the run epoch.
+        std::int32_t device_pages;
+        std::int32_t device_page_page;
+        std::int32_t device_page_context;
+        std::int32_t held_key;
+        std::int32_t held_value;
+        std::int32_t held_until;
+        std::int32_t held_stamp;
+        std::int32_t held_stamp_value;
+        std::int32_t held_run;
+        std::int32_t run_epoch;
+        std::uint32_t device_page_count;
+        std::uint32_t device_page_size;
     };
     [[nodiscard]] NativeLayout native_layout() const;
 
@@ -896,7 +911,8 @@ class Cpu final : public InterruptSink {
     // translation context, TLB entries, generations, no armed watchpoint, the bus byte order);
     // transparent. Measured: firmware delay loops poll Hub and UART registers hundreds of
     // millions of times in `boot`, and translation and bus decode were most of each access.
-    struct DevicePage {
+    // 128 bytes (aligned to 64), so tier 1 selects an entry with a shift.
+    struct alignas(64) DevicePage {
         std::uint64_t page{~std::uint64_t{0}};
         std::uint64_t context{};
         MmioTarget* target{};

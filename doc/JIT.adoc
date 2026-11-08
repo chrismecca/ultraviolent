@@ -412,6 +412,27 @@ perf of `boot` after: the synchronized target 2.9% (10%), but `load_slow` 14.7% 
 `operation_helper` 12%: a held read still leaves generated code through the helper (guest
 values written back, `complete_cycle`, `load_slow`), which is where the rest is.
 
+Tier 1 now checks a held read in generated code: a load that misses the host page cache
+jumps to an out-of-line check (`emit_held_check`) that finds the address's device page as
+`Cpu::device_page_slot` does (`DevicePage` is 128 bytes so a shift scales the slot), tests
+the page, the translation context, the key, the run, the cycle bound (the operation's cycle
+count is r15 plus its index past the counted cycles), and the stamp, and on a hit loads the
+value, extended as the load extends, and continues after the fast path's load; anything
+else goes on to the slow path as before. The load's result register is allocated before
+the address test: allocating it may write back an evicted guest value, and the held path
+leaves from the branch before that point. The first build allocated it after, and IRIX
+(`boot`, `cpu`, `fs`) lost guest values and never reached its end while `prom` passed.
+Tests: `mips.tier1.held_device_reads.*` (a device whose value is a function of the cycle
+window, offset, width, and writes, so a held read must equal a read: every width and sign,
+a store that changes the stamp, a delay slot; the same reads reach the device as on the
+reference, and fewer than without holding) and `mips.tier1.held_reads_under_pressure.*`
+(twelve dirty guest values live across held loads; it fails with the result register
+allocated after the test). Mutation checks of the emitted check (no stamp or run test, a
+cycle count 3 early, no sign extension of a byte or a word): each fails. Not caught, and
+harmless: a wrong width in the key only misses. PGO, best of 3, against the commit before:
+`prom` 1.16x, `boot` 1.15x (2.05 times real time), `cpu` and `fs` unchanged; every digest
+equal, one to four CPUs.
+
 == FPU
 
 FPU operations are one decoded opcode (`cop1`) executed by `FpuExecutor` (fpu.cpp), whose

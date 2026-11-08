@@ -87,6 +87,8 @@ Cpu::NativeLayout Cpu::native_layout() const {
     static_assert(sizeof(interrupt_check_) == 1 && std::atomic<bool>::is_always_lock_free,
                   "tier 1 tests the interrupt check as a byte");
     static_assert(std::has_single_bit(host_page_count), "tier 1 masks the host page slot");
+    static_assert(sizeof(DevicePage) == 128 && std::has_single_bit(device_page_count),
+                  "tier 1 selects a device page with a mask and a shift");
     const auto at = [this](const void* field) {
         return static_cast<std::int32_t>(static_cast<const std::byte*>(field) -
                                          reinterpret_cast<const std::byte*>(this));
@@ -114,7 +116,19 @@ Cpu::NativeLayout Cpu::native_layout() const {
             .host_page_addend = offsetof(HostPage, addend),
             .host_page_count = host_page_count,
             .host_page_size = sizeof(HostPage),
-            .byte_order = bus_.byte_order()};
+            .byte_order = bus_.byte_order(),
+            .device_pages = at(device_pages_.data()),
+            .device_page_page = offsetof(DevicePage, page),
+            .device_page_context = offsetof(DevicePage, context),
+            .held_key = offsetof(DevicePage, held_key),
+            .held_value = offsetof(DevicePage, held_value),
+            .held_until = offsetof(DevicePage, held_until),
+            .held_stamp = offsetof(DevicePage, held_stamp),
+            .held_stamp_value = offsetof(DevicePage, held_stamp_value),
+            .held_run = offsetof(DevicePage, held_run),
+            .run_epoch = at(&run_epoch_),
+            .device_page_count = device_page_count,
+            .device_page_size = sizeof(DevicePage)};
 }
 
 std::uint64_t Cpu::context_tag(std::uint64_t context) {

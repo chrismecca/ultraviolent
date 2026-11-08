@@ -7,6 +7,7 @@
 #include <ultraviolent/arch/mips/fpu.hpp>
 #include <ultraviolent/arch/mips/native_code.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <format>
 #include <random>
@@ -366,6 +367,134 @@ template <class Engine> void device_loads(test::Context& t) {
     t.check_equal(candidate_device.reads, reference_device.reads);
 }
 
+// A device whose reads hold (MmioTarget::mmio_read_held) for windows of `period` cycles of
+// the reading CPU, until it is written (its stamp). Its value is a function of the offset,
+// the width, the window, and the writes so far, so a held read returns exactly what a read
+// would, and one answered from the wrong window, offset, width, or stamp is wrong. With
+// `hold` false it promises nothing.
+class HoldingDevice final : public MmioTarget {
+  public:
+    HoldingDevice(const Cpu& cpu, std::uint64_t period, bool hold)
+        : cpu_{cpu}, period_{period}, hold_{hold} {}
+    std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
+                                                        AccessWidth width) override {
+        ++reads;
+        const std::uint64_t value = 0xf0e1'd2c3'b4a5'9687 + offset * 0x0101 +
+                                    cpu_.cycles() / period_ * 0x1111 +
+                                    stamp_.load() * 0x10'0000'0000;
+        return width == AccessWidth::bits64
+                   ? value
+                   : value & ((std::uint64_t{1} << (8 * byte_count(width))) - 1);
+    }
+    std::expected<HeldRead, AccessFault> mmio_read_held(std::uint64_t offset,
+                                                        AccessWidth width) override {
+        const auto value = mmio_read(offset, width);
+        if (!hold_) {
+            return HeldRead{.value = *value};
+        }
+        return HeldRead{.value = *value,
+                        .until = (cpu_.cycles() / period_ + 1) * period_,
+                        .stamp = &stamp_,
+                        .stamp_value = stamp_.load()};
+    }
+    std::expected<void, AccessFault> mmio_write(std::uint64_t /*offset*/, AccessWidth /*width*/,
+                                                std::uint64_t /*value*/) override {
+        ++stamp_;
+        return {};
+    }
+    std::uint64_t reads{};
+
+  private:
+    const Cpu& cpu_;
+    std::uint64_t period_;
+    bool hold_;
+    std::atomic<std::uint64_t> stamp_{};
+};
+
+// Held device reads (JIT.adoc "Device time"), which tier 1 checks in generated code before
+// the slow path: loads of every width and sign, repeated so that some are held, a store that
+// changes the stamp, and a load in a delay slot, against the reference; the same number of
+// reads reach the device, and fewer than without holding.
+template <class Engine> std::uint64_t held_device_reads(test::Context& t, bool hold) {
+    constexpr std::uint64_t device = 0x20'0000;
+    DifferentialWith<Engine> d;
+    d.max_chunk = 500;
+    HoldingDevice reference_device{d.reference.cpu, 5, hold};
+    HoldingDevice candidate_device{d.candidate.cpu, 5, hold};
+    t.check(
+        d.reference.bus.map_mmio({PhysicalAddress{device}, 0x1000}, reference_device).has_value());
+    t.check(
+        d.candidate.bus.map_mmio({PhysicalAddress{device}, 0x1000}, candidate_device).has_value());
+    d.load_skip_handlers();
+    d.load(System::code, kseg0(System::code),
+           {lb(t0, 1, s0),     lb(t1, 1, s0),     lbu(t2, 0x13, s0),
+            lbu(t3, 0x13, s0), lh(t4, 0x22, s0),  lh(t5, 0x22, s0),
+            lhu(t6, 0x36, s0), lhu(t6, 0x36, s0), lw(t7, 0x44, s0),
+            lw(t8, 0x44, s0),  lwu(t9, 0x5c, s0), lwu(t9, 0x5c, s0),
+            ld(v0, 0x60, s0),  ld(v1, 0x60, s0),  daddu(a1, a1, v1),
+            sd(t0, 0x80, s0),  ld(a0, 0x60, s0),  daddu(a1, a1, a0),
+            lw(a2, 0x44, s0),  daddu(a1, a1, a2), beq(zero, zero, -4 * 21),
+            ld(a3, 0x60, s0)});
+    d.both([&](System& s) {
+        s.start_kernel();
+        s.set(s0, kseg0(device));
+    });
+    t.check(d.run(t, 4000), "matches the reference");
+    t.check_equal(candidate_device.reads, reference_device.reads);
+    return candidate_device.reads;
+}
+// The same under register pressure: twelve guest values computed (dirty in host registers)
+// and live across held loads, so allocating a load's result evicts one; a held read must not
+// skip its write-back (measured 2026-11-08: IRIX lost guest values this way).
+template <class Engine> void held_reads_under_pressure(test::Context& t) {
+    constexpr std::uint64_t device = 0x20'0000;
+    DifferentialWith<Engine> d;
+    d.max_chunk = 2000;
+    HoldingDevice reference_device{d.reference.cpu, 64, true};
+    HoldingDevice candidate_device{d.candidate.cpu, 64, true};
+    t.check(
+        d.reference.bus.map_mmio({PhysicalAddress{device}, 0x1000}, reference_device).has_value());
+    t.check(
+        d.candidate.bus.map_mmio({PhysicalAddress{device}, 0x1000}, candidate_device).has_value());
+    d.load_skip_handlers();
+    d.load(System::code, kseg0(System::code), {daddiu(t0, t0, 1),        daddiu(t1, t1, 2),
+                                               daddiu(t2, t2, 3),        daddiu(t3, t3, 4),
+                                               daddiu(t4, t4, 5),        daddiu(t5, t5, 6),
+                                               daddiu(t6, t6, 7),        daddiu(t7, t7, 8),
+                                               daddiu(t8, t8, 9),        daddiu(t9, t9, 10),
+                                               daddiu(a0, a0, 11),       daddiu(a1, a1, 12),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               ld(v0, 0x60, s0),         daddu(v1, v1, v0),
+                                               daddu(a2, a2, t0),        daddu(a2, a2, t1),
+                                               daddu(a2, a2, t2),        daddu(a2, a2, t3),
+                                               daddu(a2, a2, t4),        daddu(a2, a2, t5),
+                                               daddu(a2, a2, t6),        daddu(a2, a2, t7),
+                                               daddu(a2, a2, t8),        daddu(a2, a2, t9),
+                                               daddu(a2, a2, a0),        daddu(a2, a2, a1),
+                                               beq(zero, zero, -4 * 49), nop()});
+    d.both([&](System& s) {
+        s.start_kernel();
+        s.set(s0, kseg0(device));
+    });
+    t.check(d.run(t, 3000), "matches the reference");
+}
+
+template <class Engine> void held_device_reads(test::Context& t) {
+    const std::uint64_t held = held_device_reads<Engine>(t, true);
+    const std::uint64_t plain = held_device_reads<Engine>(t, false);
+    t.check(held < plain * 3 / 4, std::format("held reads: {} of {}", held, plain));
+}
+
 // The inline host page path tests the entry's translation context: one user virtual page,
 // mapped by two non-global TLB entries (ASIDs 1 and 2) to two frames, loaded and stored in
 // turn under each ASID. Without the test, a host page filled under one ASID would serve the
@@ -621,6 +750,18 @@ const test::Registration device_loads_tier1{"mips.tier1.device_loads.tier1",
                                             device_loads<Tier1Engine>};
 const test::Registration device_loads_regions{"mips.tier1.device_loads.regions",
                                               device_loads<Tier1RegionEngine>};
+
+const test::Registration held_reads_tier0{"mips.tier1.held_device_reads.tier0",
+                                          held_device_reads<Tier0Engine>};
+const test::Registration held_reads_tier1{"mips.tier1.held_device_reads.tier1",
+                                          held_device_reads<Tier1Engine>};
+const test::Registration held_reads_regions{"mips.tier1.held_device_reads.regions",
+                                            held_device_reads<Tier1RegionEngine>};
+
+const test::Registration held_pressure_tier1{"mips.tier1.held_reads_under_pressure.tier1",
+                                             held_reads_under_pressure<Tier1Engine>};
+const test::Registration held_pressure_regions{"mips.tier1.held_reads_under_pressure.regions",
+                                               held_reads_under_pressure<Tier1RegionEngine>};
 
 const test::Registration memory_tier0{"mips.tier1.memory_operations.tier0",
                                       memory_operations<Tier0Engine>};

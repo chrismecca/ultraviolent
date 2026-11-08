@@ -620,8 +620,8 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   Held device reads (2026-11-08, JIT.adoc "Device time"): `boot` reads PI_RT_COUNT 579
   million times; a device may now say how long a read holds and the CPU answers repeats
   itself (one CPU, PI_RT_COUNT): `prom` 1.04x, `boot` 1.06x, every digest equal. What remains
-  of such a read is tier 1's way out to the helper (about a quarter of `boot`); next, the held
-  read checked in generated code.
+  of such a read was tier 1's way out to the helper; tier 1 now checks the held read in
+  generated code: `prom` 1.16x and `boot` 1.15x more (2.05 times real time).
   Next, by measured share: tier 0's share of `fs` and `boot` (about a tenth: code that runs fewer than 64
   times, and translation); the FPU operations still in helpers (other conversions, SQRT,
   ABS, NEG, conditional moves, COP1X, conditions other than 0).
@@ -2156,4 +2156,26 @@ Disproven: that the device read itself was most of a delay-loop read's cost: wit
 Unknowns: none new.
 Best checkpoint: unchanged (local/release-check-011c).
 Next step: check a held read in tier 1's generated code, before the helper.
+----
+
+----
+Date: 2026-11-08
+Milestone: Usable VM: tier-1 speed, held reads in generated code
+Hypothesis: with the device read held, the rest of a delay-loop read is tier 1's way out to
+  the helper, and checking the held read in generated code removes it.
+Evidence: perf of `boot` after the held reads: `load_slow` 14.7%, `operation_helper` 12%.
+  The first build changed the digests of `boot`, `cpu`, and `fs` (IRIX never reached its
+  end; `prom` equal): the load's result register was allocated after the address test, and
+  an eviction's write-back there was skipped by the held path. Reproduced by
+  mips.tier1.held_reads_under_pressure before the fix.
+Changed: the tier-1 translator (EmitBuilder::HeldCheck, emit_held_check; host_address can
+  branch elsewhere on a miss; the load's result register first); Cpu::NativeLayout's device
+  page fields; DevicePage 128 bytes.
+Tests: mips.tier1.held_device_reads.*, mips.tier1.held_reads_under_pressure.*; mutation
+  checks as JIT.adoc says; dev and asan green.
+Newly proven: every digest equal, one to four CPUs; `prom` 1.16x, `boot` 1.15x.
+Disproven: none.
+Unknowns: none new.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: perf of `boot` and `fs` again for what leads now; the FPU's helpers for `cpu`.
 ----

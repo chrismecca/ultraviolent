@@ -351,11 +351,25 @@ class EmitBuilder {
         std::uint8_t coprocessor{};
     };
 
+    // A load that missed the host page cache, before its slow path: the held read of the
+    // address's device page (Cpu::device_read's first test), checked out of line. A hit puts
+    // the value in `result` and continues at `done`, after the fast path's load; anything
+    // else goes on to `slow`.
+    struct HeldCheck {
+        Label check;
+        Label done;
+        Label slow;
+        Reg address;
+        Reg result;
+        AccessWidth width;
+        bool sign_extend;
+    };
+
     EmitBuilder(Assembler& a, GuestRegisters& registers, const Cpu::NativeLayout& layout,
                 bool movbe, std::uint64_t pc, std::vector<SideExit>& raises,
-                std::vector<SideExit>& slow)
+                std::vector<SideExit>& slow, std::vector<HeldCheck>& held)
         : a_{a}, registers_{registers}, layout_{layout}, movbe_{movbe}, pc_{pc}, raises_{raises},
-          slow_{slow} {}
+          slow_{slow}, held_{held} {}
 
     [[nodiscard]] std::uint64_t pc() const {
         return pc_;
@@ -547,9 +561,13 @@ class EmitBuilder {
     // path inline, with the same tests (the page and translation context of the address's
     // entry, natural alignment, and for a store a writable entry); anything else leaves through
     // the slow path, which runs the whole operation through call_semantics.
+    // A load that misses the host page cache tries the device page's held read before the
+    // slow path (HeldCheck). The result's register is taken first: taking it may write back
+    // an evicted guest value, which must come before the branch the held path leaves by.
     template <AccessWidth W, bool SignExtend> std::optional<Value> load(Value address) {
-        const Mem m = host_address(address, byte_count(W), false);
         const Reg r = registers_.temp();
+        const Label check = a_.label();
+        const auto [m, va, slow] = host_address(address, byte_count(W), false, check);
         const bool swap = layout_.byte_order == ByteOrder::big;
         if constexpr (W == AccessWidth::bits8) {
             if (SignExtend) {
@@ -585,10 +603,13 @@ class EmitBuilder {
                 a_.bswap64(r);
             }
         }
+        const Label done = a_.label();
+        a_.bind(done);
+        held_.push_back({check, done, slow, va, r, W, SignExtend});
         return reg(r);
     }
     template <AccessWidth W> bool store(Value address, Value value) {
-        const Mem m = host_address(address, byte_count(W), true);
+        const Mem m = host_address(address, byte_count(W), true).bytes;
         const bool swap = layout_.byte_order == ByteOrder::big;
         if constexpr (W == AccessWidth::bits8) {
             if (value.is_constant) {
@@ -870,9 +891,15 @@ class EmitBuilder {
     // (Cpu::data_page): the entry for the address's page (bits 17:12 select it) holds the
     // page's address tagged with its translation context (Cpu::HostPage), which the address
     // masked to its page and misaligned bits, tagged with the current context, must equal;
-    // a store compares the entry's store tag. A miss branches to the slow path. The bytes are
-    // at the address plus the entry's addend.
-    Mem host_address(Value address, std::size_t size, bool store) {
+    // a store compares the entry's store tag. A miss branches to `miss`, or else to the slow
+    // path. The bytes are at the address plus the entry's addend.
+    struct HostAddress {
+        Mem bytes;
+        Reg address;
+        Label slow;
+    };
+    HostAddress host_address(Value address, std::size_t size, bool store,
+                             std::optional<Label> miss = {}) {
         const Reg va = materialize(address);
         const Reg entry = registers_.temp();
         const Reg t = registers_.temp();
@@ -889,9 +916,9 @@ class EmitBuilder {
         a_.cmp(t, Mem{Reg::rbx,
                       base + (store ? layout_.host_page_store_page : layout_.host_page_page),
                       entry});
-        a_.jcc(Cond::ne, slow);
+        a_.jcc(Cond::ne, miss.value_or(slow));
         a_.mov(t, Mem{Reg::rbx, base + layout_.host_page_addend, entry});
-        return Mem{t, 0, va};
+        return {Mem{t, 0, va}, va, slow};
     }
 
     // ADD, SUB, MUL, DIV .S and .D as FpuExecutor::binary computes them: the host operation
@@ -1149,6 +1176,7 @@ class EmitBuilder {
     std::uint64_t pc_;
     std::vector<SideExit>& raises_;
     std::vector<SideExit>& slow_;
+    std::vector<HeldCheck>& held_;
 };
 
 class X86_64NativeCode final : public NativeCode {
@@ -1564,6 +1592,67 @@ class X86_64NativeCode final : public NativeCode {
         }
     }
 
+    // A load's held-read check (EmitBuilder::HeldCheck), as Cpu::device_page and device_read
+    // test it: the device page for the address (Cpu::device_page_slot's index) holds its page
+    // in the current translation context, and a held read of the same offset and width, made
+    // in this run, with a cycle bound above the operation's cycle count and its stamp
+    // unchanged. Then the value, extended as the load extends, without reaching the bus.
+    // Uses rax and rcx; the operation's cycle count is r15 plus its index past the counted
+    // cycles (materialize).
+    void emit_held_check(Assembler& a, const EmitBuilder::HeldCheck& h, std::size_t index,
+                         const Boundary& b) {
+        const auto entry_bits = static_cast<unsigned>(std::countr_zero(layout_.device_page_size));
+        const std::int32_t base = layout_.device_pages;
+        const auto at = [&](std::int32_t field) { return Mem{Reg::rbx, base + field, Reg::rax}; };
+        a.bind(h.check);
+        // The slot: page ^ page >> 4 ^ page >> 8, masked, scaled by the entry size.
+        a.mov(Reg::rax, h.address);
+        a.shr(Reg::rax, 12);
+        a.mov(Reg::rcx, Reg::rax);
+        a.shr(Reg::rcx, 4);
+        a.xor_(Reg::rcx, Reg::rax);
+        a.shr(Reg::rax, 8);
+        a.xor_(Reg::rax, Reg::rcx);
+        a.and_(Reg::rax, static_cast<std::int32_t>(layout_.device_page_count - 1));
+        a.shl(Reg::rax, static_cast<std::uint8_t>(entry_bits));
+        a.mov(Reg::rcx, h.address);
+        a.and_(Reg::rcx, -0x1000);
+        a.cmp(Reg::rcx, at(layout_.device_page_page));
+        a.jcc(Cond::ne, h.slow);
+        a.mov(Reg::rcx, field(layout_.translation_context));
+        a.cmp(Reg::rcx, at(layout_.device_page_context));
+        a.jcc(Cond::ne, h.slow);
+        // The key: the offset in the page and the width (Cpu::device_read).
+        a.mov(Reg::rcx, h.address);
+        a.and_(Reg::rcx, 0xfff);
+        a.shl(Reg::rcx, 4);
+        a.or_(Reg::rcx, static_cast<std::int32_t>(byte_count(h.width)));
+        a.cmp(Reg::rcx, at(layout_.held_key));
+        a.jcc(Cond::ne, h.slow);
+        a.mov(Reg::rcx, field(layout_.run_epoch));
+        a.cmp(Reg::rcx, at(layout_.held_run));
+        a.jcc(Cond::ne, h.slow);
+        a.lea(Reg::rcx, Mem{Reg::r15, static_cast<std::int32_t>(index - b.cycles)});
+        a.cmp(Reg::rcx, at(layout_.held_until));
+        a.jcc(Cond::ae, h.slow);
+        a.mov(Reg::rcx, at(layout_.held_stamp));
+        a.mov(Reg::rcx, Mem{Reg::rcx, 0});
+        a.cmp(Reg::rcx, at(layout_.held_stamp_value));
+        a.jcc(Cond::ne, h.slow);
+        // The device's value is zero-extended from the access width.
+        if (h.width == AccessWidth::bits8 && h.sign_extend) {
+            a.movsx_byte(h.result, at(layout_.held_value));
+        } else {
+            a.mov(h.result, at(layout_.held_value));
+            if (h.sign_extend && h.width == AccessWidth::bits16) {
+                a.movsx_word(h.result, h.result);
+            } else if (h.sign_extend && h.width == AccessWidth::bits32) {
+                a.movsxd(h.result, h.result);
+            }
+        }
+        a.jmp(h.done);
+    }
+
     // The region starting with `first` in the code region, or null when it does not fit.
     const void* emit_region(const Block& first, BlockSource& more,
                             std::vector<RegionEntry>& entries, std::size_t max_blocks) {
@@ -1663,6 +1752,13 @@ class X86_64NativeCode final : public NativeCode {
             GuestRegisters::State after;
         };
         std::vector<SlowPath> slow_paths;
+        // A load's held-read check, before its slow path.
+        struct HeldPath {
+            EmitBuilder::HeldCheck check;
+            std::size_t index;
+            Boundary boundary;
+        };
+        std::vector<HeldPath> held_paths;
         // A branch-likely that was not taken: the block ends after it, its slot nullified.
         struct Nullified {
             Label label;
@@ -1702,8 +1798,9 @@ class X86_64NativeCode final : public NativeCode {
             if (native(op)) {
                 std::vector<EmitBuilder::SideExit> raises;
                 std::vector<EmitBuilder::SideExit> slow;
+                std::vector<EmitBuilder::HeldCheck> held;
                 registers.begin_operation(i);
-                EmitBuilder b{a, registers, layout_, movbe_, pc, raises, slow};
+                EmitBuilder b{a, registers, layout_, movbe_, pc, raises, slow, held};
                 auto result = operations::translate(b, op.opcode, op.instruction);
                 if (!result && op.opcode == DecodedOpcode::cop1 && cpu_.coprocessor_usable(1)) {
                     result = b.cop1(op.instruction, cpu_.fpu_64bit_registers(),
@@ -1722,6 +1819,9 @@ class X86_64NativeCode final : public NativeCode {
                         a.bind(merge);
                         for (auto& p : slow) {
                             slow_paths.push_back({std::move(p), i, boundary, merge, registers.state()});
+                        }
+                        for (auto& h : held) {
+                            held_paths.push_back({h, i, boundary});
                         }
                         delay_written = delay_written || boundary.delay_slot;
                     }
@@ -1836,6 +1936,9 @@ class X86_64NativeCode final : public NativeCode {
                                 std::uint64_t{r.exit.coprocessor} << 8);
             call_helper(a, helper_raise);
             a.jmp_to(exit(BlockExit::exception));
+        }
+        for (const HeldPath& h : held_paths) {
+            emit_held_check(a, h.check, h.index, h.boundary);
         }
         for (const SlowPath& p : slow_paths) {
             // The whole operation through call_semantics, then the fast path's state again: its
