@@ -266,6 +266,32 @@ native code:
   is pushed, so a run of any length uses one entry frame.
 * **Lifetime is unchanged.** Translation and discard still happen only in the engine, between
   runs, and a discard clears the dispatch table.
+* **Code no ASID selects (2026-11-08).** `boot` statistics: tier 0 still ran 4.2% of
+  operations, and perf put 18% of host time in its loop; 23.4 million of its lookups missed
+  on the tag (17%), barely fewer with a cache 16 times larger, and a threshold of 16 or 32
+  was slower. A throwaway count of those misses: 12.8 million were the same pc in a context
+  that differed only in the ASID, on kernel pages of global TLB entries (IRIX's IP27 kernel
+  text), so every process switch rebuilt the kernel's blocks in tier 0, where each counted
+  to the threshold again, and translated them again for the new ASID. Such code now keeps
+  the context's shared form (IR.adoc "Keeping blocks valid"): tier 0's lookup, the dispatch
+  table, and region joins accept an entry in either form; the generated dispatch compares
+  the shared form only when the context differs, and a region join after a helper compares
+  the form its region was translated in. Tests: `mips.block_cache.code_no_asid_selects`
+  (ASIDs switched under kseg0 and global code build nothing; a mapping for one ASID still
+  replaces the global one), `mips.tier1.code_no_asid_selects.*` (a loop that switches ASIDs
+  with mtc0 translates no more than one that does not; a non-global page under ASIDs 0 and 2
+  runs each ASID's routine), and `mips.block_cache.translation_contexts` now uses ASID 0.
+  Mutation checks (every page shared, global ignored, no marker, a dispatch that accepts any
+  context): each fails a test; a region join comparing the other field only falls back to
+  dispatch. `boot` after: tier 1 runs 98.9% of operations (95.8%), 350,000 blocks translated
+  (750,000) in 1.15 s (2.15), 4 discards (8). PGO, best of 3, against the commit before:
+  `boot` 1.18x (2.42 times real time), `fs` 1.09x, `prom` and `cpu` unchanged; one run of
+  the multi-CPU workloads 1.04-1.23x (`mix2` most); every digest equal, tier 0 and tier 1,
+  one to four CPUs. Left: 6.5 million tag misses (before, 7.5 million were another pc in the
+  entry, 1.9 million user code under a new ASID, 1.2 million other mode bits), and stamp
+  revalidations rose from 0.9 to 16.9 million: a TLB write to an entry that translated code
+  (72,600 in `boot`) advances `code_changes`, and every dispatch entry used after it leaves
+  native code once to revalidate.
 
 == Regions
 

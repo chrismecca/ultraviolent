@@ -385,8 +385,25 @@ class Cpu final : public InterruptSink {
     // context (mode bits and ASID); a generation per TLB entry, advanced when the entry is
     // written or invalidated; and an epoch advanced whenever translation or the bus mappings
     // change in a way the others do not capture (Config, reset, snapshot loads, remapping).
+    // Code that no ASID selects keeps the context's shared form: the mode bits and a marker
+    // no translation context has, the same under every ASID. That is an unmapped segment, or
+    // a page of a global TLB entry, which matches every ASID, and while it is valid no other
+    // entry can match its pages (Tlb::write invalidates conflicting entries). A block matches
+    // the current context in either form.
+    static constexpr std::uint64_t shared_context_marker = std::uint64_t{1} << 63;
     [[nodiscard]] std::uint64_t code_context() const {
         return translation_context();
+    }
+    [[nodiscard]] std::uint64_t shared_code_context() const {
+        return shared_context_;
+    }
+    [[nodiscard]] std::uint64_t code_context(const CodePage& page) const {
+        return page.tlb_index < 0 || tlb_.entry(static_cast<std::size_t>(page.tlb_index)).global
+                   ? shared_context_
+                   : translation_context();
+    }
+    [[nodiscard]] bool code_context_matches(std::uint64_t context) const {
+        return context == translation_context() || context == shared_context_;
     }
     [[nodiscard]] std::uint64_t tlb_generation(std::size_t index) const {
         return tlb_generations_[index];
@@ -551,6 +568,7 @@ class Cpu final : public InterruptSink {
         std::int32_t interrupt_check; // bool
         std::int32_t left_host_path;  // bool
         std::int32_t translation_context;
+        std::int32_t shared_code_context;
         // The translation context's host page tag (bits 11:3; see HostPage).
         std::int32_t context_tag;
         // Status (32 bits), the FPU registers (32 of 64 bits), and FCSR (32 bits).
@@ -684,6 +702,7 @@ class Cpu final : public InterruptSink {
         if (const std::uint64_t context = compute_translation_context(); context != context_)
             [[unlikely]] {
             context_ = context;
+            shared_context_ = shared_context(context);
             context_tag_ = context_tag(context);
         }
     }
@@ -730,6 +749,9 @@ class Cpu final : public InterruptSink {
         constexpr std::uint32_t mode_bits = status::exl | status::erl | status::ksu_mask |
                                             status::ux | status::sx | status::kx | status::re;
         return (cp0_.status & mode_bits) | (cp0_.entry_hi & entry_hi::asid_mask) << 32;
+    }
+    [[nodiscard]] static std::uint64_t shared_context(std::uint64_t context) {
+        return (context & 0xffff'ffff) | shared_context_marker;
     }
     // Drops the host pages if translation or the bus mappings changed since they were filled.
     // The bus changes only between runs or during a bus access, so this runs at the start of
@@ -846,6 +868,7 @@ class Cpu final : public InterruptSink {
     // tests it.
     std::atomic<bool> interrupt_check_{};
     std::uint64_t context_{};
+    std::uint64_t shared_context_{shared_context(0)};
     std::uint64_t context_tag_{};
     // Small numbers for translation contexts (context_tag): an open-addressed table of the
     // contexts given one since the last reset; id 0 is a free slot. When every number is

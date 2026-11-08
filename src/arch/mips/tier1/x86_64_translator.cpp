@@ -1356,9 +1356,15 @@ class X86_64NativeCode final : public NativeCode {
             a.add(Reg::rcx, Mem{Reg::r12, context_dispatch});
             a.cmp(Reg::rax, Mem{Reg::rcx, dispatch_pc});
             a.jcc_to(Cond::ne, miss);
+            // The entry's context in either form (Cpu::code_context_matches).
+            const Label context = a.label();
             a.mov(Reg::rdx, field(layout_.translation_context));
             a.cmp(Reg::rdx, Mem{Reg::rcx, dispatch_context});
+            a.jcc(Cond::e, context);
+            a.mov(Reg::rdx, field(layout_.shared_code_context));
+            a.cmp(Reg::rdx, Mem{Reg::rcx, dispatch_context});
             a.jcc_to(Cond::ne, miss);
+            a.bind(context);
             a.mov(Reg::rdx, field(layout_.code_changes));
             a.cmp(Reg::rdx, Mem{Reg::rcx, dispatch_stamp});
             a.jcc_to(Cond::ne, miss);
@@ -1508,8 +1514,14 @@ class X86_64NativeCode final : public NativeCode {
                 a.cmp(Reg::r15, Mem{Reg::r12, context_deadline});
                 a.jcc(Cond::ae, generic);
                 if (helpers) {
-                    a.mov(Reg::rcx, cpu_.code_context());
-                    a.cmp(Reg::rcx, field(layout_.translation_context));
+                    // A helper may have changed the context; the region's blocks share one
+                    // code page, so one context, in the form Cpu::code_context gave it.
+                    const std::uint64_t context =
+                        cpu_.code_context(region.blocks.front().block->code);
+                    a.mov(Reg::rcx, context);
+                    a.cmp(Reg::rcx, field((context & Cpu::shared_context_marker) != 0
+                                              ? layout_.shared_code_context
+                                              : layout_.translation_context));
                     a.jcc(Cond::ne, generic);
                 }
                 if (final == Final::constant) {

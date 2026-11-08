@@ -58,7 +58,7 @@ BlockInterpreter::NativeRun BlockInterpreter::run_native(const std::uint64_t& li
         return NativeRun::refused;
     }
     DispatchEntry& entry = dispatch_[dispatch_index(s.pc)];
-    if (entry.pc != s.pc || entry.context != cpu_.code_context()) {
+    if (entry.pc != s.pc || !cpu_.code_context_matches(entry.context)) {
         return NativeRun::absent;
     }
     cpu_.synchronize_code();
@@ -146,7 +146,7 @@ const Block* BlockInterpreter::RegionBlocks::block_at(std::uint64_t pc) {
     // against 49 MB, `boot` 790 against 479 MB) for nothing that ran.
     const Entry& cached = engine_.cache_[(pc >> 2) & engine_.mask_];
     if (engine_.region_joins_ == RegionJoins::ran &&
-        (cached.pc != pc || cached.context != cpu_.code_context() || cached.uses < 1)) {
+        (cached.pc != pc || !cpu_.code_context_matches(cached.context) || cached.uses < 1)) {
         return nullptr;
     }
     if (used_ == storage_.size()) {
@@ -195,9 +195,8 @@ void BlockInterpreter::count_exit(BlockExit exit, std::size_t operations, bool c
 BlockInterpreter::Entry* BlockInterpreter::lookup(std::uint64_t pc) {
     ++statistics_.lookups;
     Entry& entry = cache_[(pc >> 2) & mask_];
-    const std::uint64_t context = cpu_.code_context();
     CacheMiss miss{};
-    if (entry.pc != pc || entry.context != context) {
+    if (entry.pc != pc || !cpu_.code_context_matches(entry.context)) {
         miss = entry.pc == empty_pc ? CacheMiss::cold : CacheMiss::tag;
     } else if (entry.epoch != cpu_.code_epoch()) {
         miss = CacheMiss::epoch;
@@ -226,7 +225,7 @@ BlockInterpreter::Entry* BlockInterpreter::lookup(std::uint64_t pc) {
     const Cpu::CodePage& code = entry.block.code;
     cpu_.claim_code_frame(code);
     entry.pc = pc;
-    entry.context = context;
+    entry.context = cpu_.code_context(code);
     entry.epoch = cpu_.code_epoch();
     entry.frame_generation = code.block->code_generation(code.frame);
     entry.frame_generation_value = entry.frame_generation->load(std::memory_order_relaxed);

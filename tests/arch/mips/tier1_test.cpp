@@ -540,6 +540,63 @@ template <class Engine> void data_pages_by_context(test::Context& t) {
     t.check(d.engine.statistics().operations > 0, "blocks ran");
 }
 
+// Code under ASIDs `first` and `second`: a loop in kseg0 calls a routine at one virtual page
+// and switches between the ASIDs with mtc0 (a helper inside native code, then dispatch and
+// region joins). With `global`, one global TLB entry maps the page under both; otherwise
+// each ASID's own entry maps a routine of its own, which must be the one that runs. Returns
+// the blocks translated.
+template <class Engine>
+std::uint64_t code_under_asids(test::Context& t, bool global, std::uint64_t first,
+                               std::uint64_t second) {
+    DifferentialWith<Engine> d;
+    d.max_chunk = 2000;
+    constexpr std::uint64_t page = 0x0002'0000;
+    constexpr std::uint64_t frame = System::data + 0x4000;
+    d.load(frame, kseg0(frame), {addiu(v0, v0, 1), jr(ra), nop()});
+    d.load(frame + 0x1000, kseg0(frame + 0x1000), {addiu(v1, v1, 1), jr(ra), nop()});
+    d.load(System::code, kseg0(System::code),
+           {jalr(ra, s1), nop(), mtc0(t1, cp0::entry_hi), nop(), jalr(ra, s1), nop(),
+            mtc0(t0, cp0::entry_hi), nop(), beq(zero, zero, -4 * 9), nop()});
+    const auto map = [&](System& s, std::uint32_t index, std::uint64_t asid, std::uint64_t pa) {
+        const std::uint64_t g = global ? entry_lo::g : 0;
+        const std::uint64_t flags = (3u << entry_lo::c_shift) | entry_lo::d | entry_lo::v | g;
+        s.cpu.dmtc0(cp0::entry_hi, page | asid);
+        s.cpu.dmtc0(cp0::entry_lo0, (pa >> 12) << entry_lo::pfn_shift | flags);
+        s.cpu.dmtc0(cp0::entry_lo1, g);
+        s.cpu.mtc0(cp0::page_mask, 0);
+        s.cpu.mtc0(cp0::index, index);
+        s.cpu.tlb_write_indexed();
+    };
+    d.both([&](System& s) {
+        map(s, 3, first, frame);
+        if (!global) {
+            map(s, 4, second, frame + 0x1000);
+        }
+        s.start_kernel();
+        s.cpu.dmtc0(cp0::entry_hi, first);
+        s.set(s1, page);
+        s.set(t0, first);
+        s.set(t1, second);
+    });
+    t.check(d.run(t, 4000), "matches the reference");
+    t.check(d.candidate.gpr(v0) > 100, "the first ASID's routine ran");
+    t.check(global == (d.candidate.gpr(v1) == 0), "the second ASID's own routine ran");
+#ifdef ULTRAVIOLENT_TIER1
+    return d.engine.native()->statistics().blocks_translated;
+#else
+    return 0;
+#endif
+}
+
+// Code that no ASID selects (kseg0, a global TLB entry) has one translation for every ASID
+// (Cpu::code_context). ASID 0's context has the bits of that shared form but its marker.
+template <class Engine> void code_no_asid_selects(test::Context& t) {
+    const std::uint64_t one = code_under_asids<Engine>(t, true, 1, 1);
+    const std::uint64_t two = code_under_asids<Engine>(t, true, 1, 2);
+    t.check_equal(two, one);
+    code_under_asids<Engine>(t, false, 0, 2);
+}
+
 // The FPU's moves, loads, and stores, which tier 1 emits with a guard on Status (CU1, FR) and
 // the memory fast path: random registers (odd and even, which differ with FR=0), bases and
 // offsets as above (misaligned ones raise address errors), interleaved with integer memory
@@ -743,6 +800,10 @@ const test::Registration data_pages_tier0{"mips.tier1.data_pages_by_context.tier
                                           data_pages_by_context<Tier0Engine>};
 const test::Registration data_pages_tier1{"mips.tier1.data_pages_by_context.tier1",
                                           data_pages_by_context<Tier1Engine>};
+const test::Registration code_no_asid_tier1{"mips.tier1.code_no_asid_selects.tier1",
+                                            code_no_asid_selects<Tier1Engine>};
+const test::Registration code_no_asid_regions{"mips.tier1.code_no_asid_selects.regions",
+                                              code_no_asid_selects<Tier1RegionEngine>};
 
 const test::Registration device_loads_tier0{"mips.tier1.device_loads.tier0",
                                             device_loads<Tier0Engine>};

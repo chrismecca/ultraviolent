@@ -568,7 +568,9 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
     Its clock was then a steady 23 s behind: 19 s lost in the 33 hours since it was set
     (about 160 ppm), unexplained: IRIX's clock drifting from virtual time while it runs
     (IRIX writes its clock to the chip at shutdown), or lag at the moment of the shutdown.
-    Measuring the offset over hours of running tells them apart.
+    Measuring the offset over hours of running tells them apart: 19 hours later it was
+    still 23 s behind, so the clock holds while the machine runs, and the 19 s went across
+    the stop and start (the keyswitch shutdown, the time off, and the boot).
 ... Digests (`local/bench/r3600/y-tier1.json`, `y-tier1-multi.json`, one run each): the
     power-on workloads change (the PROM's controller commands now take their bytes before
     the NAK), equal on tier 1, tier 0, and the reference (prom, boot); the snapshot workloads
@@ -627,9 +629,14 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   itself (one CPU, PI_RT_COUNT): `prom` 1.04x, `boot` 1.06x, every digest equal. What remains
   of such a read was tier 1's way out to the helper; tier 1 now checks the held read in
   generated code: `prom` 1.16x and `boot` 1.15x more (2.05 times real time).
-  Next, by measured share: tier 0's share of `fs` and `boot` (about a tenth: code that runs fewer than 64
-  times, and translation); the FPU operations still in helpers (other conversions, SQRT,
-  ABS, NEG, conditional moves, COP1X, conditions other than 0).
+  Tier 0's share (2026-11-08, JIT.adoc "Dispatch"): most of it was IRIX's kernel, on pages
+  of global TLB entries, rebuilt and translated again under every new ASID; code no ASID
+  selects now matches under all: `boot` 1.18x (2.42 times real time), `fs` 1.09x, every
+  digest equal.
+  Next, by measured share: the dispatch revalidations a TLB write causes (16.9 million in
+  `boot`: a stamp per TLB entry instead of the CPU-wide one); the tag misses left (6.5
+  million: other pcs in the entry, user code under new ASIDs, mode changes); the FPU operations still in helpers
+  (other conversions, SQRT, ABS, NEG, conditional moves, COP1X, conditions other than 0).
 
 . **Blocked on evidence: "Error in ust_change: Addressed slave not responding"** (twice,
   two-node boots only; never on slate, OBS-SLATE-0003). Already observed (IP27.adoc "System
@@ -2183,4 +2190,28 @@ Disproven: none.
 Unknowns: none new.
 Best checkpoint: unchanged (local/release-check-011c).
 Next step: perf of `boot` and `fs` again for what leads now; the FPU's helpers for `cpu`.
+----
+
+----
+Date: 2026-11-08
+Milestone: Usable VM: tier-1 speed, tier 0's share
+Hypothesis: tier 0's share of `boot` (perf: 18% of host time for 4.2% of operations) is code
+  that keeps missing tier 0's cache before it reaches the translation threshold.
+Evidence: `boot` statistics: 23.4 million tag misses (17% of lookups); with a cache of
+  131,072 or 524,288 entries still 21 million, and a threshold of 16 or 32 slower (0.90x,
+  0.96x), so not capacity. A throwaway count: 12.8 million were the same pc under another
+  ASID on kernel pages of global TLB entries, 1.9 million user code on non-global pages,
+  1.2 million kernel code under other mode bits, 7.5 million another pc in the entry.
+Changed: Cpu::code_context(page) and the shared form (shared_code_context, a marker in bit
+  63); tier 0's lookup and the dispatch table match either form; the generated dispatch and
+  region joins too.
+Tests: mips.block_cache.code_no_asid_selects, mips.tier1.code_no_asid_selects.*,
+  mips.block_cache.translation_contexts on ASIDs 0 and 2; mutation checks as JIT.adoc says;
+  dev and asan green.
+Newly proven: every digest equal on tier 1 and tier 0 and for boot2 to reboot4; `boot`
+  1.18x, `fs` 1.09x. The second host's clock: still 23 s behind after 19 more hours.
+Disproven: that tier 0's misses were capacity, or lukewarm code below the threshold.
+Unknowns: where the second host's 19 s went across its restart.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: per-entry TLB stamps for dispatch (JIT.adoc "Dispatch", the last bullet).
 ----

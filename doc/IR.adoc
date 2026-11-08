@@ -239,7 +239,13 @@ A block depends on the translation that found its bytes and on the bytes.
   records the TLB entry that mapped its page (none for unmapped segments) and its
   translation context (mode bits and ASID). A TLB write stales exactly the blocks derived
   from the entry written and from entries the write invalidated (`Cpu::forget_tlb_pages`'s
-  mask). ASID and mode changes are part of the lookup key and stale nothing.
+  mask). ASID and mode changes are part of the lookup key and stale nothing. Code that no
+  ASID selects, an unmapped segment or a page of a global TLB entry, records the context's
+  shared form instead (`Cpu::code_context`: the mode bits and a marker, no ASID), which
+  matches under every ASID: a global entry matches every ASID, and while it is valid no other
+  entry can match its pages (a write that would conflicts invalidates it, UM 14.10), so the
+  page has the same frame under every ASID. IRIX's IP27 kernel runs from such pages, and
+  without this every process switch rebuilt its blocks (JIT.adoc "Dispatch").
 * **Global translation epoch** only for what selective tracking cannot represent: Config
   writes, reset, snapshot loads, and bus mapping changes (the existing
   `translation_generation_` and bus generation).
@@ -260,7 +266,7 @@ A block depends on the translation that found its bytes and on the bytes.
 * `BlockInterpreter` keeps a direct-mapped table of blocks, a power of two in size (4096
   entries in stage F; 32768 since tier 1, which leaves tier 0 the blocks not yet translated:
   JIT.adoc "Progress"; `--tier0-cache-entries`), indexed by `(pc >> 2) & (entries - 1)` and tagged by
-  pc and translation context. An entry owns its block's operations; replacing it reuses
+  pc and translation context (in either form, above). An entry owns its block's operations; replacing it reuses
   their storage.
 * An entry records its dependencies when built: the code epoch (`Cpu::code_epoch`, advanced
   whenever the host page caches are flushed: Config, reset, snapshot loads, bus remapping),

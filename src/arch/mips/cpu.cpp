@@ -105,6 +105,7 @@ Cpu::NativeLayout Cpu::native_layout() const {
             .interrupt_check = at(&interrupt_check_),
             .left_host_path = at(&left_host_path_),
             .translation_context = at(&context_),
+            .shared_code_context = at(&shared_context_),
             .context_tag = at(&context_tag_),
             .status = at(&cp0_.status),
             .fpr = at(fpu_.fpr.data()),

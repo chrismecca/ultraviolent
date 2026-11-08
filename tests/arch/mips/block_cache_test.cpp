@@ -168,27 +168,61 @@ const test::Registration remap{
 const test::Registration asids{"mips.block_cache.translation_contexts", [](test::Context& t) {
                                    // The same virtual page under two ASIDs maps different code;
                                    // switching the ASID selects the other block (the context is
-                                   // part of the key).
+                                   // part of the key). ASID 0's context has the bits of
+                                   // the shared form (Cpu::code_context) but its marker.
                                    Pair<4096> d;
                                    load_routine(d, frame_a, 1);
                                    load_routine(d, frame_b, 0x10);
                                    load_caller(d);
                                    start(d, mapped);
                                    d.both([](System& s) {
-                                       map(s, 1, mapped, frame_a, 1, false, 1);
-                                       map(s, 2, mapped, frame_b, 2, false, 1);
+                                       map(s, 1, mapped, frame_a, 0, false, 0);
+                                       map(s, 2, mapped, frame_b, 2, false, 0);
                                    });
                                    for (unsigned round = 0; round < 6; ++round) {
-                                       const unsigned asid = 1 + round % 2;
+                                       const unsigned asid = round % 2 * 2;
                                        d.both([&](System& s) { s.cpu.dmtc0(cp0::entry_hi, asid); });
                                        const std::uint64_t before = d.candidate.gpr(v0);
                                        d.run(t, 60);
                                        const std::uint64_t added = d.candidate.gpr(v0) - before;
-                                       t.check(asid == 1 ? added % 0x10 != 0 || added == 0
+                                       t.check(asid == 0 ? added % 0x10 != 0 || added == 0
                                                          : added % 0x10 == 0,
                                                "the routine of the current ASID ran");
                                    }
                                }};
+
+const test::Registration shared_contexts{
+    "mips.block_cache.code_no_asid_selects", [](test::Context& t) {
+        // Code that no ASID selects (the caller in kseg0, the routine through a global TLB
+        // entry) is the same block under every ASID: switching ASIDs builds nothing. A mapping
+        // of the page for one ASID still replaces it (the conflict invalidates the global
+        // entry).
+        Pair<4096> d;
+        load_routine(d, frame_a, 1);
+        load_routine(d, frame_b, 0x10);
+        load_caller(d);
+        start(d, mapped);
+        d.both([](System& s) { map(s, 1, mapped, frame_a, 0, true, 1); });
+        d.run(t, 100);
+        // The runs end mid-block, and resuming there builds a block from that pc (cold): two
+        // such pcs, seen by the end of the second run.
+        std::uint64_t built = 0;
+        for (unsigned asid = 2; asid < 8; ++asid) {
+            d.both([&](System& s) { s.cpu.dmtc0(cp0::entry_hi, asid); });
+            d.run(t, 60);
+            if (asid == 2) {
+                built = d.engine.statistics().blocks_built;
+            }
+        }
+        const BlockStatistics& s = d.engine.statistics();
+        t.check(s.blocks_built == built, "nothing built under other ASIDs: " + describe(s));
+        t.check_equal(s.misses[index(CacheMiss::tag)], std::uint64_t{0});
+        d.both([](System& s) { map(s, 2, mapped, frame_b, 9, false, 9); });
+        const std::uint64_t before = d.candidate.gpr(v0);
+        d.run(t, 100);
+        const std::uint64_t added = d.candidate.gpr(v0) - before;
+        t.check(added != 0 && added % 0x10 == 0, "ASID 9's routine ran");
+    }};
 
 const test::Registration self_modifying{
     "mips.block_cache.self_modifying_block", [](test::Context& t) {
