@@ -563,7 +563,12 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
     `--realtime-catch-up 3600`; IRIX's clock was set with `date -u`. A restart then reached
     `login:` in 159 s (165 s before) with the clock 73 s behind (the boot's slow stretch),
     caught up within five minutes, and stayed 4 s behind (the setting's typing delay) for
-    the next 12 minutes.
+    the next 12 minutes. On 2026-11-08 it moved to `af93cf0` (PGO trained on its disk
+    copy): `login:` in 164 s (held reads apply to one CPU, and it runs two), the stop 59 s.
+    Its clock was then a steady 23 s behind: 19 s lost in the 33 hours since it was set
+    (about 160 ppm), unexplained: IRIX's clock drifting from virtual time while it runs
+    (IRIX writes its clock to the chip at shutdown), or lag at the moment of the shutdown.
+    Measuring the offset over hours of running tells them apart.
 ... Digests (`local/bench/r3600/y-tier1.json`, `y-tier1-multi.json`, one run each): the
     power-on workloads change (the PROM's controller commands now take their bytes before
     the NAK), equal on tier 1, tier 0, and the reference (prom, boot); the snapshot workloads
