@@ -54,6 +54,27 @@ class MmioTarget {
   public:
     virtual std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
                                                                 AccessWidth width) = 0;
+
+    // A read, and how long its value holds: within the reading CPU's current run, until its
+    // cycle count reaches `until`, and while `*stamp` still equals `stamp_value`, another read
+    // of the same offset and width would return the same value and have no effect. A CPU may
+    // then answer such reads itself (JIT.adoc "Device time"). `until` 0 promises nothing,
+    // which is what a target that does not override this says; otherwise `stamp` is set and
+    // lives as long as the target.
+    struct HeldRead {
+        std::uint64_t value{};
+        std::uint64_t until{};
+        const std::atomic<std::uint64_t>* stamp{};
+        std::uint64_t stamp_value{};
+    };
+    virtual std::expected<HeldRead, AccessFault> mmio_read_held(std::uint64_t offset,
+                                                                AccessWidth width) {
+        auto value = mmio_read(offset, width);
+        if (!value) {
+            return std::unexpected(value.error());
+        }
+        return HeldRead{.value = *value};
+    }
     virtual std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth width,
                                                         std::uint64_t value) = 0;
 

@@ -96,6 +96,14 @@ struct System {
         interpreter.run(words.size());
     }
 
+    // The same as one run (Interpreter::run_until): state an engine keeps for the length of a
+    // run, such as held device reads, lasts through the program.
+    void run_program_in_one_run(std::initializer_list<std::uint32_t> words) {
+        load(code, words);
+        start_kernel(kseg0(code), status::kx);
+        interpreter.run_until(cpu.cycles() + words.size());
+    }
+
     // Maps user virtual 0x0-0x1ffff to physical 0x0-0x1ffff with one global TLB entry of
     // 64 KiB pages, so tests can run code and touch data in User mode.
     void map_user_low() {

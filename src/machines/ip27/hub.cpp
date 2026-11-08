@@ -872,6 +872,7 @@ void Hub::load_state(const StateImage& image) {
     image.get("hub.rt_epoch_ticks", rt_epoch_ticks);
     rt_base_.store(rt_base, std::memory_order_relaxed);
     rt_epoch_ticks_.store(rt_epoch_ticks, std::memory_order_relaxed);
+    rt_sequence_.fetch_add(2, std::memory_order_relaxed);
     std::uint8_t comparators[8]{};
     if (image.get("hub.comparators", comparators)) {
         rt_pending_ = {comparators[0] != 0, comparators[1] != 0};

@@ -92,6 +92,10 @@ class Hub final {
         VirtualTime until;
     };
     [[nodiscard]] RtWindow rt_window(VirtualTime time) const;
+    // Advances at every change of the origin (a write of PI_RT_COUNT, a snapshot load).
+    [[nodiscard]] const std::atomic<std::uint64_t>& rt_sequence() const {
+        return rt_sequence_;
+    }
     [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> rt_origin() const {
         return {rt_base_.load(std::memory_order_relaxed),
                 rt_epoch_ticks_.load(std::memory_order_relaxed)};

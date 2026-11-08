@@ -1,6 +1,7 @@
 #include "arch/mips/system.hpp"
 #include "support/test.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <expected>
 #include <vector>
@@ -257,6 +258,105 @@ const test::Registration device_neighbors{
         t.check_equal(s.gpr(t1), std::uint64_t{0x1006'0008});
         t.check_equal(s.gpr(t2), std::uint64_t{0x100a'2010});
         t.check_equal(a.reads, std::uint64_t{9});
+    }};
+
+// A device that promises its reads hold for `hold` cycles until it is written (its stamp;
+// MmioTarget::mmio_read_held), but returns a new value on every read that reaches it, so
+// that a held read is visible.
+class Ticker final : public MmioTarget {
+  public:
+    Ticker(const Cpu& cpu, std::uint64_t hold) : cpu_{cpu}, hold_{hold} {}
+    std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t /*offset*/,
+                                                        AccessWidth width) override {
+        ++reads;
+        const std::uint64_t value = 0x7000 + reads;
+        return width == AccessWidth::bits64 ? value : value & 0xff;
+    }
+    std::expected<HeldRead, AccessFault> mmio_read_held(std::uint64_t offset,
+                                                        AccessWidth width) override {
+        const auto value = mmio_read(offset, width);
+        if (hold_ == 0) {
+            return HeldRead{.value = *value};
+        }
+        return HeldRead{.value = *value,
+                        .until = cpu_.cycles() + hold_,
+                        .stamp = &stamp_,
+                        .stamp_value = stamp_.load()};
+    }
+    std::expected<void, AccessFault> mmio_write(std::uint64_t /*offset*/, AccessWidth /*width*/,
+                                                std::uint64_t /*value*/) override {
+        ++writes;
+        ++stamp_;
+        return {};
+    }
+    std::uint64_t reads{};
+    std::uint64_t writes{};
+
+  private:
+    const Cpu& cpu_;
+    std::uint64_t hold_;
+    std::atomic<std::uint64_t> stamp_{};
+};
+
+const test::Registration device_held_reads{
+    "mips.device_reads_held", [](test::Context& t) {
+        // A held read is answered by the CPU for the same offset and width until the device's
+        // stamp changes or a new run starts (JIT.adoc "Device time"); other bus accesses do
+        // not end it.
+        System s;
+        Ticker ticker{s.cpu, 100};
+        Echo other{0x1000'0000};
+        t.check(s.bus.map_mmio({PhysicalAddress{device_a}, 0x1000}, ticker).has_value());
+        t.check(s.bus.map_mmio({PhysicalAddress{device_b}, 0x1000}, other).has_value());
+        s.set(a0, kseg0(device_a));
+        s.set(a1, kseg0(device_b));
+        // Read 1 takes the full path and fills the device page, and the first store makes it
+        // a page for stores too (a store that fills a page drops what it held); reads through
+        // the page can be held.
+        s.run_program_in_one_run({
+            ld(t7, 32, a0),               // read 1
+            sd(zero, 24, a0),             // write 1
+            ld(t0, 0, a0),                // read 2
+            lw(t8, 0, a1),                // another device
+            ld(t1, 0, a0),                // held
+            lb(t2, 0, a0),                // another width: read 3
+            ld(t3, 0, a0),                // the page holds only the last: read 4
+            ld(t4, 8, a0),                // another offset: read 5
+            sd(zero, 16, a0),             // write 2: the stamp changes
+            ld(t5, 8, a0), ld(t6, 8, a0), // read 6, then held
+        });
+        t.check_equal(s.gpr(t0), std::uint64_t{0x7002});
+        t.check_equal(s.gpr(t1), std::uint64_t{0x7002});
+        t.check_equal(s.gpr(t2), std::uint64_t{0x03});
+        t.check_equal(s.gpr(t3), std::uint64_t{0x7004});
+        t.check_equal(s.gpr(t4), std::uint64_t{0x7005});
+        t.check_equal(s.gpr(t5), std::uint64_t{0x7006});
+        t.check_equal(s.gpr(t6), std::uint64_t{0x7006});
+        t.check_equal(ticker.reads, std::uint64_t{6});
+        t.check_equal(ticker.writes, std::uint64_t{2});
+        s.run_program_in_one_run({ld(t0, 8, a0)}); // a new run: events may have run
+        t.check_equal(s.gpr(t0), std::uint64_t{0x7007});
+    }};
+
+const test::Registration device_held_until{
+    "mips.device_reads_held_until", [](test::Context& t) {
+        // Held for two cycles: the load one cycle later is answered, the one two cycles later
+        // reaches the device. A device that promises nothing is read every time.
+        System s;
+        Ticker held{s.cpu, 2};
+        Ticker plain{s.cpu, 0};
+        t.check(s.bus.map_mmio({PhysicalAddress{device_a}, 0x1000}, held).has_value());
+        t.check(s.bus.map_mmio({PhysicalAddress{device_b}, 0x1000}, plain).has_value());
+        s.set(a0, kseg0(device_a));
+        s.set(a1, kseg0(device_b));
+        s.run_program_in_one_run({ld(t7, 32, a0), ld(t7, 32, a1), // fill both device pages
+                                  ld(t0, 0, a0), ld(t1, 0, a0), ld(t2, 0, a0), ld(t3, 0, a1),
+                                  ld(t3, 0, a1)});
+        t.check_equal(s.gpr(t0), std::uint64_t{0x7002});
+        t.check_equal(s.gpr(t1), std::uint64_t{0x7002});
+        t.check_equal(s.gpr(t2), std::uint64_t{0x7003});
+        t.check_equal(held.reads, std::uint64_t{3});
+        t.check_equal(plain.reads, std::uint64_t{3});
     }};
 
 const test::Registration device_tlb{

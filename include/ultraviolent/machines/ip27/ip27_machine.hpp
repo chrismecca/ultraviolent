@@ -367,6 +367,9 @@ class Ip27Machine {
                                                             AccessWidth width) override;
         std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth width,
                                                     std::uint64_t value) override;
+        // With one CPU, a PI_RT_COUNT read holds for the cycles before the count changes.
+        std::expected<HeldRead, AccessFault> mmio_read_held(std::uint64_t offset,
+                                                            AccessWidth width) override;
 
       private:
         Ip27Machine& machine_;

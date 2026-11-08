@@ -617,6 +617,11 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   benchmark's 562 MB snapshot loads in 0.46 s (0.91), any process starts in 0.03 s (0.18)
   with 4 K page faults instead of 91 K. Against the build before: `cpu` 1.12x, `fs` 1.10x,
   `prom` 1.02x, `boot` 1.01x, every digest equal (best of 3).
+  Held device reads (2026-11-08, JIT.adoc "Device time"): `boot` reads PI_RT_COUNT 579
+  million times; a device may now say how long a read holds and the CPU answers repeats
+  itself (one CPU, PI_RT_COUNT): `prom` 1.04x, `boot` 1.06x, every digest equal. What remains
+  of such a read is tier 1's way out to the helper (about a quarter of `boot`); next, the held
+  read checked in generated code.
   Next, by measured share: tier 0's share of `fs` and `boot` (about a tenth: code that runs fewer than 64
   times, and translation); the FPU operations still in helpers (other conversions, SQRT,
   ABS, NEG, conditional moves, COP1X, conditions other than 0).
@@ -2126,4 +2131,29 @@ Disproven: none.
 Unknowns: none new.
 Best checkpoint: unchanged (local/release-check-011c).
 Next step: Next task's tier-1 list (tier 0's share, the FPU's helpers).
+----
+
+----
+Date: 2026-11-08
+Milestone: Usable VM: tier-1 speed, device reads
+Hypothesis: `boot`'s remaining device time is one register polled by delay loops, and a read
+  whose value the device says holds can be answered by the CPU.
+Evidence: perf of `boot` (PGO): `load_slow` 16%, `operation_helper` 11%, the synchronized
+  target 10%; a throwaway count by register: PI_RT_COUNT 579 million of the device reads,
+  the next 13 million. The alignment check's 64-bit division in `load_slow`, replaced by a
+  mask: `prom` 0.97x, `boot` 0.99x (noise; not kept).
+Changed: MmioTarget::mmio_read_held (value, cycle bound, stamp); Cpu::DevicePage keeps the
+  last held read, answered without the bus or a barrier, within one run
+  (synchronize_host_pages); Ip27Machine::SynchronizedTarget holds PI_RT_COUNT with one CPU,
+  stamped with Hub::rt_sequence (which a snapshot load now also advances).
+Tests: mips.device_reads_held, mips.device_reads_held_until, ip27.rt_count_back_to_back
+  (the count written once first, so the loop's write goes through the device page);
+  mutation checks as JIT.adoc says; dev and asan green.
+Newly proven: digests equal on tier 1, tier 0, and the reference (`prom`; tier 0 `boot`),
+  and for boot2 to reboot4 (z-tier1-multi.json); `prom` 1.04x, `boot` 1.06x.
+Disproven: that the device read itself was most of a delay-loop read's cost: with it held,
+  the helper path out of generated code remains (about a quarter of `boot`).
+Unknowns: none new.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: check a held read in tier 1's generated code, before the helper.
 ----

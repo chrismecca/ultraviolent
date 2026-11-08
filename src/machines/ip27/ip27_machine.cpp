@@ -1049,6 +1049,31 @@ Ip27Machine::SynchronizedTarget::mmio_read(std::uint64_t offset, AccessWidth wid
     return result;
 }
 
+// The count for the cycles in [from, until) (rt_reads_), while the counter's origin is
+// unchanged (Hub::rt_sequence). The count is rt_window at the later of the CPU's time and
+// device time; with one CPU device time is never ahead of the CPU (it is brought up to the
+// CPU's time at a synchronized access, and events run only up to the CPU's run limit), so
+// in those cycles it is the count whatever else reaches the bus. With several CPUs nothing is
+// held: device time is the lowest CPU's and may be ahead of this one's.
+std::expected<MmioTarget::HeldRead, AccessFault>
+Ip27Machine::SynchronizedTarget::mmio_read_held(std::uint64_t offset, AccessWidth width) {
+    auto value = mmio_read(offset, width);
+    if (!value) {
+        return std::unexpected(value.error());
+    }
+    const bool held = hub_ != nullptr && offset == Hub::rt_count_offset &&
+                      width == AccessWidth::bits64 && machine_.cpu_count() == 1 &&
+                      !machine_.parallel_running_;
+    if (!held) {
+        return HeldRead{.value = *value};
+    }
+    const std::atomic<std::uint64_t>& sequence = hub_->rt_sequence();
+    return HeldRead{.value = *value,
+                    .until = rt_reads_.until,
+                    .stamp = &sequence,
+                    .stamp_value = sequence.load(std::memory_order_relaxed)};
+}
+
 std::expected<void, AccessFault> Ip27Machine::SynchronizedTarget::mmio_write(std::uint64_t offset,
                                                                              AccessWidth width,
                                                                              std::uint64_t value) {

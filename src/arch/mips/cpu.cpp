@@ -514,7 +514,7 @@ std::expected<std::uint64_t, Exception> Cpu::load_slow(std::uint64_t address, Ac
         return std::unexpected(
             Exception{.code = ExceptionCode::address_error_load, .bad_address = address});
     }
-    if (const DevicePage* page = device_page(address, false)) {
+    if (DevicePage* page = device_page(address, false)) {
         return device_read(*page, address, width);
     }
     auto translation = translate(address, AccessKind::load);
@@ -533,22 +533,33 @@ std::expected<std::uint64_t, Exception> Cpu::load_slow(std::uint64_t address, Ac
 
 // read() for an address in a device page: the same device access, without translation and bus
 // decode (their results are the page's).
-std::expected<std::uint64_t, Exception> Cpu::device_read(const DevicePage& page,
-                                                         std::uint64_t address,
+std::expected<std::uint64_t, Exception> Cpu::device_read(DevicePage& page, std::uint64_t address,
                                                          AccessWidth width) {
+    const std::uint64_t offset = address & page_offset_mask;
+    const std::uint64_t key = offset << 4 | byte_count(width);
+    if (page.held_key == key && page.held_run == run_epoch_ && cycles() < page.held_until &&
+        page.held_stamp->load(std::memory_order_relaxed) == page.held_stamp_value) {
+        return page.held_value;
+    }
     left_host_path_ = true;
     last_bus_access_ = BusAccess::device;
-    const std::uint64_t offset = address & page_offset_mask;
-    auto value = page.target->mmio_read(page.offset + offset, width);
-    invariant(!value || width == AccessWidth::bits64 || *value >> (8 * byte_count(width)) == 0,
+    auto read = page.target->mmio_read_held(page.offset + offset, width);
+    invariant(!read || width == AccessWidth::bits64 || read->value >> (8 * byte_count(width)) == 0,
               "MMIO read value wider than the access");
     check_host_pages();
-    if (!value) {
+    if (!read) {
         tracer_.log(TraceCategory::memory, "read fault {:#x} width {} fault {}",
-                    page.physical + offset, byte_count(width), std::to_underlying(value.error()));
+                    page.physical + offset, byte_count(width), std::to_underlying(read.error()));
         return std::unexpected(Exception{.code = ExceptionCode::bus_error_data});
     }
-    return *value;
+    // check_host_pages may have dropped the page; then `page` is empty and never matches.
+    page.held_key = read->until > cycles() && read->stamp != nullptr ? key : 0;
+    page.held_value = read->value;
+    page.held_until = read->until;
+    page.held_stamp = read->stamp;
+    page.held_stamp_value = read->stamp_value;
+    page.held_run = run_epoch_;
+    return read->value;
 }
 
 // write() for an address in a device page, likewise.
@@ -606,7 +617,7 @@ std::expected<void, Exception> Cpu::store_slow(std::uint64_t address, AccessWidt
         return std::unexpected(
             Exception{.code = ExceptionCode::address_error_store, .bad_address = address});
     }
-    if (const DevicePage* page = device_page(address, true)) {
+    if (DevicePage* page = device_page(address, true)) {
         device_write(*page, address, width, value);
         return {};
     }

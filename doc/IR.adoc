@@ -70,6 +70,9 @@ wrong, however fast. Stage A's tests pin the reference behavior they name.
   rechecks the run limit and pending exceptions before continuing. Such an access may have
   synchronized devices, run events, changed interrupt lines, changed bus mappings, or
   written code. Removing this barrier is a later optimization that needs its own proof.
+  One such proof so far: a held device read (`MmioTarget::mmio_read_held`, JIT.adoc "Device
+  time") is answered by the CPU without reaching the bus, by the device's own statement that
+  it has no effect, and is not a barrier.
 . **Memory is the bus's.** Loads, stores, and fetches have the interpreter's translation,
   exceptions, byte order, uncached attribute, and device effects. Host-memory fast paths are
   allowed only where transparent, as the host page caches are today.

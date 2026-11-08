@@ -711,14 +711,16 @@ const test::Registration rt_count_back_to_back{
         std::vector<std::uint32_t> words(48, nop());
         const std::initializer_list<std::uint32_t> code = {
             // t2 = the Hub's registers + 0x30000; t5 = physical 0x1000 (uncached); t7 = 400.
-            lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2),
-            lui(t2, 3), daddu(t2, t0, t2), lui(t5, 0xa800), dsll32(t5, t5, 0),
-            ori(t5, t5, 0x1000), addiu(t7, zero, 400), addiu(t6, zero, 5000),
-            // Loop (index 11): read, store, step; at 200 left, write the count.
+            lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2), lui(t2, 3),
+            daddu(t2, t0, t2), lui(t5, 0xa800), dsll32(t5, t5, 0), ori(t5, t5, 0x1000),
+            addiu(t7, zero, 400), addiu(t6, zero, 5000),
+            // Write the count once first, so that the write in the loop goes through the CPU's
+            // device page and only the count's stamp ends a held read (Hub::rt_sequence).
+            sd(zero, 0x100, t2),
+            // Loop (index 12): read, store, step; at 200 left, write the count.
             ld(t1, 0x100, t2), sd(t1, 0, t5), daddiu(t5, t5, 8), addiu(t7, t7, -1),
-            addiu(t3, t7, -200), bne(t3, zero, 8), nop(), sd(t6, 0x100, t2),
-            bne(t7, zero, -36), nop(),
-            beq(zero, zero, -4), nop()};
+            addiu(t3, t7, -200), bne(t3, zero, 8), nop(), sd(t6, 0x100, t2), bne(t7, zero, -36),
+            nop(), beq(zero, zero, -4), nop()};
         std::ranges::copy(code, words.begin());
         std::vector<std::byte> prom(words.size() * 4);
         for (std::size_t w = 0; w < words.size(); ++w) {

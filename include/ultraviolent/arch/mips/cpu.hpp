@@ -452,7 +452,9 @@ class Cpu final : public InterruptSink {
 
     // Called by execution engines before running instructions: the machine may have changed
     // the bus mappings since the last run.
+    // Held device reads end here too (MmioTarget::mmio_read_held: within one run).
     void synchronize_host_pages() {
+        ++run_epoch_;
         check_host_pages();
     }
 
@@ -903,6 +905,16 @@ class Cpu final : public InterruptSink {
         std::uint64_t physical{};
         std::int8_t tlb_index{-1};
         bool stores{};
+        // The last read the device said holds (MmioTarget::mmio_read_held): its offset in the
+        // page and width (`offset << 4 | bytes`, 0 for none), value, the cycle count it holds
+        // until, its stamp, and the run it was made in. A read that matches is answered here,
+        // without reaching the bus, and so is not a barrier: the device said it has no effect.
+        std::uint64_t held_key{};
+        std::uint64_t held_value{};
+        std::uint64_t held_until{};
+        const std::atomic<std::uint64_t>* held_stamp{};
+        std::uint64_t held_stamp_value{};
+        std::uint64_t held_run{};
     };
     static constexpr std::size_t device_page_count = 16;
     // The entry for a page: its page number folded with bits 19:16 and 23:20, so that pages
@@ -911,21 +923,24 @@ class Cpu final : public InterruptSink {
         const std::uint64_t page = address >> 12;
         return (page ^ (page >> 4) ^ (page >> 8)) % device_page_count;
     }
-    [[nodiscard]] const DevicePage* device_page(std::uint64_t address, bool store) const {
-        const DevicePage& page = device_pages_[device_page_slot(address)];
+    [[nodiscard]] DevicePage* device_page(std::uint64_t address, bool store) {
+        DevicePage& page = device_pages_[device_page_slot(address)];
         if (page.page != (address & ~page_offset_mask) || page.context != translation_context() ||
             (store && !page.stores)) {
             return nullptr;
         }
         return &page;
     }
-    std::expected<std::uint64_t, Exception> device_read(const DevicePage& page,
-                                                        std::uint64_t address, AccessWidth width);
+    std::expected<std::uint64_t, Exception> device_read(DevicePage& page, std::uint64_t address,
+                                                        AccessWidth width);
     void device_write(const DevicePage& page, std::uint64_t address, AccessWidth width,
                       std::uint64_t value);
     void remember_device_page(std::uint64_t address, const Translation& translation,
                               AccessKind kind);
     std::array<DevicePage, device_page_count> device_pages_{};
+    // Advances at the start of every run (synchronize_host_pages): a held device read holds
+    // only within the run it was made in.
+    std::uint64_t run_epoch_{1};
     std::uint64_t host_pages_translation_generation_{};
     std::uint64_t host_pages_bus_generation_{};
     // Changes whenever address translation may have changed in a way translation_context()

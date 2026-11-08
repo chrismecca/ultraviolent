@@ -389,6 +389,29 @@ every iteration) and 54% the device read itself, spread over the synchronized ta
 Hub's count window, `device_read`, and the checks after a helper. The larger remaining step is
 direct links across calls and returns (J6), not a lighter helper.
 
+**Held device reads (2026-11-08).** A count of `boot`'s device reads by register (a throwaway
+build): 579 million of PI_RT_COUNT, one every 25 cycles, against 13 million for the next
+register; perf: `load_slow` 16%, `operation_helper` 11%, the synchronized target 10% of host
+time. Also measured and not kept: the alignment check's `%` compiles to a 64-bit division,
+but replacing it with a mask gained nothing (it only feeds a predicted branch). A device may
+now say how long a read holds (`MmioTarget::mmio_read_held`): until the reading CPU's cycle
+count reaches a bound, while a stamp it names is unchanged, within the CPU's run. The CPU
+keeps the last such read per device page (`Cpu::DevicePage`) and answers a read of the same
+offset and width itself, without reaching the bus; it is not a barrier, as the device said
+the read has no effect (IR.adoc "Slow bus paths are barriers"). The IP27 machine holds
+PI_RT_COUNT with one CPU, for the cycles of the count's window, stamped with the counter's
+write sequence (`Hub::rt_sequence`): device time is never ahead of a single CPU, so in those
+cycles the count is the window's whatever else reaches the bus. Tests:
+`mips.device_reads_held` (held through another device's read; a width, an offset, a write
+that changes the stamp, and a new run each read again), `mips.device_reads_held_until`, and
+`ip27.rt_count_back_to_back` now writes the count through the CPU's device page; mutation
+checks (no stamp, run, or cycle check in the CPU, a machine stamp that never changes: each
+fails a test). Every digest equal on all three engines and with two and four CPUs. PGO, best
+of 3, against the commit before: `prom` 1.04x, `boot` 1.06x, `cpu` and `fs` unchanged.
+perf of `boot` after: the synchronized target 2.9% (10%), but `load_slow` 14.7% and
+`operation_helper` 12%: a held read still leaves generated code through the helper (guest
+values written back, `complete_cycle`, `load_slow`), which is where the rest is.
+
 == FPU
 
 FPU operations are one decoded opcode (`cop1`) executed by `FpuExecutor` (fpu.cpp), whose
