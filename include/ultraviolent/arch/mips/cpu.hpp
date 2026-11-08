@@ -411,10 +411,12 @@ class Cpu final : public InterruptSink {
     [[nodiscard]] std::uint64_t code_epoch() const {
         return code_epoch_;
     }
-    // Advances whenever a decoded block may have become invalid: the code epoch or the
-    // generation of a TLB entry that translated code advanced, or a frame holding decoded code was written (by this CPU's
-    // stores, or by anything else once synchronize_code has seen it). Lets an engine reuse a
-    // validation until something changes (tier 1's dispatch, JIT.adoc "Dispatch").
+    // Advances whenever a decoded block may have become invalid other than through its TLB
+    // entry: the code epoch advanced, or a frame holding decoded code was written (by this
+    // CPU's stores, or by anything else once synchronize_code has seen it). Lets an engine
+    // reuse a validation until something changes (tier 1's dispatch, JIT.adoc "Dispatch"),
+    // and test the generation of the block's own TLB entry beside it: a TLB write changes
+    // the blocks of the entries it writes or invalidates, and no others.
     [[nodiscard]] std::uint64_t code_changes() const {
         return code_changes_;
     }
@@ -576,6 +578,8 @@ class Cpu final : public InterruptSink {
         std::int32_t fpr;
         std::int32_t fcsr;
         std::int32_t code_changes;
+        // Cpu::tlb_generation's array, by TLB entry.
+        std::int32_t tlb_generations;
         // The data host page cache (load and store fast paths): host_page_count entries of
         // host_page_size bytes, selected by bits 6+ of the virtual page number; the fields of
         // an entry; the byte order of the memory behind it.
@@ -853,9 +857,6 @@ class Cpu final : public InterruptSink {
     std::uint64_t code_epoch_{};
     std::uint64_t code_changes_{};
     std::uint64_t seen_code_writes_{};
-    // TLB entries (bit n: entry n) that translated a claimed code page since they were last
-    // written: a write to any other entry leaves every decoded block valid.
-    std::uint64_t tlb_code_entries_{};
 
     // Per-instruction work kept out of the instruction loop; transparent (the same values
     // the direct computation gives, which debug builds check). Measured: the interrupt

@@ -61,10 +61,19 @@ BlockInterpreter::NativeRun BlockInterpreter::run_native(const std::uint64_t& li
     if (entry.pc != s.pc || !cpu_.code_context_matches(entry.context)) {
         return NativeRun::absent;
     }
+    // A TLB write leaves the stamp alone (Cpu::code_changes): the entry's own TLB generation
+    // first. Native code tests it on entry too, and leaves here when it changed.
+    const DispatchValidity& validity = dispatch_validity_[dispatch_index(s.pc)];
+    if (validity.tlb_index >= 0 && cpu_.tlb_generation(static_cast<std::size_t>(
+                                       validity.tlb_index)) != validity.tlb_generation) {
+        ++statistics_.dispatch_invalid;
+        entry = {};
+        return NativeRun::absent;
+    }
     cpu_.synchronize_code();
     if (entry.stamp != cpu_.code_changes()) {
         ++statistics_.dispatch_revalidations;
-        if (!valid(dispatch_validity_[dispatch_index(s.pc)])) {
+        if (!valid(validity)) {
             ++statistics_.dispatch_invalid;
             entry = {};
             return NativeRun::absent;

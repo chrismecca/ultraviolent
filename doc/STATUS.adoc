@@ -633,8 +633,10 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   of global TLB entries, rebuilt and translated again under every new ASID; code no ASID
   selects now matches under all: `boot` 1.18x (2.42 times real time), `fs` 1.09x, every
   digest equal.
-  Next, by measured share: the dispatch revalidations a TLB write causes (16.9 million in
-  `boot`: a stamp per TLB entry instead of the CPU-wide one); the tag misses left (6.5
+  Dispatch entries now test their own TLB entry's generation instead of a CPU-wide stamp
+  that every TLB write advanced (16.9 million revalidations in `boot`, now 50,000): `boot`
+  1.02x.
+  Next, by measured share: the tag misses left (6.5
   million: other pcs in the entry, user code under new ASIDs, mode changes); the FPU operations still in helpers
   (other conversions, SQRT, ABS, NEG, conditional moves, COP1X, conditions other than 0).
 
@@ -2214,4 +2216,26 @@ Disproven: that tier 0's misses were capacity, or lukewarm code below the thresh
 Unknowns: where the second host's 19 s went across its restart.
 Best checkpoint: unchanged (local/release-check-011c).
 Next step: per-entry TLB stamps for dispatch (JIT.adoc "Dispatch", the last bullet).
+----
+
+----
+Date: 2026-11-08
+Milestone: Usable VM: tier-1 speed, dispatch stamps
+Hypothesis: the 16.9 million dispatch revalidations in `boot` (each a return to the engine)
+  come from TLB writes advancing the CPU-wide stamp, and a test of each block's own TLB
+  entry removes them.
+Evidence: a throwaway count of what advances Cpu::code_changes in `boot`: TLB writes to
+  entries that had translated code 72,622, code-frame writes 106, the code epoch 33.
+Changed: TLB writes no longer advance code_changes (tlb_code_entries_ removed); a mapped
+  block's native code tests its TLB entry's generation where dispatch enters
+  (check_tlb_generation, NativeLayout::tlb_generations); BlockInterpreter::run_native tests it
+  before entering.
+Tests: mips.tier1.remap_own_page.*, mips.tier1.remap_called_page.*,
+  mips.tier1.unrelated_tlb_writes.*; mutation checks as JIT.adoc says; dev and asan green.
+Newly proven: revalidations 50,000, native runs 8.9 million (22.9); every digest equal;
+  `boot` 1.02x.
+Disproven: that the revalidations cost much: about 35 ns each, 0.6 s of `boot`'s 34 s.
+Unknowns: none new.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: what perf of `boot` and `fs` leads with now; the FPU's helpers for `cpu`.
 ----

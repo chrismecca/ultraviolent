@@ -111,6 +111,7 @@ Cpu::NativeLayout Cpu::native_layout() const {
             .fpr = at(fpu_.fpr.data()),
             .fcsr = at(&fpu_.fcsr),
             .code_changes = at(&code_changes_),
+            .tlb_generations = at(tlb_generations_.data()),
             .data_pages = at(data_pages_.data()),
             .host_page_page = offsetof(HostPage, page),
             .host_page_store_page = offsetof(HostPage, store_page),
@@ -675,9 +676,6 @@ std::optional<Cpu::CodePage> Cpu::code_page(std::uint64_t address) {
 }
 
 void Cpu::claim_code_frame(const CodePage& page) {
-    if (page.tlb_index >= 0) {
-        tlb_code_entries_ |= std::uint64_t{1} << page.tlb_index;
-    }
     // A marked frame is never cached as a writable host page (remember_page), and every CPU
     // dropped its writable pages when the frame was marked. So only a first mark has more to
     // do (SMP.adoc "S4.0": a mark per build cost a drop every 2,000 cycles).
@@ -891,11 +889,7 @@ Cpu::BusAccess Cpu::classify_bus_access(PhysicalAddress address, AccessWidth wid
 }
 
 void Cpu::forget_tlb_pages(std::uint64_t entries) {
-    // Only entries that translated decoded code can invalidate a block.
-    if ((entries & tlb_code_entries_) != 0) {
-        tlb_code_entries_ &= ~entries;
-        ++code_changes_;
-    }
+    // Decoded blocks test their own entry's generation (code_changes).
     for (std::size_t index = 0; index < Tlb::entry_count; ++index) {
         if ((entries >> index & 1) != 0) {
             ++tlb_generations_[index];

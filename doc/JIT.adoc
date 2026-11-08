@@ -252,14 +252,34 @@ native code:
   generation). It outlives tier-0 evictions: a block keeps its native code until its dispatch
   entry is replaced or invalid. A tier-0 entry that reaches the threshold is translated (or
   reuses its native code) and installed.
-* **Stamps.** `Cpu::code_changes()` advances whenever any decoded block may have become
-  invalid: the code epoch, the generation of a TLB entry that translated code (a TLB write to
-  an entry no block came through changes nothing), or a write to a code frame (the CPU's own
-  stores at once; any other bus master's, which happen only between runs or during a bus
-  access, at `Cpu::synchronize_code`). An entry validated in full is stamped with the current
-  value. Native code continues into an entry only when its pc, translation context, and
-  stamp match; anything else returns to the engine, which validates in full, restamps or
+* **Stamps.** `Cpu::code_changes()` advances whenever a decoded block may have become
+  invalid other than through its TLB entry: the code epoch, or a write to a code frame (the
+  CPU's own stores at once; any other bus master's, which happen only between runs or during
+  a bus access, at `Cpu::synchronize_code`). An entry validated in full is stamped with the
+  current value. Native code continues into an entry only when its pc, translation context,
+  and stamp match; anything else returns to the engine, which validates in full, restamps or
   drops, and enters again.
+* **TLB generations (2026-11-08).** A block's translation is valid only while the TLB entry
+  that mapped its page keeps the generation it had when the block was built, so that
+  generation is a constant of its native code: each block of a mapped page starts with a
+  test of it (`check_tlb_generation`) where dispatch enters, and leaves for the engine when
+  it changed; joins inside a region, from blocks of the same page, enter after the test. A
+  TLB write is a state change, the last operation of its block, after which the next block
+  always comes through dispatch (`Final::cpu`), so no test is needed after a helper. The
+  engine tests the generation before it enters an entry (`BlockInterpreter::run_native`),
+  so a failed test cannot loop. Until then a TLB write to any entry that had translated code
+  advanced the stamp, and every dispatch entry used after it left native code once to be
+  revalidated: in `boot`, 72,600 such writes and 16.9 million revalidations. Tests:
+  `mips.tier1.remap_own_page.*` (a block remaps its own page to a frame with other code),
+  `mips.tier1.remap_called_page.*` (kseg0 code remaps a page, then calls into it through
+  dispatch), `mips.tier1.unrelated_tlb_writes.*` (rewriting one code entry leaves the other
+  blocks' entries: 1,280 revalidations in 215 passes before, now none). Mutation checks: no
+  entry test fails three tests; the wrong entry's generation, or no test in the engine,
+  hangs them (the entry leaves at once, forever); a test after helpers as well was never
+  needed, as above, and is not emitted. `boot` after: 50,000 revalidations, 8.9 million native
+  runs (22.9). PGO, best of 3, against the commit before: `boot` 1.02x, the others 0.99-1.01x
+  (noise); every digest equal. An exit and revalidation cost about 35 ns, less than
+  expected.
 * **The run.** `NativeCode::run` enters the block at the CPU's pc and returns only when a
   block leaves: a dispatch miss, a side exit, a pending exception or the deadline at a block
   entry, or a code change. Blocks jump to the shared dispatch code with the next pc; nothing

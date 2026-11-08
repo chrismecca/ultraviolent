@@ -1572,6 +1572,21 @@ class X86_64NativeCode final : public NativeCode {
     // the boundary before it made exact, the call (the operation's cycle is its own), and the
     // checks after it. On return the CPU is exact at the boundary after the operation and the
     // cycle count is the block's start plus index + 1; exits leave from here.
+    // Leaves with `reason` unless the TLB entry that mapped `block`'s code page has the
+    // generation it had when the block was built (and translated, right after the lookup that
+    // validated it): a TLB write leaves Cpu::code_changes alone. Nothing for unmapped code.
+    // Only where dispatch enters: a TLB write is a state change, the last operation of its
+    // block, which then leaves through dispatch (Final::cpu). Uses rcx.
+    void check_tlb_generation(Assembler& a, const Block& block, BlockExit reason) const {
+        const std::int8_t index = block.code.tlb_index;
+        if (index < 0) {
+            return;
+        }
+        a.mov(Reg::rcx, cpu_.tlb_generation(static_cast<std::size_t>(index)));
+        a.cmp(Reg::rcx, field(layout_.tlb_generations + 8 * index));
+        a.jcc_to(Cond::ne, exit(reason));
+    }
+
     void call_operation(Assembler& a, const Block& block, std::size_t index, Boundary b) {
         const std::size_t count = block.operations.size();
         materialize(a, block, index, b);
@@ -1682,7 +1697,10 @@ class X86_64NativeCode final : public NativeCode {
         // Blocks join while earlier ones are emitted.
         for (std::size_t k = 0; k < region.blocks.size(); ++k) {
             const RegionBlock b = region.blocks[k];
+            // Dispatch enters at the start, joins from the region's other blocks (the same
+            // code page) at the label.
             starts.push_back(a.here());
+            check_tlb_generation(a, *b.block, BlockExit::completed);
             a.bind(b.label);
             mark(a, mark_entry);
             native_count += emit_block(a, region, *b.block);

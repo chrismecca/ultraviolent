@@ -597,6 +597,98 @@ template <class Engine> void code_no_asid_selects(test::Context& t) {
     code_under_asids<Engine>(t, false, 0, 2);
 }
 
+// TLB entry 3 maps `page` globally; t0 and t1 hold EntryLo0 values that map it to frames A and
+// B, and CP0 is left so that `mtc0 tN, EntryLo0; tlbwi` switches the page to that frame.
+constexpr std::uint64_t remapped_page = 0x0003'0000;
+constexpr std::uint64_t remap_frame_a = System::data + 0x4000;
+constexpr std::uint64_t remap_frame_b = System::data + 0x5000;
+void prepare_remap(System& s) {
+    const auto lo = [](std::uint64_t frame) {
+        return (frame >> 12) << entry_lo::pfn_shift | (3u << entry_lo::c_shift) | entry_lo::d |
+               entry_lo::v | entry_lo::g;
+    };
+    s.cpu.dmtc0(cp0::entry_hi, remapped_page);
+    s.cpu.dmtc0(cp0::entry_lo0, lo(remap_frame_a));
+    s.cpu.dmtc0(cp0::entry_lo1, entry_lo::g);
+    s.cpu.mtc0(cp0::page_mask, 0);
+    s.cpu.mtc0(cp0::index, 3);
+    s.cpu.tlb_write_indexed();
+    s.set(t0, lo(remap_frame_a));
+    s.set(t1, lo(remap_frame_b));
+}
+
+// A block on a mapped page rewrites the TLB entry that maps it (tlbwi, a helper inside native
+// code): what follows comes from the new frame, which holds other code at the same offsets.
+template <class Engine> void remap_own_page(test::Context& t) {
+    DifferentialWith<Engine> d;
+    d.max_chunk = 2000;
+    d.load(remap_frame_a, kseg0(remap_frame_a),
+           {addiu(v0, v0, 1), mtc0(t1, cp0::entry_lo0), nop(), tlbwi(), nop(), addiu(v1, v1, 1),
+            beq(zero, zero, -4 * 7), nop()});
+    d.load(remap_frame_b, kseg0(remap_frame_b),
+           {addiu(v0, v0, 0x100), mtc0(t0, cp0::entry_lo0), nop(), tlbwi(), nop(),
+            addiu(v1, v1, 0x100), beq(zero, zero, -4 * 7), nop()});
+    d.both([](System& s) {
+        prepare_remap(s);
+        s.start_kernel(remapped_page);
+    });
+    t.check(d.run(t, 3000), "matches the reference");
+    const std::uint64_t v = d.candidate.gpr(v0);
+    t.check(v % 0x100 > 10 && v / 0x100 > 10, "both frames' code ran");
+}
+
+// Code in kseg0 remaps a page (tlbwi) and then calls the routine there through dispatch: the
+// dispatch entry from before the remap must not run.
+template <class Engine> void remap_called_page(test::Context& t) {
+    DifferentialWith<Engine> d;
+    d.max_chunk = 2000;
+    d.load(remap_frame_a, kseg0(remap_frame_a), {addiu(v0, v0, 1), jr(ra), nop()});
+    d.load(remap_frame_b, kseg0(remap_frame_b), {addiu(v1, v1, 1), jr(ra), nop()});
+    d.load(System::code, kseg0(System::code),
+           {jalr(ra, s1), nop(), mtc0(t1, cp0::entry_lo0), nop(), tlbwi(), nop(), jalr(ra, s1),
+            nop(), mtc0(t0, cp0::entry_lo0), nop(), tlbwi(), nop(), beq(zero, zero, -4 * 13),
+            nop()});
+    d.both([](System& s) {
+        prepare_remap(s);
+        s.start_kernel();
+        s.set(s1, remapped_page);
+    });
+    t.check(d.run(t, 3000), "matches the reference");
+    t.check(d.candidate.gpr(v0) > 10 && d.candidate.gpr(v1) > 10, "both frames' routines ran");
+}
+
+// Rewriting a TLB entry that translated code invalidates only that entry's blocks: the others
+// keep their dispatch entries without leaving native code to revalidate them.
+template <class Engine> void unrelated_tlb_writes(test::Context& t) {
+    DifferentialWith<Engine> d;
+    d.max_chunk = 2000;
+    constexpr std::uint64_t other_page = 0x0004'0000;
+    constexpr std::uint64_t other_frame = System::data + 0x6000;
+    d.load(remap_frame_a, kseg0(remap_frame_a), {addiu(v0, v0, 1), jr(ra), nop()});
+    d.load(other_frame, kseg0(other_frame), {addiu(v1, v1, 1), jr(ra), nop()});
+    d.load(
+        System::code, kseg0(System::code),
+        {jalr(ra, s1), nop(), jalr(ra, s2), nop(), tlbwi(), nop(), beq(zero, zero, -4 * 7), nop()});
+    d.both([&](System& s) {
+        prepare_remap(s);
+        // Entry 5 maps the other page; tlbwi writes it again, unchanged, on every pass.
+        s.cpu.dmtc0(cp0::entry_hi, other_page);
+        s.cpu.dmtc0(cp0::entry_lo0, (other_frame >> 12) << entry_lo::pfn_shift |
+                                        (3u << entry_lo::c_shift) | entry_lo::v | entry_lo::g);
+        s.cpu.mtc0(cp0::index, 5);
+        s.cpu.tlb_write_indexed();
+        s.start_kernel();
+        s.set(s1, remapped_page);
+        s.set(s2, other_page);
+    });
+    t.check(d.run(t, 3000), "matches the reference");
+    const std::uint64_t passes = d.candidate.gpr(v0);
+    t.check(passes > 100 && d.candidate.gpr(v1) + 1 >= passes, "both routines ran on every pass");
+    const std::uint64_t revalidations = d.engine.statistics().dispatch_revalidations;
+    t.check(revalidations < passes / 4,
+            std::format("{} revalidations in {} passes", revalidations, passes));
+}
+
 // The FPU's moves, loads, and stores, which tier 1 emits with a guard on Status (CU1, FR) and
 // the memory fast path: random registers (odd and even, which differ with FR=0), bases and
 // offsets as above (misaligned ones raise address errors), interleaved with integer memory
@@ -804,6 +896,20 @@ const test::Registration code_no_asid_tier1{"mips.tier1.code_no_asid_selects.tie
                                             code_no_asid_selects<Tier1Engine>};
 const test::Registration code_no_asid_regions{"mips.tier1.code_no_asid_selects.regions",
                                               code_no_asid_selects<Tier1RegionEngine>};
+const test::Registration remap_own_tier0{"mips.tier1.remap_own_page.tier0",
+                                         remap_own_page<Tier0Engine>};
+const test::Registration remap_own_tier1{"mips.tier1.remap_own_page.tier1",
+                                         remap_own_page<Tier1Engine>};
+const test::Registration remap_own_regions{"mips.tier1.remap_own_page.regions",
+                                           remap_own_page<Tier1RegionEngine>};
+const test::Registration remap_called_tier1{"mips.tier1.remap_called_page.tier1",
+                                            remap_called_page<Tier1Engine>};
+const test::Registration remap_called_regions{"mips.tier1.remap_called_page.regions",
+                                              remap_called_page<Tier1RegionEngine>};
+const test::Registration unrelated_tier1{"mips.tier1.unrelated_tlb_writes.tier1",
+                                         unrelated_tlb_writes<Tier1Engine>};
+const test::Registration unrelated_regions{"mips.tier1.unrelated_tlb_writes.regions",
+                                           unrelated_tlb_writes<Tier1RegionEngine>};
 
 const test::Registration device_loads_tier0{"mips.tier1.device_loads.tier0",
                                             device_loads<Tier0Engine>};
