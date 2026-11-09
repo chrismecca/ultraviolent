@@ -224,6 +224,56 @@ const test::Registration shared_contexts{
         t.check(added != 0 && added % 0x10 == 0, "ASID 9's routine ran");
     }};
 
+const test::Registration host_page_aliases{
+    "mips.block_cache.host_page_aliases_in_two_segments", [](test::Context& t) {
+        // One data frame loaded through kseg0 and through its xkphys alias in turn, as IRIX's
+        // kernel uses one of its pages. The two addresses' page numbers have the same low bits,
+        // and the host page cache's two ways keep both (a fill is a barrier).
+        Pair<4096> d;
+        d.load(System::code, code,
+               {ld(t0, 0, s0), ld(t1, 8, s1), daddu(v0, v0, t0), daddu(v0, v0, t1),
+                beq(zero, zero, -20), nop()});
+        d.both([](System& s) {
+            s.start_kernel(code);
+            s.cpu.mtc0(cp0::status,
+                       static_cast<std::uint32_t>(s.cpu.mfc0(cp0::status)) | status::kx);
+            s.set(s0, kseg0(frame_a));
+            s.set(s1, 0xa800'0000'0000'0000 | frame_a);
+            s.poke(frame_a, AccessWidth::bits64, 3);
+            s.poke(frame_a + 8, AccessWidth::bits64, 5);
+        });
+        d.run(t, 600);
+        t.check(d.candidate.gpr(v0) >= 90 * 8, "both loads ran");
+        const BlockStatistics& s = d.engine.statistics();
+        t.check(s.barriers[index(Cpu::BusAccess::memory_fill)] <= 4,
+                "each alias filled once: " + describe(s));
+    }};
+
+const test::Registration second_way_remap{
+    "mips.block_cache.host_page_second_way_remapped", [](test::Context& t) {
+        // Two pages of one host page cache entry, loaded in turn: the mapped page (TLB entry 1)
+        // is then in the second way when the entry is remapped to another frame, and the next
+        // loads must see that frame (the second way is dropped with the first).
+        Pair<4096> d;
+        d.load(System::code, code,
+               {ld(t0, 0, s0), ld(t1, 0, s1), daddu(v0, v0, t0), daddu(v0, v0, t1),
+                beq(zero, zero, -20), nop()});
+        d.both([](System& s) {
+            s.start_kernel(code);
+            map(s, 1, mapped, frame_a, 0, true, 0);
+            s.set(s0, mapped);
+            s.set(s1, kseg0(mapped)); // physical 0x10000: the same entry, another page
+            s.poke(frame_a, AccessWidth::bits64, 3);
+            s.poke(frame_b, AccessWidth::bits64, 0x100);
+            s.poke(mapped, AccessWidth::bits64, 5);
+        });
+        d.run(t, 300);
+        d.both([](System& s) { map(s, 1, mapped, frame_b, 0, true, 0); });
+        const std::uint64_t before = d.candidate.gpr(v0);
+        d.run(t, 300);
+        t.check((d.candidate.gpr(v0) - before) / 0x100 > 10, "the new frame was read");
+    }};
+
 const test::Registration self_modifying{
     "mips.block_cache.self_modifying_block", [](test::Context& t) {
         // A store rewrites a later instruction of the executing block: the store retires, the

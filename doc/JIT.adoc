@@ -644,6 +644,39 @@ Release, M cycles/s, one run, regions alone to all three: `cpu` 335.6 to 366.4, 
 274.5, `boot` 210.0 to 215.2, `prom` 308.7 to 319.1. The encoder gained indexed operands,
 MOVBE, and OR from memory (48,517 encodings identical to GNU as).
 
+**Two ways (2026-11-09).** A throwaway count of `load_slow` in `boot` found 84 million memory
+loads that missed the host page cache, 35.0 million at virtual 0xffffffffffffc000 (a mapped
+kernel page at the top of the address space, by its address IRIX's per-CPU data; not
+verified) and 34.5 million at 0xa8000000005fc000 (xkphys): two pages of one entry, used in
+turn, each refilling it. Tried in order:
+
+* **The entry folded with the address's top byte** (the segment): `boot` 1.08x, but three
+  more instructions on every access cost `cpu` 0.94x. Not kept.
+* **A second way** (`Cpu::second_data_pages_`) that a fill moves the first way's page to,
+  tested out of line after the first misses (`emit_second_way`): `cpu` 0.82x, and 17 s
+  (3.9) with the second way known to C++ only: a page used again stayed in the second way's
+  slower test. Moving only another alias of the frame: `boot` 1.11x, `fs` 0.94x (the
+  kernel writing a user buffer through another alias left the user's page there). Filling
+  only a new alias into the second way: `boot` 0.96x (after the host pages are dropped,
+  the first alias used holds the first way whichever is used most).
+* **Kept: the second way, swapped on a hit.** A fill moves the first way's page to the
+  second; generated code that finds a page in the second way swaps the two entries (eight
+  doublewords through rax and rcx), so the first way holds the page used last, and takes
+  the addend from the first way. The hit path is unchanged. The loops that drop entries
+  skip the second way while nothing was moved into it (`second_data_pages_in_use`). Tests:
+  `mips.block_cache.host_page_aliases_in_two_segments` (tier 0: two aliases in turn fill
+  only twice), `mips.tier1.host_page_aliases.*` (`Cpu::data_page_fills`, now also in the
+  engine statistics), `mips.tier1.second_way_store_to_code.*` (a store through the second
+  way tests its store tag: through an xkphys alias into the executing code frame, which must
+  reach the bus), `mips.block_cache.host_page_second_way_remapped` (a page in the second way
+  is dropped with its TLB entry). Mutation checks (no second lookup in C++, no move, the
+  store tested against the load tag, half a swap, the addend from the second way after the
+  swap, the second way never marked used): each fails a test. Not caught: generated code
+  that does not test the second way (C++ finds the page; only speed). Release, best of 5,
+  against the commit before: `boot` 1.14x, `cpu` 1.01x, `fs` 1.02x; PGO, best of 5: `boot`
+  1.08x (2.70 times real time), `cpu` 1.02x, `prom` and `fs` unchanged; every digest equal,
+  one to four CPUs.
+
 == x86-64 encoding
 
 A minimal in-house encoder for the instructions the emitting builder uses, checked against

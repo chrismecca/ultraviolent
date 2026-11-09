@@ -668,6 +668,53 @@ std::uint64_t code_under_asids(test::Context& t, bool global, std::uint64_t firs
 #endif
 }
 
+// One data frame loaded through kseg0 and through its xkphys alias in turn, as IRIX's kernel
+// uses one of its pages: their page numbers have the same low bits, and the host page cache's
+// two ways keep both.
+template <class Engine> void host_page_aliases(test::Context& t) {
+    DifferentialWith<Engine> d;
+    d.max_chunk = 2000;
+    constexpr std::uint64_t frame = System::data + 0x4000;
+    d.load(System::code, kseg0(System::code),
+           {ld(t0, 0, s0), ld(t1, 8, s1), daddu(v0, v0, t0), daddu(v0, v0, t1),
+            beq(zero, zero, -20), nop()});
+    d.both([](System& s) {
+        s.start_kernel();
+        s.cpu.mtc0(cp0::status, static_cast<std::uint32_t>(s.cpu.mfc0(cp0::status)) | status::kx);
+        s.set(s0, kseg0(frame));
+        s.set(s1, 0xa800'0000'0000'0000 | frame);
+        s.poke(frame, AccessWidth::bits64, 3);
+        s.poke(frame + 8, AccessWidth::bits64, 5);
+    });
+    t.check(d.run(t, 3000), "matches the reference");
+    const std::uint64_t fills = d.candidate.cpu.data_page_fills();
+    t.check(fills <= 4, std::format("{} fills", fills));
+}
+
+// A store through the host page cache's second way compares its store tag: the code frame is
+// loaded through xkphys and then kseg0 (so the xkphys page is in the second way, read only, as
+// loads fill it), and a store through xkphys rewrites a later instruction of the loop, which
+// must reach the bus as a code store and run.
+template <class Engine> void second_way_store_to_code(test::Context& t) {
+    DifferentialWith<Engine> d;
+    d.max_chunk = 2000;
+    constexpr std::uint64_t xkphys = 0xa800'0000'0000'0000 | System::code;
+    d.load(System::code, kseg0(System::code),
+           {ld(t1, 0, s1), ld(t0, 0, s0), xor_(t8, t8, t9), sw(t8, 0x18, s1), nop(), nop(),
+            addiu(v0, v0, 1), beq(zero, zero, -0x20), nop()});
+    d.both([&](System& s) {
+        s.start_kernel();
+        s.cpu.mtc0(cp0::status, static_cast<std::uint32_t>(s.cpu.mfc0(cp0::status)) | status::kx);
+        s.set(s0, kseg0(System::code));
+        s.set(s1, xkphys);
+        s.set(t8, addiu(v0, v0, 1));
+        s.set(t9, addiu(v0, v0, 1) ^ addiu(v0, v0, 0x100));
+    });
+    t.check(d.run(t, 2000), "matches the reference");
+    const std::uint64_t v = d.candidate.gpr(v0);
+    t.check(v % 0x100 > 10 && v / 0x100 > 10, "both versions of the instruction ran");
+}
+
 // Code that no ASID selects (kseg0, a global TLB entry) has one translation for every ASID
 // (Cpu::code_context). ASID 0's context has the bits of that shared form but its marker.
 template <class Engine> void code_no_asid_selects(test::Context& t) {
@@ -972,6 +1019,14 @@ const test::Registration data_pages_tier0{"mips.tier1.data_pages_by_context.tier
                                           data_pages_by_context<Tier0Engine>};
 const test::Registration data_pages_tier1{"mips.tier1.data_pages_by_context.tier1",
                                           data_pages_by_context<Tier1Engine>};
+const test::Registration host_page_aliases_tier1{"mips.tier1.host_page_aliases.tier1",
+                                                 host_page_aliases<Tier1Engine>};
+const test::Registration host_page_aliases_regions{"mips.tier1.host_page_aliases.regions",
+                                                   host_page_aliases<Tier1RegionEngine>};
+const test::Registration second_way_store_tier1{"mips.tier1.second_way_store_to_code.tier1",
+                                                second_way_store_to_code<Tier1Engine>};
+const test::Registration second_way_store_regions{"mips.tier1.second_way_store_to_code.regions",
+                                                  second_way_store_to_code<Tier1RegionEngine>};
 const test::Registration code_no_asid_tier1{"mips.tier1.code_no_asid_selects.tier1",
                                             code_no_asid_selects<Tier1Engine>};
 const test::Registration code_no_asid_regions{"mips.tier1.code_no_asid_selects.regions",

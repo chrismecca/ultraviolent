@@ -639,8 +639,11 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   reaches the Hub 313,556 times in `boot`; `prom` and `boot` 1.02x. What remains of the
   device path is other registers and the directory back door, and memory loads that miss
   the host page cache, most on two aliases of one page.
-  Next, by measured share: the host page cache's two aliases (70 million misses in `boot`);
-  the directory back door (50 million device reads); the tag misses left (6.5
+  The host page cache has two ways (JIT.adoc "Native memory"), swapped by generated code on
+  a second-way hit: `boot` 1.08x (2.70 times real time).
+  Next, by measured share: the directory back door (50 million device reads in `boot`, every
+  doubleword read three times: what reads it, and whether the window can be memory); the
+  tag misses left (6.5
   million: other pcs in the entry, user code under new ASIDs, mode changes); the FPU operations still in helpers
   (other conversions, SQRT, ABS, NEG, conditional moves, COP1X, conditions other than 0).
 
@@ -2267,4 +2270,29 @@ Disproven: that those reads were most of `load_slow`: a throwaway count of its 1
 Unknowns: what reads the directory back door three times over.
 Best checkpoint: unchanged (local/release-check-011c).
 Next step: the host page cache entry (fold the address's top byte into it).
+----
+
+----
+Date: 2026-11-09
+Milestone: Usable VM: tier-1 speed, the host page cache
+Hypothesis: `boot`'s 70 million host page cache misses on two pages are two aliases of one
+  frame in one entry, used in turn, and a second way keeps both.
+Evidence: the throwaway count above; the pages are virtual 0xffffffffffffc000 and
+  0xa8000000005fc000 (entry 0xfc).
+Changed: Cpu::second_data_pages_ (a fill moves the first way's page there; skipped by the
+  drop loops while unused), Cpu::data_page looks in both, NativeLayout::second_data_pages,
+  tier 1's out-of-line second-way test that swaps the entries on a hit (emit_second_way),
+  Cpu::data_page_fills (also in --engine-statistics).
+Tests: mips.block_cache.host_page_aliases_in_two_segments,
+  mips.block_cache.host_page_second_way_remapped, mips.tier1.host_page_aliases.*,
+  mips.tier1.second_way_store_to_code.*; mutation checks as JIT.adoc says; dev and asan
+  green.
+Newly proven: `boot` 1.08x PGO (1.14x release), `cpu` and `fs` unchanged; every digest
+  equal.
+Disproven: that folding the segment into the entry is free (three instructions per access,
+  `cpu` 0.94x), and that a second way without promotion helps (pages used again stay in it:
+  `cpu` 0.82x; the variants are in JIT.adoc).
+Unknowns: what reads the directory back door three times over in `boot`.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: the directory back door's reads (who, and whether the window can be memory).
 ----

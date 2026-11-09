@@ -113,6 +113,7 @@ Cpu::NativeLayout Cpu::native_layout() const {
             .code_changes = at(&code_changes_),
             .tlb_generations = at(tlb_generations_.data()),
             .data_pages = at(data_pages_.data()),
+            .second_data_pages = at(second_data_pages_.data()),
             .host_page_page = offsetof(HostPage, page),
             .host_page_store_page = offsetof(HostPage, store_page),
             .host_page_addend = offsetof(HostPage, addend),
@@ -153,6 +154,7 @@ std::uint64_t Cpu::context_tag(std::uint64_t context) {
         context_ids_used_ = 0;
         code_pages_.fill({});
         data_pages_.fill({});
+        clear_second_data_pages();
         return context_tag(context);
     }
     context_ids_[slot] = {.context = context, .id = static_cast<std::uint32_t>(++context_ids_used_)};
@@ -710,9 +712,12 @@ void Cpu::claim_code_frame(const CodePage& page) {
         }
         seen_coherence_ = generation;
     }
-    for (HostPage& entry : data_pages_) {
-        if (entry.writable_bytes == page.bytes) {
-            entry = {};
+    for (const std::span<HostPage> way :
+         {std::span<HostPage>{data_pages_}, second_data_pages_in_use()}) {
+        for (HostPage& entry : way) {
+            if (entry.writable_bytes == page.bytes) {
+                entry = {};
+            }
         }
     }
 }
@@ -882,9 +887,12 @@ std::expected<bool, Exception> Cpu::store_conditional(const Translation& transla
 
 void Cpu::drop_writable_pages() {
     seen_coherence_ = coherence_->generation();
-    for (HostPage& entry : data_pages_) {
-        if (entry.writable_bytes != nullptr) {
-            entry = {};
+    for (const std::span<HostPage> way :
+         {std::span<HostPage>{data_pages_}, second_data_pages_in_use()}) {
+        for (HostPage& entry : way) {
+            if (entry.writable_bytes != nullptr) {
+                entry = {};
+            }
         }
     }
     if (parallel_) {
@@ -915,8 +923,10 @@ void Cpu::forget_tlb_pages(std::uint64_t entries) {
             page = {};
         }
     }
-    for (auto* pages : {&code_pages_, &data_pages_}) {
-        for (HostPage& page : *pages) {
+    for (const std::span<HostPage> pages :
+         {std::span<HostPage>{code_pages_}, std::span<HostPage>{data_pages_},
+          second_data_pages_in_use()}) {
+        for (HostPage& page : pages) {
             if (page.tlb_index >= 0 && (entries >> page.tlb_index & 1) != 0) {
                 page = {};
             }
@@ -955,17 +965,26 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
         const auto bytes = bus_.writable_memory_bytes(frame, page_size);
         if (bytes.size() == page_size) {
             const std::uint64_t tag = page | context_tag_;
-            data_pages_[host_page_slot(address)] = {
-                tag,           bytes.data(),   bytes.data(),
-                reinterpret_cast<std::uintptr_t>(bytes.data()) - page,
-                translation.tlb_index, memory->block, memory->offset,
-                tag};
+            ++data_page_fills_;
+            data_page_to_fill(address,
+                              tag) = {tag,
+                                      bytes.data(),
+                                      bytes.data(),
+                                      reinterpret_cast<std::uintptr_t>(bytes.data()) - page,
+                                      translation.tlb_index,
+                                      memory->block,
+                                      memory->offset,
+                                      tag};
         }
         return;
     }
     const auto bytes = bus_.memory_bytes(frame, page_size);
     if (bytes.size() == page_size) {
-        (kind == AccessKind::fetch ? code_pages_ : data_pages_)[host_page_slot(address)] = {
+        if (kind != AccessKind::fetch) {
+            ++data_page_fills_;
+        }
+        (kind == AccessKind::fetch ? code_pages_[host_page_slot(address)]
+                                   : data_page_to_fill(address, page | context_tag_)) = {
             page | context_tag_,
             bytes.data(),
             nullptr,
@@ -974,6 +993,18 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
             memory->block,
             memory->offset};
     }
+}
+
+// The data host page entry a fill of the page tagged `tag` writes: the first way's, whose page
+// moves to the second (second_data_pages_) unless it is this one. Tier 1 swaps the two when
+// it finds a page in the second way, so the first way holds the one used last.
+Cpu::HostPage& Cpu::data_page_to_fill(std::uint64_t address, std::uint64_t tag) {
+    HostPage& first = data_pages_[host_page_slot(address)];
+    if (first.page != tag && first.page != HostPage{}.page) {
+        second_data_pages_[host_page_slot(address)] = first;
+        second_data_pages_used_ = true;
+    }
+    return first;
 }
 
 std::expected<std::uint32_t, Exception> Cpu::fetch_slow(std::uint64_t address) {
@@ -1114,6 +1145,7 @@ void Cpu::write_cp0(unsigned reg, std::uint64_t value) {
     case cp0::watch_lo:
         cp0_.watch_lo = low & 0xffff'fffbu;
         data_pages_.fill({}); // armed watchpoints need the full path
+        clear_second_data_pages();
         device_pages_.fill({});
         watch_pending_ = false;
         return;
@@ -1337,9 +1369,8 @@ std::expected<void, Exception> Cpu::cache(unsigned operation, std::uint64_t addr
     }
     if (caches_.holds_data_lines() && !held) {
         // Cached data references must now consult the primary data cache, not host pages.
-        for (HostPage& entry : data_pages_) {
-            entry = {};
-        }
+        data_pages_.fill({});
+        clear_second_data_pages();
     }
     cp0_.tag_lo = registers.tag_lo;
     cp0_.tag_hi = registers.tag_hi;

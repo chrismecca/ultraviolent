@@ -458,6 +458,11 @@ class Cpu final : public InterruptSink {
     [[nodiscard]] std::uint64_t device_page_fills() const {
         return device_page_fills_;
     }
+    // Data host pages filled (remember_page): each fill is a load or store that missed the
+    // host page cache.
+    [[nodiscard]] std::uint64_t data_page_fills() const {
+        return data_page_fills_;
+    }
 
     // Set by every access that reaches the bus (read, write): the access left the host fast
     // path and may have synchronized devices. Execution engines clear it before an
@@ -580,10 +585,11 @@ class Cpu final : public InterruptSink {
         std::int32_t code_changes;
         // Cpu::tlb_generation's array, by TLB entry.
         std::int32_t tlb_generations;
-        // The data host page cache (load and store fast paths): host_page_count entries of
-        // host_page_size bytes, selected by bits 6+ of the virtual page number; the fields of
-        // an entry; the byte order of the memory behind it.
+        // The data host page cache (load and store fast paths): two ways of host_page_count
+        // entries of host_page_size bytes, each selected by bits 7:0 of the virtual page
+        // number; the fields of an entry; the byte order of the memory behind it.
         std::int32_t data_pages;
+        std::int32_t second_data_pages;
         std::int32_t host_page_page;
         std::int32_t host_page_store_page;
         std::int32_t host_page_addend;
@@ -735,14 +741,19 @@ class Cpu final : public InterruptSink {
     [[nodiscard]] const HostPage* data_page(std::uint64_t address) const {
         // No data page is filled while a watchpoint is armed (remember_page), and arming one
         // drops them: watched accesses need the full path.
-        const HostPage& page = data_pages_[host_page_slot(address)];
-        if (page.page != host_page_tag(address)) {
-            return nullptr;
+        const std::size_t slot = host_page_slot(address);
+        const std::uint64_t tag = host_page_tag(address);
+        const HostPage* page = &data_pages_[slot];
+        if (page->page != tag) {
+            page = &second_data_pages_[slot];
+            if (page->page != tag) {
+                return nullptr;
+            }
         }
 #ifndef NDEBUG
         invariant(host_pages_current() && (cp0_.watch_lo & 3) == 0, "stale host page");
 #endif
-        return &page;
+        return page;
     }
     // Everything besides the TLB that selects a translation: the mode and addressing bits of
     // Status (EXL, ERL, KSU, UX, SX, KX, RE) and the ASID.
@@ -772,6 +783,7 @@ class Cpu final : public InterruptSink {
             ++code_changes_;
             code_pages_.fill({});
             data_pages_.fill({});
+            clear_second_data_pages();
             device_pages_.fill({});
             host_pages_translation_generation_ = translation_generation_;
             host_pages_bus_generation_ = bus_.generation();
@@ -856,6 +868,7 @@ class Cpu final : public InterruptSink {
     bool filling_{};
     std::uint64_t code_frame_stores_{};
     std::uint64_t device_page_fills_{};
+    std::uint64_t data_page_fills_{};
     std::array<std::uint64_t, Tlb::entry_count> tlb_generations_{};
     std::uint64_t code_epoch_{};
     std::uint64_t code_changes_{};
@@ -931,7 +944,9 @@ class Cpu final : public InterruptSink {
         return (address >> 12) % host_page_count;
     }
     std::array<HostPage, host_page_count> code_pages_{};
+    // The first of two ways; the second is second_data_pages_.
     std::array<HostPage, host_page_count> data_pages_{};
+    HostPage& data_page_to_fill(std::uint64_t address, std::uint64_t tag);
     // Device pages: virtual pages whose loads (and, when a store filled the entry, stores)
     // translate to one device mapping, so an access is that device's mmio_read or
     // mmio_write at a known offset. Filled, used, and dropped under the data pages' rules (the
@@ -994,6 +1009,25 @@ class Cpu final : public InterruptSink {
     // Changes whenever address translation may have changed in a way translation_context()
     // and TLB-entry tracking do not capture: Config, reset, snapshot loads.
     std::uint64_t translation_generation_{1};
+    // The data host page cache's second way: a fill moves the first way's page here, and tier
+    // 1 swaps the two when it finds a page here (data_page_to_fill). Measured: IRIX's kernel
+    // uses a page at the top of the address space and one in xkphys in turn, two pages of one
+    // entry, and with one way every access missed (70 million in `boot`, JIT.adoc "Native
+    // memory").
+    std::array<HostPage, host_page_count> second_data_pages_{};
+    // Whether any entry of the second way may be filled: it holds aliases only, so the loops
+    // that drop entries (one per TLB write) usually skip it.
+    bool second_data_pages_used_{};
+    std::span<HostPage> second_data_pages_in_use() {
+        return second_data_pages_used_ ? std::span<HostPage>{second_data_pages_}
+                                       : std::span<HostPage>{};
+    }
+    void clear_second_data_pages() {
+        if (second_data_pages_used_) {
+            second_data_pages_.fill({});
+            second_data_pages_used_ = false;
+        }
+    }
 };
 
 } // namespace ultraviolent::mips

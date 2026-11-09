@@ -364,12 +364,24 @@ class EmitBuilder {
         AccessWidth width;
         bool sign_extend;
     };
+    // An access whose page missed the host page cache's first way: the second way's entry
+    // (Cpu::data_page), checked out of line. A hit puts its addend in `tag` and continues at
+    // `rejoin`, where the first way's addend would have been loaded; a miss goes to `miss`.
+    struct SecondWay {
+        Label check;
+        Label rejoin;
+        Label miss;
+        Reg tag;
+        Reg entry;
+        bool store;
+    };
 
     EmitBuilder(Assembler& a, GuestRegisters& registers, const Cpu::NativeLayout& layout,
                 bool movbe, std::uint64_t pc, std::vector<SideExit>& raises,
-                std::vector<SideExit>& slow, std::vector<HeldCheck>& held)
+                std::vector<SideExit>& slow, std::vector<HeldCheck>& held,
+                std::vector<SecondWay>& second_ways)
         : a_{a}, registers_{registers}, layout_{layout}, movbe_{movbe}, pc_{pc}, raises_{raises},
-          slow_{slow}, held_{held} {}
+          slow_{slow}, held_{held}, second_ways_{second_ways} {}
 
     [[nodiscard]] std::uint64_t pc() const {
         return pc_;
@@ -888,7 +900,7 @@ class EmitBuilder {
     }
 
     // The host bytes of `size` bytes at guest `address`, after the host page cache tests
-    // (Cpu::data_page): the entry for the address's page (bits 17:12 select it) holds the
+    // (Cpu::data_page): the entry for the address's page (bits 19:12 select it) holds the
     // page's address tagged with its translation context (Cpu::HostPage), which the address
     // masked to its page and misaligned bits, tagged with the current context, must equal;
     // a store compares the entry's store tag. A miss branches to `miss`, or else to the slow
@@ -913,11 +925,15 @@ class EmitBuilder {
         a_.or_(t, Mem{Reg::rbx, layout_.context_tag});
         const Label slow = a_.label();
         slow_.push_back({slow, registers_.state()});
+        const Label second = a_.label();
+        const Label rejoin = a_.label();
         a_.cmp(t, Mem{Reg::rbx,
                       base + (store ? layout_.host_page_store_page : layout_.host_page_page),
                       entry});
-        a_.jcc(Cond::ne, miss.value_or(slow));
+        a_.jcc(Cond::ne, second);
         a_.mov(t, Mem{Reg::rbx, base + layout_.host_page_addend, entry});
+        a_.bind(rejoin);
+        second_ways_.push_back({second, rejoin, miss.value_or(slow), t, entry, store});
         return {Mem{t, 0, va}, va, slow};
     }
 
@@ -1177,6 +1193,7 @@ class EmitBuilder {
     std::vector<SideExit>& raises_;
     std::vector<SideExit>& slow_;
     std::vector<HeldCheck>& held_;
+    std::vector<SecondWay>& second_ways_;
 };
 
 class X86_64NativeCode final : public NativeCode {
@@ -1626,6 +1643,27 @@ class X86_64NativeCode final : public NativeCode {
     // unchanged. Then the value, extended as the load extends, without reaching the bus.
     // Uses rax and rcx; the operation's cycle count is r15 plus its index past the counted
     // cycles (materialize).
+    // A hit swaps the two ways' entries, eight bytes at a time through rax and rcx (free here:
+    // the access's registers are temporaries from the pool), so that the first way holds the
+    // page used last (Cpu::data_page_to_fill), then takes the addend from the first way.
+    void emit_second_way(Assembler& a, const EmitBuilder::SecondWay& w) const {
+        const std::int32_t first = layout_.data_pages;
+        const std::int32_t second = layout_.second_data_pages;
+        a.bind(w.check);
+        a.cmp(w.tag, Mem{Reg::rbx,
+                         second + (w.store ? layout_.host_page_store_page : layout_.host_page_page),
+                         w.entry});
+        a.jcc(Cond::ne, w.miss);
+        for (std::int32_t q = 0; q < static_cast<std::int32_t>(layout_.host_page_size); q += 8) {
+            a.mov(Reg::rax, Mem{Reg::rbx, first + q, w.entry});
+            a.mov(Reg::rcx, Mem{Reg::rbx, second + q, w.entry});
+            a.mov(Mem{Reg::rbx, first + q, w.entry}, Reg::rcx);
+            a.mov(Mem{Reg::rbx, second + q, w.entry}, Reg::rax);
+        }
+        a.mov(w.tag, Mem{Reg::rbx, first + layout_.host_page_addend, w.entry});
+        a.jmp(w.rejoin);
+    }
+
     void emit_held_check(Assembler& a, const EmitBuilder::HeldCheck& h, std::size_t index,
                          const Boundary& b) {
         const auto entry_bits = static_cast<unsigned>(std::countr_zero(layout_.device_page_size));
@@ -1808,6 +1846,8 @@ class X86_64NativeCode final : public NativeCode {
             Boundary boundary;
         };
         std::vector<HeldPath> held_paths;
+        // Second-way tests of the host page cache, before the held checks and slow paths.
+        std::vector<EmitBuilder::SecondWay> second_ways;
         // A branch-likely that was not taken: the block ends after it, its slot nullified.
         struct Nullified {
             Label label;
@@ -1848,8 +1888,9 @@ class X86_64NativeCode final : public NativeCode {
                 std::vector<EmitBuilder::SideExit> raises;
                 std::vector<EmitBuilder::SideExit> slow;
                 std::vector<EmitBuilder::HeldCheck> held;
+                std::vector<EmitBuilder::SecondWay> ways;
                 registers.begin_operation(i);
-                EmitBuilder b{a, registers, layout_, movbe_, pc, raises, slow, held};
+                EmitBuilder b{a, registers, layout_, movbe_, pc, raises, slow, held, ways};
                 auto result = operations::translate(b, op.opcode, op.instruction);
                 if (!result && op.opcode == DecodedOpcode::cop1 && cpu_.coprocessor_usable(1)) {
                     result = b.cop1(op.instruction, cpu_.fpu_64bit_registers(),
@@ -1872,6 +1913,7 @@ class X86_64NativeCode final : public NativeCode {
                         for (auto& h : held) {
                             held_paths.push_back({h, i, boundary});
                         }
+                        second_ways.insert(second_ways.end(), ways.begin(), ways.end());
                         delay_written = delay_written || boundary.delay_slot;
                     }
                     ++native_count;
@@ -1985,6 +2027,9 @@ class X86_64NativeCode final : public NativeCode {
                                 std::uint64_t{r.exit.coprocessor} << 8);
             call_helper(a, helper_raise);
             a.jmp_to(exit(BlockExit::exception));
+        }
+        for (const EmitBuilder::SecondWay& w : second_ways) {
+            emit_second_way(a, w);
         }
         for (const HeldPath& h : held_paths) {
             emit_held_check(a, h.check, h.index, h.boundary);
