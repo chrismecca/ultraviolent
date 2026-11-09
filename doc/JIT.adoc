@@ -534,7 +534,13 @@ as a code store); a fourth, a page filled for a load the cache answered right af
 read, survived until `..._cache_lines` gained that case. Release: `prom` 12.44 to 11.36 s,
 `boot` 33.25 to 32.30 s. PGO, best of 3, against the commit before: `prom` 1.15x, `boot`
 1.04x, `cpu` and `fs` 0.98x (noise between PGO builds); every digest equal, with one, two,
-and four CPUs. The 67 million stores still take the slow path.
+and four CPUs. The 67 million stores still take the slow path. A snapshot load first
+decoded the 128 MB of saved entries into a vector and then showed them in the window, which
+cost `cpu` and `fs` 0.98x (perf: `show_entries` and page clearing); each entry's first
+window address is its offset in the saved state when every bank but the last is full, as the
+machine builds them, so the load now reads into the window and shows each entry in place
+(`ip27.directory.snapshot_two_small_banks` covers the other layouts): `cpu` 1.02x, `fs` 1.03x
+against the commit before.
 
 == FPU
 

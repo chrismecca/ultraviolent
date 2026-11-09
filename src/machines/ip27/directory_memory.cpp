@@ -4,6 +4,7 @@
 #include <ultraviolent/core/invariant.hpp>
 
 #include <bit>
+#include <cstring>
 #include <span>
 
 // Back-door layout from the IRIX-derived LINUX asm/sn/addrs.h (BDDIR_ENTRY_LO/HI,
@@ -33,6 +34,8 @@ DirectoryMemory::DirectoryMemory(Tracer& tracer,
                       (std::has_single_bit(bytes) && bytes >= minimum_bank && bytes <= bank_window),
                   "bank size must be a power of two from 8 MB to 512 MB");
         bank_first_[bank] = entry_count_;
+        in_window_order_ =
+            in_window_order_ && (bytes == 0 || entry_count_ * entry_bytes == bank * bank_slice);
         entry_count_ += bytes / 4 / entry_bytes;
     }
     // hypothesis: directory DRAM contents at power-on are undefined; zero keeps runs
@@ -145,14 +148,35 @@ void DirectoryMemory::save_state(StateImage& image) const {
 
 void DirectoryMemory::load_state(const StateImage& image) {
     // A snapshot without directory state leaves it at its power-on contents.
-    std::vector<std::uint64_t> loaded(entry_count_);
-    if (!image.get_sparse("directory.entries", std::as_writable_bytes(std::span{loaded}))) {
+    if (!in_window_order_) {
+        std::vector<std::uint64_t> loaded(entry_count_);
+        if (!image.get_sparse("directory.entries", std::as_writable_bytes(std::span{loaded}))) {
+            return;
+        }
+        if (!entries_.empty()) {
+            entries_ = loaded;
+        }
+        show_entries(loaded);
         return;
     }
-    if (!entries_.empty()) {
-        entries_ = loaded;
+    // Each saved entry is where the window has its first alias: read there, in host order,
+    // then shown in place. Measured: a copy first doubled the host memory a snapshot load
+    // touched (128 MB of entries for a 512 MB node).
+    if (!image.get_sparse("directory.entries", window_.bytes().first(entry_count_ * entry_bytes))) {
+        return;
     }
-    show_entries(loaded);
+    const std::uint64_t mask = entry_mask();
+    for (std::size_t bank = 0; bank < memory_banks; ++bank) {
+        for (std::uint64_t i = 0; i < bank_bytes_[bank] / 4 / entry_bytes; ++i) {
+            std::uint64_t value = 0;
+            std::memcpy(&value, window_.bytes().data() + bank * bank_slice + i * entry_bytes,
+                        entry_bytes);
+            if (!entries_.empty()) {
+                entries_[bank_first_[bank] + i] = value;
+            }
+            show(bank, i, value & mask);
+        }
+    }
 }
 
 } // namespace ultraviolent::ip27

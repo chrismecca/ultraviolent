@@ -2354,6 +2354,14 @@ Disproven: that discards cause most retranslation (a 256 MB region, one discard:
   pc under another ASID).
 Unknowns: why a region takes about 17 us to translate.
 Best checkpoint: unchanged (local/release-check-011c).
-Next step: keep translations across tier 0 cache evictions (a translation is valid while
-  its block's validity inputs are); then the slow paths left in `boot`.
+Next step: the slow paths left in `boot`, by measured cost.
+  Also the same day: directory snapshot loads read in place into the window (the copy first
+  cost `cpu` and `fs` 2-3%): `cpu` 1.02x, `fs` 1.03x, every digest equal.
+  Measured and not kept, the same day: keeping each translation by its first block's pc,
+  context, and validity inputs, found again when the block is built anew. A hash table
+  checked at every install attempt: release `boot` 32.55 s against 31.22 s (the lookups
+  cost more than the 22,000 translations saved). A direct-mapped table checked once per
+  build: 31.50 s (translating 1.30 s against 1.43 s, but 1.5 million dispatch installs
+  against 0.36 million). Translations repeat mostly because their TLB entry's generation
+  changed (an entry refilled, often with the same mapping), which no such table can skip.
 ----

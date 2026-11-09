@@ -71,6 +71,9 @@ class DirectoryMemory final : public MmioTarget {
     // First entry of each bank in entries().
     std::array<std::size_t, memory_banks> bank_first_{};
     std::size_t entry_count_{};
+    // Whether each bank's entries start where the window has its first alias, as when every
+    // bank but the last is full (the machine's memory layout): saved state then loads in place.
+    bool in_window_order_{true};
     DirectoryDimms dimms_;
     bool premium_mode_{true};
     MemoryBlock window_{window_size};

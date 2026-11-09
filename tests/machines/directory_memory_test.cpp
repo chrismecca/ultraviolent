@@ -171,4 +171,24 @@ const test::Registration snapshot{"ip27.directory.snapshot", [](test::Context& t
                                       t.check_equal(b.read(12 * mb), std::uint64_t{0x5678});
                                   }};
 
+const test::Registration snapshot_banks{
+    "ip27.directory.snapshot_two_small_banks", [](test::Context& t) {
+        // Bank 1's entries follow bank 0's in the saved state, but its window starts a bank
+        // slice in: the load is not in place.
+        const std::array<std::uint64_t, 8> banks{64 * mb, 64 * mb, 0, 0, 0, 0, 0, 0};
+        VirtualClock clock;
+        Tracer tracer{clock};
+        DirectoryMemory a{tracer, banks, DirectoryDimms::standard};
+        t.check(a.mmio_write(bank_slice + 0x18, AccessWidth::bits64, 0x4321).has_value());
+        StateImage image;
+        a.save_state(image);
+        DirectoryMemory b{tracer, banks, DirectoryDimms::standard};
+        b.load_state(image);
+        t.check_equal(b.mmio_read(bank_slice + 0x18, AccessWidth::bits64).value_or(0),
+                      std::uint64_t{0x4321});
+        t.check_equal(b.mmio_read(bank_slice + 16 * mb + 0x18, AccessWidth::bits64).value_or(0),
+                      std::uint64_t{0x4321}); // its alias
+        t.check_equal(b.mmio_read(0x18, AccessWidth::bits64).value_or(1), std::uint64_t{0});
+    }};
+
 } // namespace
