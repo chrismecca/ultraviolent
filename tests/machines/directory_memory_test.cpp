@@ -6,6 +6,7 @@
 #include <ultraviolent/machines/ip27/directory_memory.hpp>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace {
@@ -103,7 +104,59 @@ const test::Registration word_halves{
         // An empty bank reads zero a word at a time too.
         t.check_equal(b.directory.mmio_read(bank_slice + 4, AccessWidth::bits32).value_or(1),
                       std::uint64_t{0});
-        t.check(!b.directory.mmio_read(0x0, AccessWidth::bits16).has_value());
+        // Narrower reads are the entry's bytes, as memory reads them.
+        t.check_equal(b.directory.mmio_read(0x2, AccessWidth::bits16).value_or(1),
+                      std::uint64_t{0x1234});
+        t.check(!b.directory.mmio_write(0x0, AccessWidth::bits16, 0).has_value());
+    }};
+
+// The window holds each entry as read, big-endian, at every address that reaches it: the
+// machine maps it as memory, so loads never reach the directory.
+std::uint64_t window_entry(DirectoryMemory& directory, std::uint64_t offset) {
+    std::uint64_t value = 0;
+    for (std::size_t i = 0; i < 8; ++i) {
+        value = value << 8 | std::to_integer<std::uint64_t>(directory.window().bytes()[offset + i]);
+    }
+    return value;
+}
+
+const test::Registration window{
+    "ip27.directory.window_holds_reads", [](test::Context& t) {
+        Bench b{DirectoryDimms::premium, 256 * mb};
+        t.check_equal(b.directory.window().size(), std::size_t{DirectoryMemory::window_size});
+        t.check(b.write(64 * mb + 0x18, force_ecc | 0x1234'5678'9abc'def0));
+        // Both aliases in the 256 MB bank's 128 MB slice.
+        t.check_equal(window_entry(b.directory, 0x18), std::uint64_t{0x5678'9abc'def0});
+        t.check_equal(window_entry(b.directory, 64 * mb + 0x18), std::uint64_t{0x5678'9abc'def0});
+        // Standard mode reads 16 bits; the window follows, and back.
+        b.directory.set_premium_mode(false);
+        t.check_equal(window_entry(b.directory, 64 * mb + 0x18), std::uint64_t{0xdef0});
+        t.check_equal(window_entry(b.directory, 0x18), std::uint64_t{0xdef0});
+        b.directory.set_premium_mode(true);
+        t.check_equal(window_entry(b.directory, 0x18), std::uint64_t{0x5678'9abc'def0});
+        // An empty bank's window stays zero.
+        t.check(b.write(bank_slice + 0x18, 0x5555));
+        t.check_equal(window_entry(b.directory, bank_slice + 0x18), std::uint64_t{0});
+        // A loaded snapshot is shown, including entries it makes zero.
+        StateImage image;
+        Bench c{DirectoryDimms::premium, 256 * mb};
+        t.check(c.write(0x20, 0x77));
+        c.directory.save_state(image);
+        b.directory.load_state(image);
+        t.check_equal(window_entry(b.directory, 64 * mb + 0x20), std::uint64_t{0x77});
+        t.check_equal(window_entry(b.directory, 0x18), std::uint64_t{0});
+    }};
+
+// A write to a window frame that holds decoded code reports it (MemoryBlock::note_write), at
+// every alias it changes.
+const test::Registration window_code{
+    "ip27.directory.window_writes_note_code", [](test::Context& t) {
+        Bench b{DirectoryDimms::standard, 256 * mb};
+        b.directory.window().mark_code(64 * mb);
+        const auto* generation = b.directory.window().code_generation(64 * mb);
+        t.check(b.write(0x8, 0x1));
+        t.check_equal(generation->load(), std::uint64_t{1});
+        t.check(!b.directory.window().holds_code(64 * mb));
     }};
 
 const test::Registration snapshot{"ip27.directory.snapshot", [](test::Context& t) {

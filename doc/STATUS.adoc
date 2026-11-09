@@ -641,11 +641,17 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   the host page cache, most on two aliases of one page.
   The host page cache has two ways (JIT.adoc "Native memory"), swapped by generated code on
   a second-way hit: `boot` 1.08x (2.70 times real time).
-  Next, by measured share: the directory back door (50 million device reads in `boot`, every
-  doubleword read three times: what reads it, and whether the window can be memory); the
-  tag misses left (6.5
-  million: other pcs in the entry, user code under new ASIDs, mode changes); the FPU operations still in helpers
-  (other conversions, SQRT, ABS, NEG, conditional moves, COP1X, conditions other than 0).
+  The directory back door is read as memory (JIT.adoc "Device time"): the PROM's directory
+  test reads every doubleword three times and writes it four times, 117 million accesses
+  that were 73% of tier 1's slow paths in `prom`; loads are now memory loads, and stores
+  take a device page for stores only: `prom` 1.15x, `boot` 1.04x (2.81 times real time).
+  Next, by measured share: the slow paths left in `boot` (217 million before this, by a
+  count at `operation_helper`: the directory's 67 million stores; 37 million other loads and
+  stores, 31 million of them Hub registers; MTC0 13 million, PREF 8.4 million, MFC0 6.2
+  million, LL/SC/LLD/SCD 12.7 million, SYNC 3.6 million, MOVZ/MOVN 1.8 million); the tag
+  misses left (6.5 million: other pcs in the entry, user code under new ASIDs, mode
+  changes); the FPU operations still in helpers (other conversions, SQRT, ABS, NEG,
+  conditional moves, COP1X, conditions other than 0).
 
 . **Blocked on evidence: "Error in ust_change: Addressed slave not responding"** (twice,
   two-node boots only; never on slate, OBS-SLATE-0003). Already observed (IP27.adoc "System
@@ -2295,4 +2301,35 @@ Disproven: that folding the segment into the entry is free (three instructions p
 Unknowns: what reads the directory back door three times over in `boot`.
 Best checkpoint: unchanged (local/release-check-011c).
 Next step: the directory back door's reads (who, and whether the window can be memory).
+----
+
+----
+Date: 2026-11-09
+Milestone: Usable VM: tier-1 speed, the directory back door
+Hypothesis: the directory back door's 50 million reads in `boot` are guest memory traffic
+  that a memory mapping can serve, with the device keeping its stores.
+Evidence: a throwaway count at DirectoryMemory and at tier 1's operation_helper: the PROM's
+  directory test (two loops, 0x1fc10074 and 0x1fc10108) writes each of the 16.8 million
+  back-door doublewords of 512 MB four times and reads each three times, in `prom` and in
+  `boot`; 117 million of `prom`'s 161 million slow paths, about 21 ns each.
+Changed: DirectoryMemory::window() (each entry as read, at every alias; mapped read-only
+  with the directory taking writes; premium DIMMs keep their 48 bits in entries_);
+  AddressSpace::MmioRange::block and AddressSpace::device_write (a write target's writes
+  to code frames count as code writes); Cpu::DevicePage::block and loads (a page for stores
+  only to such memory; none for a cached store while the data cache holds lines, and pages
+  dropped when lines appear).
+Tests: address_space.write_target_code_writes, mips.device_pages_store_to_write_target,
+  mips.device_pages_store_to_write_target_cache_lines, ip27.directory.window_holds_reads,
+  ip27.directory.window_writes_note_code, ip27.back_door_directory (extended),
+  ip27.directory.word_accesses_are_halves (narrower reads now read bytes); mutation checks
+  as JIT.adoc says; dev and asan green.
+Newly proven: `prom` 1.15x, `boot` 1.04x PGO, `cpu` and `fs` unchanged; every digest equal
+  with one, two, and four CPUs.
+Disproven: that the window could be memory for reads alone (stores through the full path
+  cost more than the reads saved: `prom` 0.92x release), and that IRIX reads the directory
+  (only the PROM does in `boot`).
+Unknowns: none new.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: the slow paths left in `boot` (the directory's 67 million stores, Hub registers,
+  MTC0, PREF, MFC0, LL/SC), by measured cost.
 ----

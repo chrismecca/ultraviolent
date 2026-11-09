@@ -503,9 +503,38 @@ target 1.8% of host time, 4.5%); PGO, best of 3, against the commit before: `pro
 `fs` 0.99x (noise between PGO builds), every digest equal. The device path left in `boot` is
 other registers: a throwaway count of `load_slow`'s 172 million calls gave 88 million
 device reads (50 million of them every doubleword of the directory back door read three
-times, by the PROM or IRIX, not yet known;
+times, by the PROM's directory test, below;
 31 million of 160 Hub registers, 7 million an I/O widget) and 84 million memory loads
 that missed the host page cache, 70 million of them on two pages ("Native memory").
+
+**The directory back door as memory (2026-11-09).** A throwaway count at the directory and at
+`operation_helper` (the slow path of every load and store tier 1 does not complete natively):
+in `prom` and in `boot` the PROM's directory test writes each of the 16.8 million doublewords
+of the 512 MB node's back door four times and reads each three times, from two loops in the
+PROM (`0x1fc10074` and `0x1fc10108`, uncached HSPEC). Those 117 million accesses were 73% of
+`prom`'s 161 million slow paths (`boot`: 217 million), at about 21 ns each, near a quarter of
+`prom`'s host time. The directory now keeps a window block that holds each entry as a read
+returns it at every address that reaches it (IP27.adoc "Directory memory"), mapped read-only
+with the directory as its write target, so loads are memory loads through the host page
+cache. Stores still need the device (an entry keeps only its masked bits), and through the
+full path (translation, `Cpu::write`, bus decode, `remember_page`) they cost more than the
+reads saved (`prom` 0.92x, release): so `AddressSpace::mmio_range` now also returns a write
+target with its block (`MmioRange::block`), and the CPU keeps a device page for stores only
+(`DevicePage::loads` false), whose writes `AddressSpace::device_write` makes as the bus
+would, counting a write that unmarked one of the block's code frames as a code write (the
+directory notes its writes there, `MemoryBlock::note_write`). While the primary data cache
+holds lines, no such page is filled for a cached store and pages are dropped when lines
+appear (a store that hits a line stays in the cache). Tests
+`address_space.write_target_code_writes`, `mips.device_pages_store_to_write_target`,
+`mips.device_pages_store_to_write_target_cache_lines`, `ip27.directory.window_holds_reads`,
+`ip27.directory.window_writes_note_code`, and the back door through the CPU
+(`ip27.back_door_directory`). Mutation checks, 17: each fails a test except three that change only
+cost (the window mapped as MMIO, unchanged entries written, a page filled after a store classed
+as a code store); a fourth, a page filled for a load the cache answered right after a device
+read, survived until `..._cache_lines` gained that case. Release: `prom` 12.44 to 11.36 s,
+`boot` 33.25 to 32.30 s. PGO, best of 3, against the commit before: `prom` 1.15x, `boot`
+1.04x, `cpu` and `fs` 0.98x (noise between PGO builds); every digest equal, with one, two,
+and four CPUs. The 67 million stores still take the slow path.
 
 == FPU
 

@@ -602,7 +602,7 @@ void Cpu::device_write(const DevicePage& page, std::uint64_t address, AccessWidt
     last_bus_access_ = BusAccess::device;
     const std::uint64_t offset = address & page_offset_mask;
     const std::uint64_t code_writes = bus_.code_writes();
-    auto result = page.target->mmio_write(page.offset + offset, width, value);
+    auto result = bus_.device_write(*page.target, page.block, page.offset + offset, width, value);
     if (bus_.code_writes() != code_writes) {
         last_bus_access_ = BusAccess::code_store;
         ++code_frame_stores_;
@@ -621,14 +621,18 @@ void Cpu::device_write(const DevicePage& page, std::uint64_t address, AccessWidt
 // device_write exact (no watchpoint armed, references in the bus byte order).
 void Cpu::remember_device_page(std::uint64_t address, const Translation& translation,
                                AccessKind kind) {
-    if (last_bus_access_ != BusAccess::device || (cp0_.watch_lo & 3) != 0 ||
-        big_endian() != (bus_.byte_order() == ByteOrder::big)) {
+    // A device access, or a store that may have been to memory whose writes a device takes.
+    const bool device = last_bus_access_ == BusAccess::device;
+    if ((!device && (kind != AccessKind::store || last_bus_access_ == BusAccess::code_store)) ||
+        (cp0_.watch_lo & 3) != 0 || big_endian() != (bus_.byte_order() == ByteOrder::big)) {
         return;
     }
     const std::uint64_t page = address & ~page_offset_mask;
     const PhysicalAddress frame{translation.address.value & ~page_offset_mask};
     const auto range = bus_.mmio_range(frame, page_offset_mask + 1, requester_);
-    if (!range) {
+    // While the primary data cache holds lines, cached stores may go there instead.
+    if (!range || device != (range->block == nullptr) ||
+        (!device && !translation.uncached && caches_.holds_data_lines())) {
         return;
     }
     ++device_page_fills_;
@@ -640,7 +644,9 @@ void Cpu::remember_device_page(std::uint64_t address, const Translation& transla
              .target = range->target,
              .offset = range->offset,
              .physical = frame.value,
+             .block = range->block,
              .tlb_index = translation.tlb_index,
+             .loads = device,
              .stores = stores};
 }
 
@@ -1371,6 +1377,7 @@ std::expected<void, Exception> Cpu::cache(unsigned operation, std::uint64_t addr
         // Cached data references must now consult the primary data cache, not host pages.
         data_pages_.fill({});
         clear_second_data_pages();
+        device_pages_.fill({});
     }
     cp0_.tag_lo = registers.tag_lo;
     cp0_.tag_hi = registers.tag_hi;

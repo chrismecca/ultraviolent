@@ -487,6 +487,11 @@ const test::Registration back_door{
                     .has_value());
         t.check_equal(machine.cpu().load(0x9000'0000'c084'02a0, AccessWidth::bits64).value_or(0),
                       std::uint64_t{0x5555});
+        // Read as memory (the host page cache now holds the page): a later write is seen.
+        t.check(
+            machine.cpu().store(0x9000'0000'c084'02a0, AccessWidth::bits64, 0x1'aaaa).has_value());
+        t.check_equal(machine.cpu().load(0x9000'0000'c084'02a0, AccessWidth::bits64).value_or(0),
+                      std::uint64_t{0xaaaa});
     }};
 
 const test::Registration controller{

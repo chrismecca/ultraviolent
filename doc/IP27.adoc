@@ -171,7 +171,14 @@ one per 128-byte line. Bank b's entries start at b × 128 MB.
 * `hypothesis`: an empty bank's directory reads zero and ignores writes.
 * `hypothesis`: ECC fields hold what is written; hardware ECC generation and checking are
   not modeled. The ECC back door (HSPEC + 2 GB) is not modeled.
-* Only doubleword accesses are modeled.
+* The window is read as memory: `DirectoryMemory::window()` holds every entry as a read
+  returns it, big-endian, at each address that reaches it, and the machine maps it
+  read-only with the directory taking the writes (as the flash, "Boot PROM"). A word read is
+  its half of the entry (`observed`: the IRIX kernel reads protection entries a word at a
+  time); `hypothesis`: narrower reads are the entry's bytes likewise. Doubleword and word
+  writes are modeled; narrower writes are lost. Measured: the PROM's directory test writes
+  every doubleword four times and reads it three times (117 million accesses in `prom`),
+  73% of the accesses that took tier 1's slow path.
 
 `observed` (flash `0x1fc28290`, `0x1fc28460`): MDIRCONFIG sizes each bank through the
 directory. It writes a pattern to the bank's first protection entry and a different value to

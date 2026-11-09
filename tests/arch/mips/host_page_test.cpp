@@ -1,6 +1,9 @@
 #include "arch/mips/system.hpp"
 #include "support/test.hpp"
 
+#include <ultraviolent/core/byte_order.hpp>
+#include <ultraviolent/core/memory_block.hpp>
+
 #include <atomic>
 #include <cstdint>
 #include <expected>
@@ -231,6 +234,97 @@ const test::Registration device_offsets{
         s.run_program({ld(t0, 0xff8, a0)});
         t.check_equal(s.exception_code(), code_of(ExceptionCode::bus_error_data));
         t.check_equal(s.cpu.dmfc0(cp0::epc), testing::kseg0(System::code));
+    }};
+
+// Read-only memory whose writes a device takes (AddressSpace::map_memory's write target):
+// the device writes what it shows into the memory, as the IP27 directory does.
+class Shadow final : public MmioTarget {
+  public:
+    explicit Shadow(MemoryBlock& block) : block_{block} {}
+    std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t /*offset*/,
+                                                        AccessWidth /*width*/) override {
+        ++reads;
+        return 0;
+    }
+    std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth width,
+                                                std::uint64_t value) override {
+        ++writes;
+        block_.note_write(offset, byte_count(width));
+        store_unsigned(block_.bytes().subspan(offset, byte_count(width)), value & 0xffff,
+                       ByteOrder::big);
+        return {};
+    }
+    std::uint64_t reads{};
+    std::uint64_t writes{};
+
+  private:
+    MemoryBlock& block_;
+};
+
+const test::Registration device_write_target{
+    "mips.device_pages_store_to_write_target", [](test::Context& t) {
+        // Stores take a device page for stores only; loads still read the memory. A store
+        // that changes a frame holding code counts as a code write either way.
+        System s;
+        MemoryBlock rom{0x2000};
+        Shadow shadow{rom};
+        t.check(s.bus
+                    .map_memory({PhysicalAddress{device_a}, 0x2000}, rom, 0,
+                                MemoryAccess::read_only, &shadow)
+                    .has_value());
+        s.set(a0, kseg0(device_a));
+        s.set(t0, 0x1'1234);
+        s.run_program({sd(t0, 0x10, a0), ld(t1, 0x10, a0)});
+        const std::uint64_t fills = s.cpu.device_page_fills();
+        t.check_equal(fills, std::uint64_t{1});
+        rom.mark_code(0x0);
+        const std::uint64_t code_writes = s.bus.code_writes();
+        s.set(t0, 0x5678);
+        s.run_program({sd(t0, 0x18, a0), ld(t2, 0x18, a0), ld(t3, 0x10, a0)});
+        t.check_equal(s.cpu.device_page_fills(), fills); // the page took the store
+        t.check_equal(s.bus.code_writes(), code_writes + 1);
+        t.check(!rom.holds_code(0x0));
+        t.check_equal(s.gpr(t1), std::uint64_t{0x1234});
+        t.check_equal(s.gpr(t2), std::uint64_t{0x5678});
+        t.check_equal(s.gpr(t3), std::uint64_t{0x1234});
+        t.check_equal(shadow.writes, std::uint64_t{2});
+        t.check_equal(shadow.reads, std::uint64_t{0});
+    }};
+
+const test::Registration device_write_target_cache_lines{
+    "mips.device_pages_store_to_write_target_cache_lines", [](test::Context& t) {
+        // While the primary data cache holds lines, cached stores that hit one go to it
+        // (Cpu::write), so a page for stores filled before must go, and none is filled after a
+        // store the cache took (the access before it reached the bus: an uncached load).
+        System s;
+        MemoryBlock rom{0x2000};
+        Shadow shadow{rom};
+        t.check(s.bus
+                    .map_memory({PhysicalAddress{device_a}, 0x2000}, rom, 0,
+                                MemoryAccess::read_only, &shadow)
+                    .has_value());
+        s.set(a0, kseg0(device_a));
+        s.set(a2, testing::kseg1(System::data));
+        s.run_program({sw(t0, 0, a0)});
+        t.check_equal(shadow.writes, std::uint64_t{1});
+        // Way 0 of a0's set: tag PA 39:12, DirtyExclusive (as
+        // mips.smp.cache_lines_installed_by_software_are_private).
+        s.cpu.mtc0(cp0::tag_lo, (device_a >> 12) << 8 | 3u << 6);
+        s.cpu.mtc0(cp0::tag_hi, 1u << 29);
+        s.set(t1, 0x77);
+        s.run_program(
+            {cache(0x9, 0, a0), sw(t1, 0, a0), lw(t3, 0, a2), sw(t1, 8, a0), sw(t1, 12, a0)});
+        t.check_equal(shadow.writes, std::uint64_t{1});
+        // A load the cache answers, after a device read reached the bus: no device page for
+        // this memory either (loads are memory's), so the next load still reads the line.
+        Echo echo{0x1000'0000};
+        t.check(s.bus.map_mmio({PhysicalAddress{device_b}, 0x1000}, echo).has_value());
+        s.set(a3, kseg0(device_b)); // a miss in the line's set: its other, empty way goes
+        s.run_program({lw(t4, 0, a3), lw(t5, 0, a0), lw(t6, 8, a0)});
+        t.check_equal(s.gpr(t4), std::uint64_t{0x1000'0000});
+        t.check_equal(shadow.reads, std::uint64_t{0});
+        t.check_equal(s.gpr(t5), std::uint64_t{0x77});
+        t.check_equal(s.gpr(t6), std::uint64_t{0x77});
     }};
 
 const test::Registration device_neighbors{

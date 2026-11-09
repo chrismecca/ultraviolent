@@ -280,6 +280,44 @@ const test::Registration shared_code_writes{
         t.check_equal(second.code_writes(), std::uint64_t{1}); // not a code frame
     }};
 
+// A write target that changes its read-only block notes the write there; a write that
+// reaches a code frame that way counts as a code write, as a store to RAM would.
+class BlockWriter final : public MmioTarget {
+  public:
+    explicit BlockWriter(MemoryBlock& block) : block_{block} {}
+    std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t /*offset*/,
+                                                        AccessWidth /*width*/) override {
+        return 0;
+    }
+    std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth /*width*/,
+                                                std::uint64_t value) override {
+        // Somewhere else in the block, as a device's aliases may be.
+        const std::uint64_t at = (offset + 0x1000) % block_.size();
+        block_.note_write(at, 1);
+        block_.bytes()[at] = static_cast<std::byte>(value);
+        return {};
+    }
+
+  private:
+    MemoryBlock& block_;
+};
+
+const test::Registration write_target_code{
+    "address_space.write_target_code_writes", [](test::Context& t) {
+        MemoryBlock rom{0x2000};
+        BlockWriter device{rom};
+        AddressSpace space{ByteOrder::big};
+        t.check(space.map_memory({rom_base, 0x2000}, rom, 0, MemoryAccess::read_only, &device)
+                    .has_value());
+        rom.mark_code(0x1000);
+        t.check(space.write(rom_base + 0x8, AccessWidth::bits8, 0x5a).has_value());
+        t.check_equal(space.code_writes(), std::uint64_t{1});
+        t.check_equal(space.read(rom_base + 0x1008, AccessWidth::bits8).value_or(0),
+                      std::uint64_t{0x5a});
+        t.check(space.write(rom_base + 0x1008, AccessWidth::bits8, 0x5b).has_value());
+        t.check_equal(space.code_writes(), std::uint64_t{1}); // frame 0 holds no code
+    }};
+
 // Changes made in one update become visible together: one generation step at the end.
 const test::Registration updates{
     "address_space.updates_publish_together", [](test::Context& t) {

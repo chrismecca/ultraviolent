@@ -129,7 +129,8 @@ class AddressSpace {
 
     // Maps `range` onto `block` starting at `block_offset`. The block must outlive the space.
     // For a read-only mapping, `write_target` (if any) receives the writes, with offsets from
-    // the range's base: memory a device reads fast but controls writes to, such as flash.
+    // the range's base (device_write): memory a device reads fast but controls writes to,
+    // such as flash.
     std::expected<void, MapError> map_memory(PhysicalRange range, MemoryBlock& block,
                                              std::uint64_t block_offset, MemoryAccess access,
                                              MmioTarget* write_target = nullptr);
@@ -187,10 +188,13 @@ class AddressSpace {
     // The device behind every address of [address, address + size), and the offset of
     // `address` in its mapping, when one MMIO mapping covers the whole range: an access there
     // is exactly target->mmio_read or mmio_write at that offset (for caching device accesses
-    // by page; valid while generation() is unchanged).
+    // by page; valid while generation() is unchanged). For read-only memory with a write
+    // target (map_memory), `block` is the memory and the range is the target's for writes
+    // only, each exactly device_write(target, block, offset, ...).
     struct MmioRange {
         MmioTarget* target;
         std::uint64_t offset;
+        MemoryBlock* block{};
     };
     [[nodiscard]] std::optional<MmioRange> mmio_range(PhysicalAddress address, std::uint64_t size,
                                                      unsigned requester = 0) const;
@@ -211,6 +215,22 @@ class AddressSpace {
     }
     std::expected<void, AccessFault> write(PhysicalAddress address, AccessWidth width,
                                            std::uint64_t value, unsigned requester = 0);
+    // A write to a device at `offset` as write() makes it. `block` is the read-only memory
+    // whose writes the target takes (MmioRange::block), or null: a target that changes it
+    // notes that there (MemoryBlock::note_write), and one that unmarked a frame wrote code.
+    std::expected<void, AccessFault> device_write(MmioTarget& target, MemoryBlock* block,
+                                                  std::uint64_t offset, AccessWidth width,
+                                                  std::uint64_t value) {
+        if (block == nullptr) {
+            return target.mmio_write(offset, width, value);
+        }
+        const std::size_t marked = block->marked_frames();
+        auto result = target.mmio_write(offset, width, value);
+        if (block->marked_frames() != marked) {
+            code_writes_->fetch_add(1, std::memory_order_relaxed);
+        }
+        return result;
+    }
 
   private:
     struct MemoryMapping {

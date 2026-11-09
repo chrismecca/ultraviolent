@@ -520,11 +520,11 @@ void Ip27Machine::Node::map_resources(Node& node, std::uint64_t base) {
                           node.synchronized_flash_commands),
              "boot PROM command window");
     // HSPEC back door: directory and protection memory at 3 GB (IP27.adoc "Memory and
-    // directory").
-    must_map(bus.map_mmio({PhysicalAddress{uncached_window(hspec_attribute) + base +
-                                           DirectoryMemory::window_offset},
-                           DirectoryMemory::window_size},
-                          node.directory),
+    // directory"), read as memory, its writes through the directory.
+    must_map(bus.map_memory({PhysicalAddress{uncached_window(hspec_attribute) + base +
+                                             DirectoryMemory::window_offset},
+                             DirectoryMemory::window_size},
+                            node.directory.window(), 0, MemoryAccess::read_only, &node.directory),
              "back-door directory window");
     // IO: the node's Hub registers at the remote-Hub alias (widget 1 window + 0x800000, LINUX
     // REMOTE_HUB_ADDR; observed: the PROM uses it for its own NASID 0). A remote request comes

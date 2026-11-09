@@ -102,7 +102,7 @@ std::expected<void, AccessFault> AddressSpace::write(PhysicalAddress address, Ac
     if (const auto* memory = std::get_if<MemoryMapping>(&mapping->target)) {
         if (memory->access == MemoryAccess::read_only) {
             if (memory->write_target != nullptr) {
-                return memory->write_target->mmio_write(offset, width, value);
+                return device_write(*memory->write_target, memory->block, offset, width, value);
             }
             return std::unexpected(AccessFault::read_only);
         }
@@ -163,11 +163,14 @@ AddressSpace::mmio_range(PhysicalAddress address, std::uint64_t size, unsigned r
     if (mapping == nullptr || size == 0 || !mapping->range.contains(address + (size - 1))) {
         return std::nullopt;
     }
-    const auto* ports = std::get_if<Ports>(&mapping->target);
-    if (ports == nullptr) {
-        return std::nullopt;
+    const std::uint64_t offset = address - mapping->range.base;
+    if (const auto* memory = std::get_if<MemoryMapping>(&mapping->target)) {
+        if (memory->access != MemoryAccess::read_only || memory->write_target == nullptr) {
+            return std::nullopt;
+        }
+        return MmioRange{memory->write_target, offset, memory->block};
     }
-    return MmioRange{(*ports)[requester], address - mapping->range.base};
+    return MmioRange{std::get<Ports>(mapping->target)[requester], offset};
 }
 
 void AddressSpace::clear() {

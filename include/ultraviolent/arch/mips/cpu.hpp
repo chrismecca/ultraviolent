@@ -953,6 +953,9 @@ class Cpu final : public InterruptSink {
     // translation context, TLB entries, generations, no armed watchpoint, the bus byte order);
     // transparent. Measured: firmware delay loops poll Hub and UART registers hundreds of
     // millions of times in `boot`, and translation and bus decode were most of each access.
+    // Read-only memory whose writes a device takes (AddressSpace::MmioRange::block) has a
+    // device page for stores only; its loads are memory's. Measured: the PROM's directory
+    // test stores to every doubleword of the directory back door four times.
     // 128 bytes (aligned to 64), so tier 1 selects an entry with a shift.
     struct alignas(64) DevicePage {
         std::uint64_t page{~std::uint64_t{0}};
@@ -961,7 +964,10 @@ class Cpu final : public InterruptSink {
         // The page's offset in the device's mapping, and its bus address (fault reports).
         std::uint64_t offset{};
         std::uint64_t physical{};
+        // The memory whose writes the device takes, or null.
+        MemoryBlock* block{};
         std::int8_t tlb_index{-1};
+        bool loads{};
         bool stores{};
         // The last read the device said holds (MmioTarget::mmio_read_held): its offset in the
         // page and width (`offset << 4 | bytes`, 0 for none), value, the cycle count it holds
@@ -989,7 +995,7 @@ class Cpu final : public InterruptSink {
     [[nodiscard]] DevicePage* device_page(std::uint64_t address, bool store) {
         DevicePage& page = device_pages_[device_page_slot(address)];
         if (page.page != (address & ~page_offset_mask) || page.context != translation_context() ||
-            (store && !page.stores)) {
+            !(store ? page.stores : page.loads)) {
             return nullptr;
         }
         return &page;

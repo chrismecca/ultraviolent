@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ultraviolent/core/address_space.hpp>
+#include <ultraviolent/core/memory_block.hpp>
 #include <ultraviolent/core/state_image.hpp>
 #include <ultraviolent/core/trace.hpp>
 
@@ -25,7 +26,9 @@ enum class DirectoryDimms : std::uint8_t { standard, premium };
 // (IP27.adoc "Directory memory"). Each 4 KB page of memory has 1 KB here: 64 protection
 // doublewords, then 32 two-doubleword directory entries.
 //
-// Doubleword and word accesses are modeled. The ECC back door (HSPEC + 2 GB) is not.
+// Reads are of window(), which holds every entry as a read returns it at each address that
+// reaches it; the machine maps it read-only with this target taking the writes. Doubleword
+// and word writes are modeled. The ECC back door (HSPEC + 2 GB) is not.
 class DirectoryMemory final : public MmioTarget {
   public:
     static constexpr std::uint64_t window_offset = 0xc000'0000;
@@ -38,8 +41,13 @@ class DirectoryMemory final : public MmioTarget {
 
     // Whether the MD addresses the directory as premium (MD_MEMORY_CONFIG DIR_PREMIUM). The
     // Hub sets it; entries are 48 bits wide only with premium DIMMs in premium mode.
-    void set_premium_mode(bool premium) {
-        premium_mode_ = premium;
+    void set_premium_mode(bool premium);
+
+    // What reads of the window return, big-endian (window_size bytes): memory loads, so a CPU
+    // reads it as RAM (measured: the PROM's directory test reads all of it three times).
+    // Written only by mmio_write.
+    [[nodiscard]] MemoryBlock& window() {
+        return window_;
     }
 
     void save_state(StateImage& image) const;
@@ -51,16 +59,22 @@ class DirectoryMemory final : public MmioTarget {
                                                 std::uint64_t value) override;
 
   private:
-    // Index into entries_ for a window offset, or entries_.size() for an empty bank.
-    [[nodiscard]] std::size_t entry_index(std::uint64_t offset) const;
     [[nodiscard]] std::uint64_t entry_mask() const;
+    // Entry `index` of bank `bank` reads as `value` at every address that reaches it.
+    void show(std::size_t bank, std::uint64_t index, std::uint64_t value);
+    // Every entry as read: entries_ under the mask, or the window's first alias.
+    [[nodiscard]] std::vector<std::uint64_t> entries() const;
+    void show_entries(const std::vector<std::uint64_t>& entries);
 
     Tracer& tracer_;
     std::array<std::uint64_t, memory_banks> bank_bytes_;
-    // First entry of each bank in entries_.
+    // First entry of each bank in entries().
     std::array<std::size_t, memory_banks> bank_first_{};
+    std::size_t entry_count_{};
     DirectoryDimms dimms_;
     bool premium_mode_{true};
+    MemoryBlock window_{window_size};
+    // Premium DIMMs only: each entry's 48 bits, which standard mode reads 16 of.
     std::vector<std::uint64_t> entries_;
 };
 
