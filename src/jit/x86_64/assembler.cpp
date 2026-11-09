@@ -576,6 +576,13 @@ void Assembler::jmp(Mem target) {
     modrm_memory(4, target);
 }
 
+void Assembler::call_to(std::uint64_t target) {
+    const std::int64_t displacement = static_cast<std::int64_t>(target - (here() + 5));
+    invariant(displacement == static_cast<std::int32_t>(displacement), "call within rel32");
+    byte(0xe8);
+    bytes32(static_cast<std::uint32_t>(displacement));
+}
+
 void Assembler::jmp_to(std::uint64_t target) {
     const std::int64_t displacement = static_cast<std::int64_t>(target - (here() + 5));
     invariant(displacement == static_cast<std::int32_t>(displacement), "jump within rel32");

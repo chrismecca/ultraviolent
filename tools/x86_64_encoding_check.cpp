@@ -272,6 +272,8 @@ int main() {
             }
         }
     }
+    add("call .+0x1000", [](Assembler& a) { a.call_to(a.here() + 0x1000); });
+    add("call .-0x1000", [](Assembler& a) { a.call_to(a.here() - 0x1000); });
     add("jmp .+0x1000", [](Assembler& a) { a.jmp_to(a.here() + 0x1000); });
     add("jmp .-0x1000", [](Assembler& a) { a.jmp_to(a.here() - 0x1000); });
     for (unsigned c = 0; c < 16; ++c) {

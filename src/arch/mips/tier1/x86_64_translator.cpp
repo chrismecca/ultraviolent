@@ -1388,6 +1388,27 @@ class X86_64NativeCode final : public NativeCode {
             a.jmp(Mem{Reg::rcx, dispatch_code});
             dispatch_ = place_permanent(a, "dispatch");
         }
+        // The two ways' entries at rbx + the register's offset swapped, eight bytes at a time
+        // through rax and rcx (free at a second-way test: the access's registers are
+        // temporaries from the pool), for each register an entry offset can be in.
+        for (unsigned r = 0; r < swap_ways_.size(); ++r) {
+            const auto entry = static_cast<Reg>(r);
+            if (entry == Reg::rax || entry == Reg::rcx || entry == Reg::rbx || entry == Reg::rsp) {
+                continue;
+            }
+            Assembler a{next_address()};
+            const std::int32_t first = layout_.data_pages;
+            const std::int32_t second = layout_.second_data_pages;
+            for (std::int32_t q = 0; q < static_cast<std::int32_t>(layout_.host_page_size);
+                 q += 8) {
+                a.mov(Reg::rax, Mem{Reg::rbx, first + q, entry});
+                a.mov(Reg::rcx, Mem{Reg::rbx, second + q, entry});
+                a.mov(Mem{Reg::rbx, first + q, entry}, Reg::rcx);
+                a.mov(Mem{Reg::rbx, second + q, entry}, Reg::rax);
+            }
+            a.ret();
+            swap_ways_[r] = place_permanent(a, "swap_ways");
+        }
     }
 
     [[nodiscard]] std::uint64_t exit(BlockExit reason) const {
@@ -1636,6 +1657,25 @@ class X86_64NativeCode final : public NativeCode {
         }
     }
 
+    // A hit swaps the two ways' entries (swap_ways_, shared code for the entry's register),
+    // so that the first way holds the page used last (Cpu::data_page_to_fill), then takes the
+    // addend from the first way. Measured: the swap written out at every access made `boot`'s
+    // generated code 1.8 times as large (555 against 307 MB) and its translation 1.4 times as
+    // long.
+    void emit_second_way(Assembler& a, const EmitBuilder::SecondWay& w) const {
+        const std::int32_t second = layout_.second_data_pages;
+        a.bind(w.check);
+        a.cmp(w.tag, Mem{Reg::rbx,
+                         second + (w.store ? layout_.host_page_store_page : layout_.host_page_page),
+                         w.entry});
+        a.jcc(Cond::ne, w.miss);
+        const std::uint64_t swap = swap_ways_[static_cast<std::size_t>(w.entry)];
+        invariant(swap != 0, "a swap for the entry's register");
+        a.call_to(swap);
+        a.mov(w.tag, Mem{Reg::rbx, layout_.data_pages + layout_.host_page_addend, w.entry});
+        a.jmp(w.rejoin);
+    }
+
     // A load's held-read check (EmitBuilder::HeldCheck), as Cpu::device_page and device_read
     // test it: the device page for the address (Cpu::device_page_slot's index) holds its page
     // in the current translation context, and a held read of the same offset and width, made
@@ -1643,27 +1683,6 @@ class X86_64NativeCode final : public NativeCode {
     // unchanged. Then the value, extended as the load extends, without reaching the bus.
     // Uses rax and rcx; the operation's cycle count is r15 plus its index past the counted
     // cycles (materialize).
-    // A hit swaps the two ways' entries, eight bytes at a time through rax and rcx (free here:
-    // the access's registers are temporaries from the pool), so that the first way holds the
-    // page used last (Cpu::data_page_to_fill), then takes the addend from the first way.
-    void emit_second_way(Assembler& a, const EmitBuilder::SecondWay& w) const {
-        const std::int32_t first = layout_.data_pages;
-        const std::int32_t second = layout_.second_data_pages;
-        a.bind(w.check);
-        a.cmp(w.tag, Mem{Reg::rbx,
-                         second + (w.store ? layout_.host_page_store_page : layout_.host_page_page),
-                         w.entry});
-        a.jcc(Cond::ne, w.miss);
-        for (std::int32_t q = 0; q < static_cast<std::int32_t>(layout_.host_page_size); q += 8) {
-            a.mov(Reg::rax, Mem{Reg::rbx, first + q, w.entry});
-            a.mov(Reg::rcx, Mem{Reg::rbx, second + q, w.entry});
-            a.mov(Mem{Reg::rbx, first + q, w.entry}, Reg::rcx);
-            a.mov(Mem{Reg::rbx, second + q, w.entry}, Reg::rax);
-        }
-        a.mov(w.tag, Mem{Reg::rbx, first + layout_.host_page_addend, w.entry});
-        a.jmp(w.rejoin);
-    }
-
     void emit_held_check(Assembler& a, const EmitBuilder::HeldCheck& h, std::size_t index,
                          const Boundary& b) {
         const auto entry_bits = static_cast<unsigned>(std::countr_zero(layout_.device_page_size));
@@ -2077,6 +2096,8 @@ class X86_64NativeCode final : public NativeCode {
     std::array<std::uint64_t, block_exit_count> exits_{};
     std::uint64_t deadline_{};
     std::uint64_t dispatch_{};
+    // By the register holding the entry's offset (emit_second_way).
+    std::array<std::uint64_t, 16> swap_ways_{};
     std::uint64_t epoch_{};
     NativeStatistics statistics_;
     bool movbe_{};

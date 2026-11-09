@@ -194,7 +194,8 @@ class Assembler {
     // call [rip + d], d chosen so the memory operand is at `slot`.
     void call_indirect(std::uint64_t slot);
     void jmp(Mem target); // jmp qword [mem]
-    // jmp rel32 and jcc rel32 to code outside this assembly, at `target`.
+    // call rel32, jmp rel32, and jcc rel32 to code outside this assembly, at `target`.
+    void call_to(std::uint64_t target);
     void jmp_to(std::uint64_t target);
     void jcc_to(Cond c, std::uint64_t target);
 

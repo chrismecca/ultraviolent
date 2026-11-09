@@ -2333,3 +2333,27 @@ Best checkpoint: unchanged (local/release-check-011c).
 Next step: the slow paths left in `boot` (the directory's 67 million stores, Hub registers,
   MTC0, PREF, MFC0, LL/SC), by measured cost.
 ----
+
+----
+Date: 2026-11-09
+Milestone: Usable VM: tier-1 speed, generated code size
+Hypothesis: `boot`'s retranslations come partly from the code region filling up.
+Evidence: engine statistics: `boot` emitted 555 MB of generated code into a 64 MB region
+  (8 discards), against 307 MB (4 discards) before the host page cache's second way; a
+  throwaway count of region translations: 107,599, of only 39,917 distinct (pc, code
+  frame, context) and 17,328 distinct (pc, code frame, mode).
+Changed: tier 1's second-way swap is a shared routine per entry register (swap_ways_),
+  called from each access (Assembler::call_to, added to the encoding check).
+Tests: mips.tier1.data_pages_by_context.* and the second-way tests cover it; mutation checks
+  as JIT.adoc says; dev and asan green.
+Newly proven: `boot`'s generated code 366 MB, 5 discards, 1.43 s translating; PGO `boot`
+  1.01x, the rest unchanged; `boot2` 1.04x, `boot4` 1.06x; every digest equal.
+Disproven: that discards cause most retranslation (a 256 MB region, one discard: `boot`
+  unchanged); most come from tier 0's direct-mapped cache, whose evictions drop the
+  translation with the entry (3.7 million tag misses by another pc, 3.0 million by the same
+  pc under another ASID).
+Unknowns: why a region takes about 17 us to translate.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: keep translations across tier 0 cache evictions (a translation is valid while
+  its block's validity inputs are); then the slow paths left in `boot`.
+----

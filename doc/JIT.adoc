@@ -705,6 +705,17 @@ turn, each refilling it. Tried in order:
   against the commit before: `boot` 1.14x, `cpu` 1.01x, `fs` 1.02x; PGO, best of 5: `boot`
   1.08x (2.70 times real time), `cpu` 1.02x, `prom` and `fs` unchanged; every digest equal,
   one to four CPUs.
+* **The swap is shared code (2026-11-09).** Written out at every access, it made `boot`'s
+  generated code 555 MB against 307 MB before (the 64 MB region discarded 8 times, not 4;
+  translating 1.63 s, not 1.16 s), which the benchmarks above did not show by themselves.
+  It is now one routine per register an entry offset can be in (`swap_ways_`, permanent
+  code), which the second-way test calls (`Assembler::call_to`, in the encoding check):
+  `boot` 366 MB, 5 discards, 1.43 s translating. Mutation checks (half the swap, the
+  addend from the second way, no call): each fails `mips.tier1.data_pages_by_context`.
+  PGO, best of 3: `boot` 1.01x, the rest unchanged (release `boot` 1.035x); several CPUs
+  gain more, one run each: `boot2` 1.04x, `boot4` 1.06x, `reboot2` 1.02x, `reboot4`
+  1.05x; every digest equal. Measured and not kept: a 256 MB code region (one discard; `boot` unchanged, for
+  four times the host memory).
 
 == x86-64 encoding
 
