@@ -1068,10 +1068,29 @@ Ip27Machine::SynchronizedTarget::mmio_read_held(std::uint64_t offset, AccessWidt
         return HeldRead{.value = *value};
     }
     const std::atomic<std::uint64_t>& sequence = hub_->rt_sequence();
-    return HeldRead{.value = *value,
-                    .until = rt_reads_.until,
-                    .stamp = &sequence,
-                    .stamp_value = sequence.load(std::memory_order_relaxed)};
+    HeldRead read{.value = *value,
+                  .until = rt_reads_.until,
+                  .stamp = &sequence,
+                  .stamp_value = sequence.load(std::memory_order_relaxed)};
+    // Later windows step by one count every P cycles when the CPU clock is P counter ticks per
+    // second and a tick a whole number T of nanoseconds, and a cycle is longer than a
+    // nanosecond: a cycle's time rounds up to a nanosecond, so cycle c reaches tick k when
+    // c * 10^9 / f > k * T - 1, that is c > k * P - f / 10^9, and for f under 1 GHz when
+    // c >= k * P (whole seconds start at multiples of f, which are multiples of P). The
+    // window must end at such a cycle (it does whether or not the count is clamped behind a
+    // write); the steps go on until the count would wrap.
+    const std::uint64_t cpu_hertz = machine_.config_.cpu_clock.hertz;
+    const std::uint64_t rtc_hertz = Hub::rtc_clock.hertz;
+    const std::uint64_t period = cpu_hertz / rtc_hertz;
+    if (cpu_hertz % rtc_hertz == 0 && 1'000'000'000 % rtc_hertz == 0 && cpu_hertz < 1'000'000'000 &&
+        rt_reads_.until % period == 0) {
+        const std::uint64_t steps = Hub::rt_count_mask - *value;
+        const std::uint64_t room = (~std::uint64_t{0} - read.until) / period;
+        read.period = period;
+        read.step = 1;
+        read.limit = read.until + std::min(steps, room) * period;
+    }
+    return read;
 }
 
 std::expected<void, AccessFault> Ip27Machine::SynchronizedTarget::mmio_write(std::uint64_t offset,

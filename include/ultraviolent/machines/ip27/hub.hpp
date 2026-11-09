@@ -40,6 +40,9 @@ class Hub final {
 
     // Real-time counter rate: 1.25 MHz, 800 ns per tick (IP27.adoc "Hub").
     static constexpr Frequency rtc_clock{1'250'000};
+    // inferred: PI_RT_COUNT is 52 bits wide (LINUX ip27-timer.c registers a 52-bit
+    // sched_clock).
+    static constexpr std::uint64_t rt_count_mask = (std::uint64_t{1} << 52) - 1;
 
     // Registers modeled as plain storage (see hub.cpp).
     static constexpr std::size_t stored_register_count = 95;

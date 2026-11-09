@@ -479,6 +479,34 @@ harmless: a wrong width in the key only misses. PGO, best of 3, against the comm
 `prom` 1.16x, `boot` 1.15x (2.05 times real time), `cpu` and `fs` unchanged; every digest
 equal, one to four CPUs.
 
+Held reads step (2026-11-08): a held PI_RT_COUNT read lasted only to the next tick, 144
+cycles at 180 MHz, so about every sixth read of a delay loop reached the Hub again. A held
+read may now also give a period, a step, and a limit (`MmioTarget::HeldRead`): in the
+window after `until` the value is one step on, and so on, for windows that end at or
+before the limit. The CPU takes one step when a read falls in the next window
+(`Cpu::device_read`), and so does tier 1's check, writing the new value and bound back to
+the device page. The IP27 machine gives one count every P = f / 1.25 MHz cycles when the CPU
+clock is a whole number of ticks per second, a tick a whole number of nanoseconds, and the
+clock under 1 GHz: a cycle's time rounds up to a nanosecond, so cycle c reaches tick k when
+c > kP - f / 10^9, that is when c >= kP; it also requires the window to end at such a cycle,
+and stops before the 52-bit count would wrap. Tests: `ip27.rt_ticks_step_every_period` (the
+Hub's conversion is c / P at 180 to 997.5 MHz, from power-on and around second
+boundaries), `ip27.rt_count_stepped_reads` (2,000 reads six cycles apart fit one cycle
+offset exactly), `mips.tier1.stepped_device_reads.*` (reads every 4 and every 20 cycles, of
+64 and 16 bits, against a device whose value is a function of the cycle: the sum of the
+values is the same with no holding, windows, or steps, since the reference interpreter
+answers through the same `Cpu::device_read`). Mutation checks (the CPU's or tier 1's limit
+or next-window test removed, no write-back of the bound, the cycle count one off, a period
+one cycle long): each fails a test. `boot` after: 313,556 reads of PI_RT_COUNT reach the
+Hub, where about one in six of its 579 million did by the window length (the synchronized
+target 1.8% of host time, 4.5%); PGO, best of 3, against the commit before: `prom` and `boot` 1.02x, `cpu` 0.96x and
+`fs` 0.99x (noise between PGO builds), every digest equal. The device path left in `boot` is
+other registers: a throwaway count of `load_slow`'s 172 million calls gave 88 million
+device reads (50 million of them every doubleword of the directory back door read three
+times, by the PROM or IRIX, not yet known;
+31 million of 160 Hub registers, 7 million an I/O widget) and 84 million memory loads
+that missed the host page cache, 70 million of them on two pages ("Native memory").
+
 == FPU
 
 FPU operations are one decoded opcode (`cop1`) executed by `FpuExecutor` (fpu.cpp), whose

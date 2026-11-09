@@ -128,6 +128,9 @@ Cpu::NativeLayout Cpu::native_layout() const {
             .held_stamp = offsetof(DevicePage, held_stamp),
             .held_stamp_value = offsetof(DevicePage, held_stamp_value),
             .held_run = offsetof(DevicePage, held_run),
+            .held_period = offsetof(DevicePage, held_period),
+            .held_step = offsetof(DevicePage, held_step),
+            .held_limit = offsetof(DevicePage, held_limit),
             .run_epoch = at(&run_epoch_),
             .device_page_count = device_page_count,
             .device_page_size = sizeof(DevicePage)};
@@ -553,9 +556,18 @@ std::expected<std::uint64_t, Exception> Cpu::device_read(DevicePage& page, std::
                                                          AccessWidth width) {
     const std::uint64_t offset = address & page_offset_mask;
     const std::uint64_t key = offset << 4 | byte_count(width);
-    if (page.held_key == key && page.held_run == run_epoch_ && cycles() < page.held_until &&
+    if (page.held_key == key && page.held_run == run_epoch_ &&
         page.held_stamp->load(std::memory_order_relaxed) == page.held_stamp_value) {
-        return page.held_value;
+        if (cycles() < page.held_until) {
+            return page.held_value;
+        }
+        // The next window, one step on (tier 1's check takes the same single step).
+        const std::uint64_t next = page.held_until + page.held_period;
+        if (page.held_period != 0 && cycles() < next && next <= page.held_limit) {
+            page.held_until = next;
+            page.held_value += page.held_step;
+            return page.held_value;
+        }
     }
     left_host_path_ = true;
     last_bus_access_ = BusAccess::device;
@@ -575,6 +587,9 @@ std::expected<std::uint64_t, Exception> Cpu::device_read(DevicePage& page, std::
     page.held_stamp = read->stamp;
     page.held_stamp_value = read->stamp_value;
     page.held_run = run_epoch_;
+    page.held_period = read->period;
+    page.held_step = read->step;
+    page.held_limit = read->limit;
     return read->value;
 }
 

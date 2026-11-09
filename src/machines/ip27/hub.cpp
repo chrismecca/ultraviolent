@@ -401,9 +401,6 @@ constexpr std::optional<std::pair<unsigned, std::uint64_t>> bte_register(std::ui
 constexpr std::uint64_t npr_portreset = 1u << 7;
 constexpr std::uint64_t npr_localreset = 1u << 0;
 
-// inferred: PI_RT_COUNT is 52 bits wide (LINUX ip27-timer.c registers a 52-bit sched_clock).
-constexpr std::uint64_t rt_count_mask = (std::uint64_t{1} << 52) - 1;
-
 } // namespace
 
 Hub::Hub(Scheduler& scheduler, Tracer& tracer, unsigned revision, unsigned slot_id,

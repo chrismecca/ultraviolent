@@ -602,6 +602,9 @@ class Cpu final : public InterruptSink {
         std::int32_t held_stamp;
         std::int32_t held_stamp_value;
         std::int32_t held_run;
+        std::int32_t held_period;
+        std::int32_t held_step;
+        std::int32_t held_limit;
         std::int32_t run_epoch;
         std::uint32_t device_page_count;
         std::uint32_t device_page_size;
@@ -949,12 +952,17 @@ class Cpu final : public InterruptSink {
         // page and width (`offset << 4 | bytes`, 0 for none), value, the cycle count it holds
         // until, its stamp, and the run it was made in. A read that matches is answered here,
         // without reaching the bus, and so is not a barrier: the device said it has no effect.
+        // A read in the window after `held_until` steps them (period, step, and limit, as in
+        // MmioTarget::HeldRead).
         std::uint64_t held_key{};
         std::uint64_t held_value{};
         std::uint64_t held_until{};
         const std::atomic<std::uint64_t>* held_stamp{};
         std::uint64_t held_stamp_value{};
         std::uint64_t held_run{};
+        std::uint64_t held_period{};
+        std::uint64_t held_step{};
+        std::uint64_t held_limit{};
     };
     static constexpr std::size_t device_page_count = 16;
     // The entry for a page: its page number folded with bits 19:16 and 23:20, so that pages

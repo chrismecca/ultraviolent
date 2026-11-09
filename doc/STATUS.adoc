@@ -635,8 +635,12 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   digest equal.
   Dispatch entries now test their own TLB entry's generation instead of a CPU-wide stamp
   that every TLB write advanced (16.9 million revalidations in `boot`, now 50,000): `boot`
-  1.02x.
-  Next, by measured share: the tag misses left (6.5
+  1.02x. Held reads now also step through later windows (JIT.adoc "Device time"): PI_RT_COUNT
+  reaches the Hub 313,556 times in `boot`; `prom` and `boot` 1.02x. What remains of the
+  device path is other registers and the directory back door, and memory loads that miss
+  the host page cache, most on two aliases of one page.
+  Next, by measured share: the host page cache's two aliases (70 million misses in `boot`);
+  the directory back door (50 million device reads); the tag misses left (6.5
   million: other pcs in the entry, user code under new ASIDs, mode changes); the FPU operations still in helpers
   (other conversions, SQRT, ABS, NEG, conditional moves, COP1X, conditions other than 0).
 
@@ -2238,4 +2242,29 @@ Disproven: that the revalidations cost much: about 35 ns each, 0.6 s of `boot`'s
 Unknowns: none new.
 Best checkpoint: unchanged (local/release-check-011c).
 Next step: what perf of `boot` and `fs` leads with now; the FPU's helpers for `cpu`.
+----
+
+----
+Date: 2026-11-08
+Milestone: Usable VM: tier-1 speed, stepped held reads
+Hypothesis: most of `boot`'s remaining device time is PI_RT_COUNT reads just after a tick,
+  which a held read that steps with the count would answer.
+Evidence: perf of `boot`: `load_slow` 11.5%, `operation_helper` 6.5%, the synchronized
+  target 4.5%. The Hub's conversion reduces to c / P cycles per tick under conditions on
+  the clocks (JIT.adoc "Device time"), checked over millions of cycles.
+Changed: MmioTarget::HeldRead's period, step, and limit; Cpu::DevicePage's held_period,
+  held_step, held_limit; Cpu::device_read and tier 1's held check take one step;
+  Ip27Machine::SynchronizedTarget gives the period; Hub::rt_count_mask is public.
+Tests: ip27.rt_ticks_step_every_period, ip27.rt_count_stepped_reads,
+  mips.tier1.stepped_device_reads.*; mutation checks as JIT.adoc says; dev green.
+Newly proven: PI_RT_COUNT reaches the Hub 313,556 times in `boot`; `prom` and `boot` 1.02x;
+  every digest equal.
+Disproven: that those reads were most of `load_slow`: a throwaway count of its 172 million
+  calls in `boot` found 88 million device reads (50 million of the directory back door, 31
+  million of other Hub registers) and 84 million memory loads that missed the host page
+  cache (35.0 million at virtual 0xffffffffffffc000, 34.5 million at 0xa8000000005fc000,
+  which share host page cache entry 0xfc).
+Unknowns: what reads the directory back door three times over.
+Best checkpoint: unchanged (local/release-check-011c).
+Next step: the host page cache entry (fold the address's top byte into it).
 ----

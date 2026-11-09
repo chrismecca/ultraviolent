@@ -4,6 +4,7 @@
 #include <ultraviolent/core/byte_order.hpp>
 #include <ultraviolent/core/state_image.hpp>
 #include <ultraviolent/core/virtual_time.hpp>
+#include <ultraviolent/machines/ip27/hub.hpp>
 #include <ultraviolent/machines/ip27/ip27_machine.hpp>
 #include <ultraviolent/machines/ip27/prom_image.hpp>
 
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <initializer_list>
 #include <memory>
 #include <span>
@@ -745,6 +747,67 @@ const test::Registration rt_count_back_to_back{
         t.check(reads[199] - reads[0] >= 6 && reads[199] - reads[0] <= 14, "ticks at 1.25 MHz");
         t.check(reads[399] - reads[200] >= 6 && reads[399] - reads[200] <= 14,
                 "ticks at 1.25 MHz after the write");
+    }};
+
+// A held PI_RT_COUNT read steps through later windows, one count every P = f / 1.25 MHz
+// cycles (Ip27Machine::SynchronizedTarget::mmio_read_held), which is exact only if the
+// counter's tick at cycle c, as the Hub converts it (the cycle's time, then that time's
+// tick), is c / P: checked for the clocks that qualify, over the first cycles and around
+// second boundaries.
+const test::Registration rt_ticks_step{
+    "ip27.rt_ticks_step_every_period", [](test::Context& t) {
+        for (const std::uint64_t hertz :
+             {180'000'000u, 195'000'000u, 250'000'000u, 300'000'000u, 400'000'000u, 997'500'000u}) {
+            const CycleTime cpu_time{Frequency{hertz}};
+            const std::uint64_t period = hertz / ip27::Hub::rtc_clock.hertz;
+            bool exact = true;
+            for (const std::uint64_t start : {std::uint64_t{0}, hertz - 2000, 7 * hertz - 2000}) {
+                for (std::uint64_t c = start; c < start + 4000; ++c) {
+                    if (cycles_at(cpu_time.time_at(c), ip27::Hub::rtc_clock) != c / period) {
+                        exact = false;
+                    }
+                }
+            }
+            t.check(exact, std::format("ticks step every {} cycles at {} Hz", period, hertz));
+        }
+    }};
+
+// End to end, held and stepped: a loop of six one-cycle instructions reads PI_RT_COUNT 2,000
+// times (about 83 ticks of 144 cycles), so read i is at cycle c0 + 6i, and the counts must
+// be floor((o + 6i) / 144) - floor(o / 144) past the first for one o in [0, 144).
+const test::Registration rt_count_stepped{
+    "ip27.rt_count_stepped_reads", [](test::Context& t) {
+        std::vector<std::uint32_t> words(32, nop());
+        const std::initializer_list<std::uint32_t> code = {
+            // t2 = the Hub's registers + 0x30000; t5 = physical 0x1000 (uncached); t7 = 2000.
+            lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2), lui(t2, 3),
+            daddu(t2, t0, t2), lui(t5, 0xa800), dsll32(t5, t5, 0), ori(t5, t5, 0x1000),
+            addiu(t7, zero, 2000),
+            // Loop (index 10): read, store, step.
+            ld(t1, 0x100, t2), sd(t1, 0, t5), daddiu(t5, t5, 8), addiu(t7, t7, -1),
+            bne(t7, zero, -20), nop(), beq(zero, zero, -4), nop()};
+        std::ranges::copy(code, words.begin());
+        std::vector<std::byte> prom(words.size() * 4);
+        for (std::size_t w = 0; w < words.size(); ++w) {
+            store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
+        }
+        Ip27Machine machine{small_config(), prom};
+        machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
+        machine.run(20000);
+        std::vector<std::uint64_t> reads;
+        for (unsigned i = 0; i < 2000; ++i) {
+            reads.push_back(memory_word(machine, 0x1000 + 8 * i) - memory_word(machine, 0x1000));
+        }
+        constexpr std::uint64_t period = 180'000'000 / 1'250'000;
+        bool fits = false;
+        for (std::uint64_t o = 0; o < period && !fits; ++o) {
+            fits = true;
+            for (std::uint64_t i = 0; i < reads.size() && fits; ++i) {
+                fits = reads[i] == (o + 6 * i) / period - o / period;
+            }
+        }
+        t.check(reads.back() >= 80, std::format("{} ticks", reads.back()));
+        t.check(fits, "every read is the count of its cycle");
     }};
 
 // An inter-processor interrupt is an ordinary Hub interrupt level (IP27.adoc "Hub

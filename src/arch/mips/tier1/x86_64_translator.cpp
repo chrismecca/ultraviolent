@@ -1659,13 +1659,32 @@ class X86_64NativeCode final : public NativeCode {
         a.mov(Reg::rcx, field(layout_.run_epoch));
         a.cmp(Reg::rcx, at(layout_.held_run));
         a.jcc(Cond::ne, h.slow);
-        a.lea(Reg::rcx, Mem{Reg::r15, static_cast<std::int32_t>(index - b.cycles)});
-        a.cmp(Reg::rcx, at(layout_.held_until));
-        a.jcc(Cond::ae, h.slow);
         a.mov(Reg::rcx, at(layout_.held_stamp));
         a.mov(Reg::rcx, Mem{Reg::rcx, 0});
         a.cmp(Reg::rcx, at(layout_.held_stamp_value));
         a.jcc(Cond::ne, h.slow);
+        // The operation's cycle count is r15 + k.
+        const auto k = static_cast<std::int32_t>(index - b.cycles);
+        const Label hit = a.label();
+        a.lea(Reg::rcx, Mem{Reg::r15, k});
+        a.cmp(Reg::rcx, at(layout_.held_until));
+        a.jcc(Cond::b, hit);
+        // The next window, one step on, as Cpu::device_read takes it: until + period within
+        // the limit, and the cycle count below it (with period 0 it is not, as the count is
+        // at or past until).
+        a.mov(Reg::rcx, at(layout_.held_until));
+        a.add(Reg::rcx, at(layout_.held_period));
+        a.cmp(Reg::rcx, at(layout_.held_limit));
+        a.jcc(Cond::a, h.slow);
+        a.sub(Reg::rcx, k);
+        a.cmp(Reg::r15, Reg::rcx);
+        a.jcc(Cond::ae, h.slow);
+        a.add(Reg::rcx, k);
+        a.mov(at(layout_.held_until), Reg::rcx);
+        a.mov(Reg::rcx, at(layout_.held_value));
+        a.add(Reg::rcx, at(layout_.held_step));
+        a.mov(at(layout_.held_value), Reg::rcx);
+        a.bind(hit);
         // The device's value is zero-extended from the access width.
         if (h.width == AccessWidth::bits8 && h.sign_extend) {
             a.movsx_byte(h.result, at(layout_.held_value));

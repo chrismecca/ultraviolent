@@ -60,12 +60,17 @@ class MmioTarget {
     // of the same offset and width would return the same value and have no effect. A CPU may
     // then answer such reads itself (JIT.adoc "Device time"). `until` 0 promises nothing,
     // which is what a target that does not override this says; otherwise `stamp` is set and
-    // lives as long as the target.
+    // lives as long as the target. A value that steps with the cycle count (a counter) may
+    // also say how: with `period` not 0, from `until` on the read returns `value + step` for
+    // `period` more cycles, and so on, for every window that ends at or before `limit`.
     struct HeldRead {
         std::uint64_t value{};
         std::uint64_t until{};
         const std::atomic<std::uint64_t>* stamp{};
         std::uint64_t stamp_value{};
+        std::uint64_t period{};
+        std::uint64_t step{};
+        std::uint64_t limit{};
     };
     virtual std::expected<HeldRead, AccessFault> mmio_read_held(std::uint64_t offset,
                                                                 AccessWidth width) {

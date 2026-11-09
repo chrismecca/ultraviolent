@@ -372,16 +372,20 @@ template <class Engine> void device_loads(test::Context& t) {
 // the width, the window, and the writes so far, so a held read returns exactly what a read
 // would, and one answered from the wrong window, offset, width, or stamp is wrong. With
 // `hold` false it promises nothing.
+// How a HoldingDevice's reads hold: not at all, for their window of `period` cycles, or also
+// stepping through later windows (MmioTarget::HeldRead's period and step), as far as the
+// access width lets the value grow without wrapping.
+enum class Hold : std::uint8_t { none, window, steps };
+
 class HoldingDevice final : public MmioTarget {
   public:
-    HoldingDevice(const Cpu& cpu, std::uint64_t period, bool hold)
+    HoldingDevice(const Cpu& cpu, std::uint64_t period, Hold hold)
         : cpu_{cpu}, period_{period}, hold_{hold} {}
     std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
                                                         AccessWidth width) override {
         ++reads;
         const std::uint64_t value = 0xf0e1'd2c3'b4a5'9687 + offset * 0x0101 +
-                                    cpu_.cycles() / period_ * 0x1111 +
-                                    stamp_.load() * 0x10'0000'0000;
+                                    cpu_.cycles() / period_ * step + stamp_.load() * 0x10'0000'0000;
         return width == AccessWidth::bits64
                    ? value
                    : value & ((std::uint64_t{1} << (8 * byte_count(width))) - 1);
@@ -389,13 +393,23 @@ class HoldingDevice final : public MmioTarget {
     std::expected<HeldRead, AccessFault> mmio_read_held(std::uint64_t offset,
                                                         AccessWidth width) override {
         const auto value = mmio_read(offset, width);
-        if (!hold_) {
+        if (hold_ == Hold::none) {
             return HeldRead{.value = *value};
         }
-        return HeldRead{.value = *value,
-                        .until = (cpu_.cycles() / period_ + 1) * period_,
-                        .stamp = &stamp_,
-                        .stamp_value = stamp_.load()};
+        const std::uint64_t until = (cpu_.cycles() / period_ + 1) * period_;
+        HeldRead read{
+            .value = *value, .until = until, .stamp = &stamp_, .stamp_value = stamp_.load()};
+        if (hold_ == Hold::steps) {
+            const std::uint64_t mask = width == AccessWidth::bits64
+                                           ? ~std::uint64_t{0}
+                                           : (std::uint64_t{1} << (8 * byte_count(width))) - 1;
+            const std::uint64_t steps =
+                width == AccessWidth::bits64 ? std::uint64_t{1} << 40 : (mask - *value) / step;
+            read.period = period_;
+            read.step = step;
+            read.limit = until + steps * period_;
+        }
+        return read;
     }
     std::expected<void, AccessFault> mmio_write(std::uint64_t /*offset*/, AccessWidth /*width*/,
                                                 std::uint64_t /*value*/) override {
@@ -405,22 +419,24 @@ class HoldingDevice final : public MmioTarget {
     std::uint64_t reads{};
 
   private:
+    static constexpr std::uint64_t step = 0x1111;
     const Cpu& cpu_;
     std::uint64_t period_;
-    bool hold_;
+    Hold hold_;
     std::atomic<std::uint64_t> stamp_{};
 };
 
 // Held device reads (JIT.adoc "Device time"), which tier 1 checks in generated code before
 // the slow path: loads of every width and sign, repeated so that some are held, a store that
 // changes the stamp, and a load in a delay slot, against the reference; the same number of
-// reads reach the device, and fewer than without holding.
-template <class Engine> std::uint64_t held_device_reads(test::Context& t, bool hold) {
+// reads reach the device, and fewer than without holding. Returns them.
+template <class Engine>
+std::uint64_t held_device_reads(test::Context& t, Hold hold, std::uint64_t period) {
     constexpr std::uint64_t device = 0x20'0000;
     DifferentialWith<Engine> d;
     d.max_chunk = 500;
-    HoldingDevice reference_device{d.reference.cpu, 5, hold};
-    HoldingDevice candidate_device{d.candidate.cpu, 5, hold};
+    HoldingDevice reference_device{d.reference.cpu, period, hold};
+    HoldingDevice candidate_device{d.candidate.cpu, period, hold};
     t.check(
         d.reference.bus.map_mmio({PhysicalAddress{device}, 0x1000}, reference_device).has_value());
     t.check(
@@ -450,8 +466,8 @@ template <class Engine> void held_reads_under_pressure(test::Context& t) {
     constexpr std::uint64_t device = 0x20'0000;
     DifferentialWith<Engine> d;
     d.max_chunk = 2000;
-    HoldingDevice reference_device{d.reference.cpu, 64, true};
-    HoldingDevice candidate_device{d.candidate.cpu, 64, true};
+    HoldingDevice reference_device{d.reference.cpu, 64, Hold::steps};
+    HoldingDevice candidate_device{d.candidate.cpu, 64, Hold::steps};
     t.check(
         d.reference.bus.map_mmio({PhysicalAddress{device}, 0x1000}, reference_device).has_value());
     t.check(
@@ -490,9 +506,73 @@ template <class Engine> void held_reads_under_pressure(test::Context& t) {
 }
 
 template <class Engine> void held_device_reads(test::Context& t) {
-    const std::uint64_t held = held_device_reads<Engine>(t, true);
-    const std::uint64_t plain = held_device_reads<Engine>(t, false);
+    const std::uint64_t held = held_device_reads<Engine>(t, Hold::window, 5);
+    const std::uint64_t plain = held_device_reads<Engine>(t, Hold::none, 5);
     t.check(held < plain * 3 / 4, std::format("held reads: {} of {}", held, plain));
+    const std::uint64_t steps = held_device_reads<Engine>(t, Hold::steps, 5);
+    t.check(steps <= held, std::format("stepped reads: {} of {}", steps, held));
+}
+
+// A delay loop's shape: one register read again and again, every `cycles` cycles (4 or more)
+// with windows of 16, so most reads after the first are in the window after the held one,
+// which steps (MmioTarget::HeldRead's period), or with longer loops also one further on.
+// `load` is a 64-bit or a 16-bit load (whose value may step only as far as it does not wrap:
+// the limit). The device's value is a function of the cycle, so the sum of the values read
+// is the same however reads hold, which checks the CPU's own answers (the reference answers
+// as the CPU does). Returns the reads that reached the device and the sum.
+struct SteppedReads {
+    std::uint64_t reads;
+    std::uint64_t sum;
+};
+template <class Engine>
+SteppedReads stepped_device_reads(test::Context& t, Hold hold, std::uint32_t load,
+                                  std::size_t cycles) {
+    constexpr std::uint64_t device = 0x20'0000;
+    DifferentialWith<Engine> d;
+    d.max_chunk = 2000;
+    HoldingDevice reference_device{d.reference.cpu, 16, hold};
+    HoldingDevice candidate_device{d.candidate.cpu, 16, hold};
+    t.check(
+        d.reference.bus.map_mmio({PhysicalAddress{device}, 0x1000}, reference_device).has_value());
+    t.check(
+        d.candidate.bus.map_mmio({PhysicalAddress{device}, 0x1000}, candidate_device).has_value());
+    d.load_skip_handlers();
+    std::vector<std::uint32_t> loop{load, daddu(v1, v1, v0)};
+    loop.resize(cycles - 2, nop());
+    loop.push_back(beq(zero, zero, -4 * static_cast<std::int32_t>(cycles)));
+    loop.push_back(daddiu(a0, a0, 1));
+    for (std::size_t i = 0; i < loop.size(); ++i) {
+        d.load(System::code + 4 * i, kseg0(System::code + 4 * i), {loop[i]});
+    }
+    d.both([&](System& s) {
+        s.start_kernel();
+        s.set(s0, kseg0(device));
+    });
+    t.check(d.run(t, 4000), "matches the reference");
+    t.check_equal(candidate_device.reads, reference_device.reads);
+    return {.reads = candidate_device.reads, .sum = d.candidate.gpr(v1)};
+}
+
+template <class Engine> void stepped_device_reads(test::Context& t) {
+    for (const std::size_t cycles : {std::size_t{4}, std::size_t{20}}) {
+        for (const std::uint32_t load : {ld(v0, 0x60, s0), lhu(v0, 0x60, s0)}) {
+            const SteppedReads plain = stepped_device_reads<Engine>(t, Hold::none, load, cycles);
+            const SteppedReads windows =
+                stepped_device_reads<Engine>(t, Hold::window, load, cycles);
+            const SteppedReads steps = stepped_device_reads<Engine>(t, Hold::steps, load, cycles);
+            t.check_equal(windows.sum, plain.sum);
+            t.check_equal(steps.sum, plain.sum);
+            t.check(steps.reads < windows.reads,
+                    std::format("stepped reads: {} of {} ({} cycles a read, load {:#x})",
+                                steps.reads, windows.reads, cycles, load));
+        }
+    }
+    // With a read every 4 cycles nearly every read steps, but at 16 bits the value steps by
+    // 0x1111 only up to 0xffff, then a read reaches the device and the wrapped value steps on.
+    const SteppedReads windows = stepped_device_reads<Engine>(t, Hold::window, ld(v0, 0x60, s0), 4);
+    const SteppedReads steps = stepped_device_reads<Engine>(t, Hold::steps, ld(v0, 0x60, s0), 4);
+    t.check(steps.reads * 10 < windows.reads,
+            std::format("stepped reads: {} of {}", steps.reads, windows.reads));
 }
 
 // The inline host page path tests the entry's translation context: one user virtual page,
@@ -925,6 +1005,12 @@ const test::Registration held_reads_tier1{"mips.tier1.held_device_reads.tier1",
 const test::Registration held_reads_regions{"mips.tier1.held_device_reads.regions",
                                             held_device_reads<Tier1RegionEngine>};
 
+const test::Registration stepped_reads_tier0{"mips.tier1.stepped_device_reads.tier0",
+                                             stepped_device_reads<Tier0Engine>};
+const test::Registration stepped_reads_tier1{"mips.tier1.stepped_device_reads.tier1",
+                                             stepped_device_reads<Tier1Engine>};
+const test::Registration stepped_reads_regions{"mips.tier1.stepped_device_reads.regions",
+                                               stepped_device_reads<Tier1RegionEngine>};
 const test::Registration held_pressure_tier1{"mips.tier1.held_reads_under_pressure.tier1",
                                              held_reads_under_pressure<Tier1Engine>};
 const test::Registration held_pressure_regions{"mips.tier1.held_reads_under_pressure.regions",
