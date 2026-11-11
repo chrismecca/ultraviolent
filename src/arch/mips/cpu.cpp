@@ -989,8 +989,10 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
         if (kind != AccessKind::fetch) {
             ++data_page_fills_;
         }
-        (kind == AccessKind::fetch ? code_pages_[host_page_slot(address)]
-                                   : data_page_to_fill(address, page | context_tag_)) = {
+        HostPage& entry = kind == AccessKind::fetch
+                              ? code_pages_[host_page_slot(address)]
+                              : data_page_to_fill(address, page | context_tag_);
+        entry = {
             page | context_tag_,
             bytes.data(),
             nullptr,
