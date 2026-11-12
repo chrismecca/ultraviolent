@@ -282,8 +282,15 @@ native code:
   expected.
 * **The run.** `NativeCode::run` enters the block at the CPU's pc and returns only when a
   block leaves: a dispatch miss, a side exit, a pending exception or the deadline at a block
-  entry, or a code change. Blocks jump to the shared dispatch code with the next pc; nothing
-  is pushed, so a run of any length uses one entry frame.
+  entry, or a code change. Blocks dispatch on the next pc; nothing is pushed, so a run of any
+  length uses one entry frame.
+* **Dispatch at each block end (2026-11-12).** perf with the code dump put 29% of generated
+  code's samples in `boot` at block entries, which suggests mispredicted jumps into blocks.
+  Every block left through one shared dispatch sequence whose single indirect jump all
+  transitions shared. Each block end now carries the sequence itself (`emit_dispatch`, about
+  60 bytes), so each end's jump is predicted on its own. Release, best of 3: `boot` 1.02x,
+  `fs` 1.04x, `cpu` 1.01x, `prom` unchanged; every digest equal. Most of the entry cost
+  stays: the jumps whose targets vary (returns) are mispredicted wherever they are.
 * **Lifetime is unchanged.** Translation and discard still happen only in the engine, between
   runs, and a discard clears the dispatch table.
 * **Code no ASID selects (2026-11-08).** `boot` statistics: tier 0 still ran 4.2% of

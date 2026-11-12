@@ -1323,6 +1323,33 @@ class X86_64NativeCode final : public NativeCode {
         }
     }
 
+    // Dispatch on rax, the pc of the next block (the CPU's state exact at a boundary): the
+    // table entry for it, its context in either form, and its stamp, then its code; anything
+    // else leaves. Uses rcx and rdx.
+    void emit_dispatch(Assembler& a) const {
+        const std::uint64_t miss = exit(BlockExit::completed);
+        a.mov32(Reg::rcx, Reg::rax);
+        a.shr32(Reg::rcx, 2);
+        a.and_(Reg::rcx, static_cast<std::int32_t>(dispatch_entries - 1));
+        a.shl(Reg::rcx, 5);
+        a.add(Reg::rcx, Mem{Reg::r12, context_dispatch});
+        a.cmp(Reg::rax, Mem{Reg::rcx, dispatch_pc});
+        a.jcc_to(Cond::ne, miss);
+        // The entry's context in either form (Cpu::code_context_matches).
+        const Label context = a.label();
+        a.mov(Reg::rdx, field(layout_.translation_context));
+        a.cmp(Reg::rdx, Mem{Reg::rcx, dispatch_context});
+        a.jcc(Cond::e, context);
+        a.mov(Reg::rdx, field(layout_.shared_code_context));
+        a.cmp(Reg::rdx, Mem{Reg::rcx, dispatch_context});
+        a.jcc_to(Cond::ne, miss);
+        a.bind(context);
+        a.mov(Reg::rdx, field(layout_.code_changes));
+        a.cmp(Reg::rdx, Mem{Reg::rcx, dispatch_stamp});
+        a.jcc_to(Cond::ne, miss);
+        a.jmp(Mem{Reg::rcx, dispatch_code});
+    }
+
     // The entry, which saves the callee-saved registers, loads rbx and r12, and calls the
     // first block (six pushes after the caller's call leave rsp 16-byte aligned at the blocks'
     // helper calls); the exits, which return through it; and dispatch.
@@ -1365,27 +1392,7 @@ class X86_64NativeCode final : public NativeCode {
         {
             // rax: the pc of the next block; the CPU's state is exact at a boundary.
             Assembler a{next_address()};
-            const std::uint64_t miss = exit(BlockExit::completed);
-            a.mov32(Reg::rcx, Reg::rax);
-            a.shr32(Reg::rcx, 2);
-            a.and_(Reg::rcx, static_cast<std::int32_t>(dispatch_entries - 1));
-            a.shl(Reg::rcx, 5);
-            a.add(Reg::rcx, Mem{Reg::r12, context_dispatch});
-            a.cmp(Reg::rax, Mem{Reg::rcx, dispatch_pc});
-            a.jcc_to(Cond::ne, miss);
-            // The entry's context in either form (Cpu::code_context_matches).
-            const Label context = a.label();
-            a.mov(Reg::rdx, field(layout_.translation_context));
-            a.cmp(Reg::rdx, Mem{Reg::rcx, dispatch_context});
-            a.jcc(Cond::e, context);
-            a.mov(Reg::rdx, field(layout_.shared_code_context));
-            a.cmp(Reg::rdx, Mem{Reg::rcx, dispatch_context});
-            a.jcc_to(Cond::ne, miss);
-            a.bind(context);
-            a.mov(Reg::rdx, field(layout_.code_changes));
-            a.cmp(Reg::rdx, Mem{Reg::rcx, dispatch_stamp});
-            a.jcc_to(Cond::ne, miss);
-            a.jmp(Mem{Reg::rcx, dispatch_code});
+            emit_dispatch(a);
             dispatch_ = place_permanent(a, "dispatch");
         }
         // The two ways' entries at rbx + the register's offset swapped, eight bytes at a time
@@ -1583,7 +1590,7 @@ class X86_64NativeCode final : public NativeCode {
         }
         a.cmp(Reg::r15, Mem{Reg::r12, context_deadline});
         a.jcc_to(Cond::ae, deadline_);
-        a.jmp_to(dispatch_);
+        emit_dispatch(a);
     }
 
     // The next pc after a branch at `pc` whose outcome is `result`, stored into the CPU.
