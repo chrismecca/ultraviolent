@@ -505,6 +505,42 @@ template <class Engine> void held_reads_under_pressure(test::Context& t) {
     t.check(d.run(t, 3000), "matches the reference");
 }
 
+// Two registers 8 bytes apart polled in turn, as the PROM polls the junk-bus I2C
+// controller's data and status: a device page holds a read for each (Cpu::held_slot), so both
+// are answered within their windows; a third register in the first's slot replaces it. Against
+// the reference; returns the reads that reached the device.
+template <class Engine>
+std::uint64_t paired_device_reads(test::Context& t, bool third) {
+    constexpr std::uint64_t device = 0x20'0000;
+    DifferentialWith<Engine> d;
+    d.max_chunk = 1000;
+    HoldingDevice reference_device{d.reference.cpu, 1000, Hold::window};
+    HoldingDevice candidate_device{d.candidate.cpu, 1000, Hold::window};
+    t.check(
+        d.reference.bus.map_mmio({PhysicalAddress{device}, 0x1000}, reference_device).has_value());
+    t.check(
+        d.candidate.bus.map_mmio({PhysicalAddress{device}, 0x1000}, candidate_device).has_value());
+    d.load_skip_handlers();
+    d.load(System::code, kseg0(System::code),
+           {ld(v0, 0x60, s0), ld(v1, 0x68, s0), daddu(a1, a1, v0), daddu(a1, a1, v1),
+            third ? ld(a0, 0x70, s0) : nop(), daddu(a1, a1, a0), beq(zero, zero, -4 * 7),
+            nop()});
+    d.both([&](System& s) {
+        s.start_kernel();
+        s.set(s0, kseg0(device));
+    });
+    t.check(d.run(t, 4000), "matches the reference");
+    t.check_equal(candidate_device.reads, reference_device.reads);
+    return candidate_device.reads;
+}
+template <class Engine> void paired_device_reads(test::Context& t) {
+    // About 500 iterations in four runs of 1000 cycles: two reads per run when both hold.
+    const std::uint64_t pair = paired_device_reads<Engine>(t, false);
+    t.check(pair <= 16, std::format("paired reads: {}", pair));
+    const std::uint64_t three = paired_device_reads<Engine>(t, true);
+    t.check(three > 300, std::format("three registers, two slots: {}", three));
+}
+
 template <class Engine> void held_device_reads(test::Context& t) {
     const std::uint64_t held = held_device_reads<Engine>(t, Hold::window, 5);
     const std::uint64_t plain = held_device_reads<Engine>(t, Hold::none, 5);
@@ -1059,6 +1095,13 @@ const test::Registration held_reads_tier1{"mips.tier1.held_device_reads.tier1",
                                           held_device_reads<Tier1Engine>};
 const test::Registration held_reads_regions{"mips.tier1.held_device_reads.regions",
                                             held_device_reads<Tier1RegionEngine>};
+
+const test::Registration paired_reads_tier0{"mips.tier1.paired_device_reads.tier0",
+                                            paired_device_reads<Tier0Engine>};
+const test::Registration paired_reads_tier1{"mips.tier1.paired_device_reads.tier1",
+                                            paired_device_reads<Tier1Engine>};
+const test::Registration paired_reads_regions{"mips.tier1.paired_device_reads.regions",
+                                              paired_device_reads<Tier1RegionEngine>};
 
 const test::Registration stepped_reads_tier0{"mips.tier1.stepped_device_reads.tier0",
                                              stepped_device_reads<Tier0Engine>};

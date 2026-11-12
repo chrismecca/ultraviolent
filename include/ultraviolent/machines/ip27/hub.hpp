@@ -99,6 +99,16 @@ class Hub final {
     [[nodiscard]] const std::atomic<std::uint64_t>& rt_sequence() const {
         return rt_sequence_;
     }
+    // Whether a 64-bit read of `offset` would have no effect, for registers whose value changes
+    // only through a write of a Hub register or a scheduled event: the junk-bus I2C
+    // controller (PCF8584, MD_UREG0_0 and MD_UREG0_1) and NI_STATUS_REV_ID. The PROM polls
+    // them, about 30 million reads in `prom` (JIT.adoc "Device time"). Such a read holds while
+    // write_sequence is unchanged and no event has run. Asked before the read.
+    [[nodiscard]] bool read_has_no_effect(std::uint64_t offset) const;
+    // Advances at every Hub register write.
+    [[nodiscard]] const std::atomic<std::uint64_t>& write_sequence() const {
+        return write_sequence_;
+    }
     [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> rt_origin() const {
         return {rt_base_.load(std::memory_order_relaxed),
                 rt_epoch_ticks_.load(std::memory_order_relaxed)};
@@ -301,6 +311,7 @@ class Hub final {
     std::atomic<std::uint64_t> rt_base_{};
     std::atomic<std::uint64_t> rt_epoch_ticks_{};
     std::atomic<std::uint64_t> rt_sequence_{};
+    std::atomic<std::uint64_t> write_sequence_{};
     std::optional<VirtualTime> reader_time_;
 };
 

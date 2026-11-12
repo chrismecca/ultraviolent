@@ -1057,13 +1057,24 @@ Ip27Machine::SynchronizedTarget::mmio_read(std::uint64_t offset, AccessWidth wid
 // held: device time is the lowest CPU's and may be ahead of this one's.
 std::expected<MmioTarget::HeldRead, AccessFault>
 Ip27Machine::SynchronizedTarget::mmio_read_held(std::uint64_t offset, AccessWidth width) {
+    const bool alone = hub_ != nullptr && width == AccessWidth::bits64 &&
+                       machine_.cpu_count() == 1 && !machine_.parallel_running_;
+    // A register that changes only through Hub writes and events, read without effect (asked
+    // before the read, which may have one): with one CPU no event runs within its run, so the
+    // read holds for the rest of the run while no Hub register is written.
+    const bool no_effect = alone && hub_->read_has_no_effect(offset);
     auto value = mmio_read(offset, width);
     if (!value) {
         return std::unexpected(value.error());
     }
-    const bool held = hub_ != nullptr && offset == Hub::rt_count_offset &&
-                      width == AccessWidth::bits64 && machine_.cpu_count() == 1 &&
-                      !machine_.parallel_running_;
+    if (no_effect) {
+        const std::atomic<std::uint64_t>& sequence = hub_->write_sequence();
+        return HeldRead{.value = *value,
+                        .until = ~std::uint64_t{0},
+                        .stamp = &sequence,
+                        .stamp_value = sequence.load(std::memory_order_relaxed)};
+    }
+    const bool held = alone && offset == Hub::rt_count_offset;
     if (!held) {
         return HeldRead{.value = *value};
     }

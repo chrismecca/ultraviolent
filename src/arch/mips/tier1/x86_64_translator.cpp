@@ -1706,6 +1706,13 @@ class X86_64NativeCode final : public NativeCode {
         a.mov(Reg::rcx, field(layout_.translation_context));
         a.cmp(Reg::rcx, at(layout_.device_page_context));
         a.jcc(Cond::ne, h.slow);
+        // The held read for bit 3 of the address (Cpu::held_slot): rax += (address & 8) * 9,
+        // the second 72 bytes on.
+        a.mov(Reg::rcx, h.address);
+        a.and_(Reg::rcx, 8);
+        a.add(Reg::rax, Reg::rcx);
+        a.shl(Reg::rcx, 3);
+        a.add(Reg::rax, Reg::rcx);
         // The key: the offset in the page and the width (Cpu::device_read).
         a.mov(Reg::rcx, h.address);
         a.and_(Reg::rcx, 0xfff);

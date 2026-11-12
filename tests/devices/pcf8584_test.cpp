@@ -132,13 +132,18 @@ const test::Registration master_transfers{
         byte_time(b);
         t.check((b.chip.read(true) & pin) == 0);
         b.chip.write(true, 0x40); // NAK the next byte
+        // Only the master receiver's S0 read has an effect (Hub::read_has_no_effect).
+        t.check(!b.chip.read_has_no_effect(false), "the dummy read starts a byte");
+        t.check(b.chip.read_has_no_effect(true), "a status read has no effect");
         (void)b.chip.read(false); // dummy read starts reception
+        t.check(b.chip.read_has_no_effect(false), "nothing more while the byte is received");
         t.check((b.chip.read(true) & pin) != 0, "receiving");
         byte_time(b);
         t.check_equal(b.chip.read(false), std::uint8_t{0x10});
         byte_time(b);
         // After a NAKed byte reading S0 starts nothing more.
         t.check_equal(target.next, std::uint8_t{0x11});
+        t.check(b.chip.read_has_no_effect(false), "no effect after a NAKed byte");
         t.check(target.starts == std::vector<std::uint8_t>{0xa0, 0xa1});
         t.check(target.written == std::vector<std::uint8_t>{0x07});
         b.chip.write(true, 0xc3); // STOP
@@ -152,6 +157,8 @@ const test::Registration monitoring{"pcf8584.monitors_other_masters", [](test::C
                                         // Another master's byte lands in the shift register, which
                                         // S0 reads.
                                         b.bus.broadcast(0xe0);
+                                        t.check(b.chip.read_has_no_effect(false),
+                                                "S0 reads have no effect when not the master");
                                         t.check_equal(b.chip.read(false), std::uint8_t{0xe0});
                                         // A STOP from another agent ends this chip's transfer and
                                         // frees the bus.

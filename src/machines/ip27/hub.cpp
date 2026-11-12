@@ -996,6 +996,20 @@ std::expected<void, AccessFault> Hub::Port::mmio_write(std::uint64_t offset, Acc
     return hub->write(offset, width, value);
 }
 
+bool Hub::read_has_no_effect(std::uint64_t offset) const {
+    // The PCF8584 changes only through its own writes and its transfer events; NI_STATUS_REV_ID
+    // only through its own write (the link is cabled or not for the machine's life).
+    switch (offset) {
+    case md_ureg0_0:
+    case md_ureg0_1:
+        return i2c_.read_has_no_effect(offset == md_ureg0_1);
+    case ni_status_rev_id:
+        return true;
+    default:
+        return false;
+    }
+}
+
 std::expected<std::uint64_t, AccessFault> Hub::read(unsigned slice, std::uint64_t offset,
                                                     AccessWidth width) {
     if (width == AccessWidth::bits64) {
@@ -1124,6 +1138,7 @@ std::expected<std::uint64_t, AccessFault> Hub::read(unsigned slice, std::uint64_
 
 std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth width,
                                             std::uint64_t value) {
+    write_sequence_.fetch_add(1, std::memory_order_relaxed);
     if (width == AccessWidth::bits64) {
         if (const std::size_t slot = find_stored(offset); slot < stored_register_count) {
             stored_[slot] = value & stored_registers[slot].mask;

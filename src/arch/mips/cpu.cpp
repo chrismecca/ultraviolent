@@ -87,8 +87,11 @@ Cpu::NativeLayout Cpu::native_layout() const {
     static_assert(sizeof(interrupt_check_) == 1 && std::atomic<bool>::is_always_lock_free,
                   "tier 1 tests the interrupt check as a byte");
     static_assert(std::has_single_bit(host_page_count), "tier 1 masks the host page slot");
-    static_assert(sizeof(DevicePage) == 128 && std::has_single_bit(device_page_count),
+    static_assert(sizeof(DevicePage) == 256 && std::has_single_bit(device_page_count),
                   "tier 1 selects a device page with a mask and a shift");
+    static_assert(sizeof(Held) == 72 &&
+                      offsetof(DevicePage, held[1]) - offsetof(DevicePage, held[0]) == 72,
+                  "tier 1 adds 72 bytes for the second held read (emit_held_check)");
     const auto at = [this](const void* field) {
         return static_cast<std::int32_t>(static_cast<const std::byte*>(field) -
                                          reinterpret_cast<const std::byte*>(this));
@@ -123,15 +126,15 @@ Cpu::NativeLayout Cpu::native_layout() const {
             .device_pages = at(device_pages_.data()),
             .device_page_page = offsetof(DevicePage, page),
             .device_page_context = offsetof(DevicePage, context),
-            .held_key = offsetof(DevicePage, held_key),
-            .held_value = offsetof(DevicePage, held_value),
-            .held_until = offsetof(DevicePage, held_until),
-            .held_stamp = offsetof(DevicePage, held_stamp),
-            .held_stamp_value = offsetof(DevicePage, held_stamp_value),
-            .held_run = offsetof(DevicePage, held_run),
-            .held_period = offsetof(DevicePage, held_period),
-            .held_step = offsetof(DevicePage, held_step),
-            .held_limit = offsetof(DevicePage, held_limit),
+            .held_key = offsetof(DevicePage, held) + offsetof(Held, key),
+            .held_value = offsetof(DevicePage, held) + offsetof(Held, value),
+            .held_until = offsetof(DevicePage, held) + offsetof(Held, until),
+            .held_stamp = offsetof(DevicePage, held) + offsetof(Held, stamp),
+            .held_stamp_value = offsetof(DevicePage, held) + offsetof(Held, stamp_value),
+            .held_run = offsetof(DevicePage, held) + offsetof(Held, run),
+            .held_period = offsetof(DevicePage, held) + offsetof(Held, period),
+            .held_step = offsetof(DevicePage, held) + offsetof(Held, step),
+            .held_limit = offsetof(DevicePage, held) + offsetof(Held, limit),
             .run_epoch = at(&run_epoch_),
             .device_page_count = device_page_count,
             .device_page_size = sizeof(DevicePage)};
@@ -558,17 +561,18 @@ std::expected<std::uint64_t, Exception> Cpu::device_read(DevicePage& page, std::
                                                          AccessWidth width) {
     const std::uint64_t offset = address & page_offset_mask;
     const std::uint64_t key = offset << 4 | byte_count(width);
-    if (page.held_key == key && page.held_run == run_epoch_ &&
-        page.held_stamp->load(std::memory_order_relaxed) == page.held_stamp_value) {
-        if (cycles() < page.held_until) {
-            return page.held_value;
+    Held& held = page.held[held_slot(address)];
+    if (held.key == key && held.run == run_epoch_ &&
+        held.stamp->load(std::memory_order_relaxed) == held.stamp_value) {
+        if (cycles() < held.until) {
+            return held.value;
         }
         // The next window, one step on (tier 1's check takes the same single step).
-        const std::uint64_t next = page.held_until + page.held_period;
-        if (page.held_period != 0 && cycles() < next && next <= page.held_limit) {
-            page.held_until = next;
-            page.held_value += page.held_step;
-            return page.held_value;
+        const std::uint64_t next = held.until + held.period;
+        if (held.period != 0 && cycles() < next && next <= held.limit) {
+            held.until = next;
+            held.value += held.step;
+            return held.value;
         }
     }
     left_host_path_ = true;
@@ -583,15 +587,15 @@ std::expected<std::uint64_t, Exception> Cpu::device_read(DevicePage& page, std::
         return std::unexpected(Exception{.code = ExceptionCode::bus_error_data});
     }
     // check_host_pages may have dropped the page; then `page` is empty and never matches.
-    page.held_key = read->until > cycles() && read->stamp != nullptr ? key : 0;
-    page.held_value = read->value;
-    page.held_until = read->until;
-    page.held_stamp = read->stamp;
-    page.held_stamp_value = read->stamp_value;
-    page.held_run = run_epoch_;
-    page.held_period = read->period;
-    page.held_step = read->step;
-    page.held_limit = read->limit;
+    held = {.key = read->until > cycles() && read->stamp != nullptr ? key : 0,
+            .value = read->value,
+            .until = read->until,
+            .stamp = read->stamp,
+            .stamp_value = read->stamp_value,
+            .run = run_epoch_,
+            .period = read->period,
+            .step = read->step,
+            .limit = read->limit};
     return read->value;
 }
 
@@ -647,7 +651,8 @@ void Cpu::remember_device_page(std::uint64_t address, const Translation& transla
              .block = range->block,
              .tlb_index = translation.tlb_index,
              .loads = device,
-             .stores = stores};
+             .stores = stores,
+             .held = {}};
 }
 
 std::expected<void, Exception> Cpu::store_slow(std::uint64_t address, AccessWidth width,

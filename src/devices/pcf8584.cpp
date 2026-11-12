@@ -98,17 +98,25 @@ bool Pcf8584::interrupt_asserted() const {
     return (control_ & eni) != 0 && (status_ & pin) == 0;
 }
 
+// Master receiver: reading S0 returns the byte and starts receiving the next one. The first
+// read after the address is a dummy read. hypothesis: after a byte the master did not
+// acknowledge, reception stops (the slave has released SDA).
+bool Pcf8584::read_starts_reception() const {
+    return master_ && receiving_ && transfer_ == Transfer::none && !start_pending_ &&
+           last_acknowledged_;
+}
+
+bool Pcf8584::read_has_no_effect(bool a0) const {
+    return a0 || (control_ & eso) == 0 || !read_starts_reception();
+}
+
 std::uint8_t Pcf8584::read(bool a0) {
     if (a0) {
         return status_;
     }
     if ((control_ & eso) != 0) {
         const std::uint8_t value = data_;
-        // Master receiver: reading S0 returns the byte and starts receiving the next one.
-        // The first read after the address is a dummy read. hypothesis: after a byte the
-        // master did not acknowledge, reception stops (the slave has released SDA).
-        if (master_ && receiving_ && transfer_ == Transfer::none && !start_pending_ &&
-            last_acknowledged_) {
+        if (read_starts_reception()) {
             begin(Transfer::receive);
         }
         return value;

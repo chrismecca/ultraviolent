@@ -35,6 +35,9 @@ class Pcf8584 final : public I2cMonitor {
 
     // `a0` selects S1 (true) or S0 (false).
     std::uint8_t read(bool a0);
+    // Whether read(a0) would change nothing: every read but S0's by the master receiver,
+    // which starts the next byte.
+    [[nodiscard]] bool read_has_no_effect(bool a0) const;
     void write(bool a0, std::uint8_t value);
 
     void i2c_observed_byte(std::uint8_t byte) override;
@@ -47,6 +50,7 @@ class Pcf8584 final : public I2cMonitor {
   private:
     enum class Transfer : std::uint8_t { none, address, transmit, receive };
 
+    [[nodiscard]] bool read_starts_reception() const;
     void begin(Transfer transfer);
     void finish_transfer();
     void end_mastership();

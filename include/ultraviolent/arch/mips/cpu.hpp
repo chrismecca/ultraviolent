@@ -956,7 +956,26 @@ class Cpu final : public InterruptSink {
     // Read-only memory whose writes a device takes (AddressSpace::MmioRange::block) has a
     // device page for stores only; its loads are memory's. Measured: the PROM's directory
     // test stores to every doubleword of the directory back door four times.
-    // 128 bytes (aligned to 64), so tier 1 selects an entry with a shift.
+    // 256 bytes (aligned to 64), so tier 1 selects an entry with a shift.
+    // A read a device said holds: its offset in the page and width (`offset << 4 | bytes`, 0
+    // for none), value, the cycle count it holds until, its stamp, and the run it was made in.
+    // A read that matches is answered here, without reaching the bus, and so is not a barrier:
+    // the device said it has no effect. A read in the window after `until` steps them (period,
+    // step, and limit, as in MmioTarget::HeldRead).
+    struct Held {
+        std::uint64_t key{};
+        std::uint64_t value{};
+        std::uint64_t until{};
+        const std::atomic<std::uint64_t>* stamp{};
+        std::uint64_t stamp_value{};
+        std::uint64_t run{};
+        std::uint64_t period{};
+        std::uint64_t step{};
+        std::uint64_t limit{};
+    };
+    [[nodiscard]] static std::size_t held_slot(std::uint64_t address) {
+        return (address >> 3) & 1;
+    }
     struct alignas(64) DevicePage {
         std::uint64_t page{~std::uint64_t{0}};
         std::uint64_t context{};
@@ -969,21 +988,10 @@ class Cpu final : public InterruptSink {
         std::int8_t tlb_index{-1};
         bool loads{};
         bool stores{};
-        // The last read the device said holds (MmioTarget::mmio_read_held): its offset in the
-        // page and width (`offset << 4 | bytes`, 0 for none), value, the cycle count it holds
-        // until, its stamp, and the run it was made in. A read that matches is answered here,
-        // without reaching the bus, and so is not a barrier: the device said it has no effect.
-        // A read in the window after `held_until` steps them (period, step, and limit, as in
-        // MmioTarget::HeldRead).
-        std::uint64_t held_key{};
-        std::uint64_t held_value{};
-        std::uint64_t held_until{};
-        const std::atomic<std::uint64_t>* held_stamp{};
-        std::uint64_t held_stamp_value{};
-        std::uint64_t held_run{};
-        std::uint64_t held_period{};
-        std::uint64_t held_step{};
-        std::uint64_t held_limit{};
+        // Reads the device said hold (MmioTarget::mmio_read_held), two per page, by bit 3 of the
+        // address (held_slot): a loop that polls two registers 8 bytes apart, as the PROM polls
+        // the junk-bus I2C controller's data and status (Hub MD_UREG0), keeps both.
+        Held held[2];
     };
     static constexpr std::size_t device_page_count = 16;
     // The entry for a page: its page number folded with bits 19:16 and 23:20, so that pages

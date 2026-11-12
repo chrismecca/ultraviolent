@@ -754,6 +754,50 @@ const test::Registration rt_count_back_to_back{
                 "ticks at 1.25 MHz after the write");
     }};
 
+// NI_STATUS_REV_ID changes only through Hub writes, so with one CPU its reads hold for the
+// run (Hub::read_has_no_effect) until any Hub register is written (Hub::write_sequence): a
+// write of its settings in the middle of a polling loop shows at the next read.
+const test::Registration ni_status_held{
+    "ip27.ni_status_reads_hold_until_a_hub_write", [](test::Context& t) {
+        std::vector<std::uint32_t> words(48, nop());
+        const std::initializer_list<std::uint32_t> code = {
+            // t2 = NI_STATUS_REV_ID; t5 = physical 0x1000 (uncached); t7 = 400; t6 = bit 17
+            // (NSRI_REGIONSIZE, writable).
+            lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2), lui(t2, 0x60),
+            daddu(t2, t0, t2), lui(t5, 0xa800), dsll32(t5, t5, 0), ori(t5, t5, 0x1000),
+            addiu(t7, zero, 400), lui(t6, 2),
+            // Write the register once first, so that the write in the loop goes through the
+            // CPU's device page and only the Hub's stamp ends a held read.
+            sd(zero, 0, t2),
+            // Loop (index 12): read, store, step; at 200 left, write the settings.
+            ld(t1, 0, t2), sd(t1, 0, t5), daddiu(t5, t5, 8), addiu(t7, t7, -1),
+            addiu(t3, t7, -200), bne(t3, zero, 8), nop(), sd(t6, 0, t2), bne(t7, zero, -36),
+            nop(), beq(zero, zero, -4), nop()};
+        std::ranges::copy(code, words.begin());
+        std::vector<std::byte> prom(words.size() * 4);
+        for (std::size_t w = 0; w < words.size(); ++w) {
+            store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
+        }
+        Ip27Machine machine{small_config(), prom};
+        machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
+        machine.run(20000);
+        constexpr std::uint64_t region_size = std::uint64_t{1} << 17;
+        const std::uint64_t first = memory_word(machine, 0x1000);
+        bool before = true;
+        bool after = true;
+        for (unsigned i = 0; i < 400; ++i) {
+            const std::uint64_t read = memory_word(machine, 0x1000 + 8 * i);
+            if (i < 200) {
+                before = before && read == first;
+            } else {
+                after = after && read == (first | region_size);
+            }
+        }
+        t.check((first & region_size) == 0, "the setting starts clear");
+        t.check(before, "reads before the write are equal");
+        t.check(after, "every read after the write sees it");
+    }};
+
 // A held PI_RT_COUNT read steps through later windows, one count every P = f / 1.25 MHz
 // cycles (Ip27Machine::SynchronizedTarget::mmio_read_held), which is exact only if the
 // counter's tick at cycle c, as the Hub converts it (the cycle's time, then that time's
