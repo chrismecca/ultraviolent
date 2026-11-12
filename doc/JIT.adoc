@@ -542,6 +542,40 @@ machine builds them, so the load now reads into the window and shows each entry 
 (`ip27.directory.snapshot_two_small_banks` covers the other layouts): `cpu` 1.02x, `fs` 1.03x
 against the commit before.
 
+**Hub registers that change only through writes (2026-11-12).** A throwaway count at
+`operation_helper` by address after the directory change: of `prom`'s 111 million slow paths,
+67 million were the directory's stores, 23.4 million 64-bit reads of the Hub's junk-bus I2C
+controller (MD_UREG0_0 and MD_UREG0_1, the PCF8584's data and status, in turn, by the remote
+Hub alias) and 6.4 million of NI_STATUS_REV_ID: the PROM waiting for the system controller's
+token bytes and for the link. Neither changes within a run of one CPU except through a write
+of a Hub register: the controller's status and shift register change through its writes and
+its transfer and token events (`Pcf8584`, `Elsc`), the NI status through its own write. So
+`Hub::read_has_no_effect` names them (a data read by the master receiver starts the next byte
+and is not held; `Pcf8584::read_has_no_effect`, asked before the read), and with one CPU the
+synchronized target holds such a read for the rest of the run, stamped with
+`Hub::write_sequence`, which every Hub register write advances. The status and data
+registers are 8 bytes apart in one device page, and a page held one read, so each read of the
+pair replaced the other's: a device page now holds two (`DevicePage::held`, by bit 3 of the
+address, `Cpu::held_slot`; 256 bytes, and tier 1's check adds 72 bytes for the second).
+Tests: `ip27.ni_status_reads_hold_until_a_hub_write` (a settings write in a polling loop shows
+at the next read), `pcf8584.master_write_then_read` and `pcf8584.monitors_other_masters` (which
+reads have an effect), `mips.tier1.paired_device_reads.*` (two registers polled in turn are
+both held; a third in the first's slot replaces it; against the reference). Mutation checks
+(no `write_sequence` advance; one held read per page): each fails a test. `prom`'s slow paths
+111 to 80 million, `boot`'s 167 to 129 million (with PREF, below).
+
+**PREF and TLB writes (2026-11-12).** PREF (8.4 million helper calls in `boot`, IRIX's kernel
+copies) has no effect and is reserved only in User mode without Status.XX; XX is not in the
+translation key and the mode is, so tier 1 emits it as nothing outside User mode
+(`mips.differential.*.prefetch_gating`: kernel, User, User with XX; it fails with PREF native
+in User mode). perf of `boot` also showed `Cpu::write_tlb` at 3% of host time for 0.83 million
+TLB writes, about 1 us each: dropping a TLB entry's host pages walked all 768 entries of the
+code and data host page caches. Each TLB entry now records the slots it filled
+(`Cpu::tlb_host_slots_`), and a write visits only those (10 tests fail without the record).
+PGO, best of 3: the TLB change `prom` 1.02x, `boot` 1.04x, `cpu` 1.03x, `fs` 1.06x; then the
+held Hub reads and PREF `prom` 1.15x, `boot` 1.05x, `cpu` and `fs` 1.01x (4.42 and 3.12 times
+real time); every digest equal.
+
 == FPU
 
 FPU operations are one decoded opcode (`cop1`) executed by `FpuExecutor` (fpu.cpp), whose

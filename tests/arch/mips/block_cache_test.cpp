@@ -214,9 +214,9 @@ const test::Registration shared_contexts{
                 built = d.engine.statistics().blocks_built;
             }
         }
-        const BlockStatistics& s = d.engine.statistics();
-        t.check(s.blocks_built == built, "nothing built under other ASIDs: " + describe(s));
-        t.check_equal(s.misses[index(CacheMiss::tag)], std::uint64_t{0});
+        const BlockStatistics& stats = d.engine.statistics();
+        t.check(stats.blocks_built == built, "nothing built under other ASIDs: " + describe(stats));
+        t.check_equal(stats.misses[index(CacheMiss::tag)], std::uint64_t{0});
         d.both([](System& s) { map(s, 2, mapped, frame_b, 9, false, 9); });
         const std::uint64_t before = d.candidate.gpr(v0);
         d.run(t, 100);

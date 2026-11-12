@@ -645,13 +645,27 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   test reads every doubleword three times and writes it four times, 117 million accesses
   that were 73% of tier 1's slow paths in `prom`; loads are now memory loads, and stores
   take a device page for stores only: `prom` 1.15x, `boot` 1.04x (2.81 times real time).
-  Next, by measured share: the slow paths left in `boot` (217 million before this, by a
-  count at `operation_helper`: the directory's 67 million stores; 37 million other loads and
-  stores, 31 million of them Hub registers; MTC0 13 million, PREF 8.4 million, MFC0 6.2
-  million, LL/SC/LLD/SCD 12.7 million, SYNC 3.6 million, MOVZ/MOVN 1.8 million); the tag
-  misses left (6.5 million: other pcs in the entry, user code under new ASIDs, mode
+  Every preset checked (2026-11-11/12): `gcc` had not built since the host page cache's
+  second way (a brace list assigned through `?:`; its tests had passed on stale binaries),
+  fixed; `tsan`'s `machine_tests` reached 11.5 GB and the OOM kill took the whole session's
+  tmux scope: ThreadSanitizer's calloc zeroes memory itself, so each machine's 1 GB directory
+  window was committed in full. `MemoryBlock` now takes anonymous pages (zero until written
+  under any allocator); `tsan` passes, `machines` in 15 s.
+  TLB writes drop only their entry's host pages (`Cpu::write_tlb` was 3% of `boot`):
+  `prom` 1.02x, `boot` 1.04x, `cpu` 1.03x, `fs` 1.06x (2026-11-12, JIT.adoc "Device time",
+  "PREF and TLB writes"). Then the PROM's polling of the Hub's junk-bus I2C controller and
+  NI status is held (two held reads per device page), and PREF is native outside User mode:
+  `prom` 1.15x (4.42 times real time), `boot` 1.05x (3.12), `cpu` and `fs` 1.01x; every
+  digest equal, one to four CPUs (`local/bench/r3600/aa-tier1.json`, `aa-tier1-multi.json`).
+  Next, by measured share: the slow paths left in `boot` (129.5 million, by a count at
+  `operation_helper`: SD 70 million, nearly all the directory test's stores; MTC0 13.2
+  million and MFC0 6.3 million, nearly all Status; LH 5.5 million, two I/O widget registers
+  the IO6PROM polls; LL/SC/LLD/SCD 12.8 million; SYNC 3.6 million; LD 2.8 million); the
+  tag misses left (6.5 million: other pcs in the entry, user code under new ASIDs, mode
   changes); the FPU operations still in helpers (other conversions, SQRT, ABS, NEG,
-  conditional moves, COP1X, conditions other than 0).
+  conditional moves, COP1X, conditions other than 0). perf of `boot` before these: generated
+  code 60% of host time, spread thin (no block above 2%), dispatch 3.1%, the second-way swap
+  1.5%, tier 0's `run_until` 8%.
 
 . **Blocked on evidence: "Error in ust_change: Addressed slave not responding"** (twice,
   two-node boots only; never on slate, OBS-SLATE-0003). Already observed (IP27.adoc "System

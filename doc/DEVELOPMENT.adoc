@@ -128,6 +128,12 @@ ctest --preset tsan
 TSAN_OPTIONS=suppressions=$PWD/tests/tsan.supp build/tsan/ultraviolent --parallel ...
 ----
 
+On a host without much memory to spare, run a sanitizer suite in a scope of its own, so that
+an out-of-memory kill takes only the tests and not the terminal session (systemd kills a
+whole scope): `systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0 ctest --preset
+tsan`. Guest memory is anonymous pages (`MemoryBlock`), touched only as used, so the suite
+needs far less than that.
+
 == Compiler policy
 
 Clang is the primary compiler. The `dev`, `asan`, `tsan`, and `release` presets select
