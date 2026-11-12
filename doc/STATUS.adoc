@@ -657,6 +657,13 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   NI status is held (two held reads per device page), and PREF is native outside User mode:
   `prom` 1.15x (4.42 times real time), `boot` 1.05x (3.12), `cpu` and `fs` 1.01x; every
   digest equal, one to four CPUs (`local/bench/r3600/aa-tier1.json`, `aa-tier1-multi.json`).
+  Dispatch now happens at each block end (`boot` 1.02x, `fs` 1.04x, release). Where
+  generated code's time goes is measured (JIT.adoc "Dispatch", "Where generated code's time
+  goes"): about 17 host instructions per guest cycle at 2.68 per host cycle, block boundaries
+  about 40% of generated code's instructions, branch misses about 5% of host cycles. So the
+  larger levers are fewer instructions per block boundary (an interrupt check folded into the
+  deadline; no second deadline check after a join) and the delay loops (DDIVU 2.5% of
+  instructions in `boot`); each needs a design, not a patch.
   Next, by measured share: the slow paths left in `boot` (129.5 million, by a count at
   `operation_helper`: SD 70 million, nearly all the directory test's stores; MTC0 13.2
   million and MFC0 6.3 million, nearly all Status; LH 5.5 million, two I/O widget registers

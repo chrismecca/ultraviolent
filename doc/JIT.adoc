@@ -291,6 +291,22 @@ native code:
   60 bytes), so each end's jump is predicted on its own. Release, best of 3: `boot` 1.02x,
   `fs` 1.04x, `cpu` 1.01x, `prom` unchanged; every digest equal. Most of the entry cost
   stays: the jumps whose targets vary (returns) are mispredicted wherever they are.
+* **Where generated code's time goes (2026-11-12, PGO build at `6e3120e`).** `perf stat` of
+  `boot`: 255 G host instructions for 14.8 G guest cycles (about 17 per cycle) at 2.68
+  instructions per host cycle; 271 million branch misses, about 5% of host cycles, so
+  mispredicted dispatch is not the main cost. Retired instructions sampled with the code
+  dump and classified by role: block boundaries take about 40% of generated code's
+  instructions (entry checks 22%: the TLB generation where dispatch enters, the interrupt
+  byte, the deadline; ends 11%: write-back, cycles, the deadline again, joins, dispatch;
+  shared code 7%), the operations 60%. DDIVU alone is 2.5% of all instructions: the
+  firmware's microsecond delay loops read PI_RT_COUNT (held) and divide twice by 10 each
+  pass, about 16% of `prom`'s host time in those blocks (its other hot code is the memory
+  tests). Levers, none built: merging the interrupt check into the deadline (a pending
+  interrupt would lower the run's deadline; across host threads that is an atomic store the
+  generated code reads); the next block's entry deadline check after a join that already
+  checked; host call and return for guest calls and returns (the return stack buffer
+  predicts them, but the native stack then follows the guest's depth); fast-forwarding a
+  loop whose only input is a held read (exact only for loops proven free of other effects).
 * **Lifetime is unchanged.** Translation and discard still happen only in the engine, between
   runs, and a discard clears the dispatch table.
 * **Code no ASID selects (2026-11-08).** `boot` statistics: tier 0 still ran 4.2% of
