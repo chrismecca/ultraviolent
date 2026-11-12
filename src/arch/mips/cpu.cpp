@@ -929,12 +929,20 @@ void Cpu::forget_tlb_pages(std::uint64_t entries) {
             page = {};
         }
     }
-    for (const std::span<HostPage> pages :
-         {std::span<HostPage>{code_pages_}, std::span<HostPage>{data_pages_},
-          second_data_pages_in_use()}) {
-        for (HostPage& page : pages) {
-            if (page.tlb_index >= 0 && (entries >> page.tlb_index & 1) != 0) {
-                page = {};
+    // Only the slots each entry filled (tlb_host_slots_), in every way.
+    for (std::uint64_t remaining = entries; remaining != 0; remaining &= remaining - 1) {
+        const auto index = static_cast<std::size_t>(std::countr_zero(remaining));
+        for (std::size_t word = 0; word < tlb_host_slots_[index].size(); ++word) {
+            for (std::uint64_t slots = std::exchange(tlb_host_slots_[index][word], 0); slots != 0;
+                 slots &= slots - 1) {
+                const std::size_t slot =
+                    word * 64 + static_cast<std::size_t>(std::countr_zero(slots));
+                for (HostPage* page :
+                     {&code_pages_[slot], &data_pages_[slot], &second_data_pages_[slot]}) {
+                    if (page->tlb_index == static_cast<std::int8_t>(index)) {
+                        *page = {};
+                    }
+                }
             }
         }
     }
@@ -972,6 +980,7 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
         if (bytes.size() == page_size) {
             const std::uint64_t tag = page | context_tag_;
             ++data_page_fills_;
+            note_tlb_slot(translation.tlb_index, host_page_slot(address));
             data_page_to_fill(address,
                               tag) = {tag,
                                       bytes.data(),
@@ -989,6 +998,7 @@ void Cpu::remember_page(std::uint64_t address, const Translation& translation, A
         if (kind != AccessKind::fetch) {
             ++data_page_fills_;
         }
+        note_tlb_slot(translation.tlb_index, host_page_slot(address));
         HostPage& entry = kind == AccessKind::fetch
                               ? code_pages_[host_page_slot(address)]
                               : data_page_to_fill(address, page | context_tag_);

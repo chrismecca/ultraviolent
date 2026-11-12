@@ -1033,6 +1033,18 @@ class Cpu final : public InterruptSink {
             second_data_pages_.fill({});
             second_data_pages_used_ = false;
         }
+    }    // The host page slots each TLB entry has filled, in either data way or the code pages, so
+    // that a TLB write drops its entry's pages without visiting all 768 (forget_tlb_pages).
+    // Measured: the full walk was 3% of `boot`'s host time, about 1 us per TLB write. A bit
+    // may outlive its page (a later fill from another entry, a flush); the page's own
+    // tlb_index decides.
+    std::array<std::array<std::uint64_t, host_page_count / 64>, Tlb::entry_count>
+        tlb_host_slots_{};
+    void note_tlb_slot(std::int8_t tlb_index, std::size_t slot) {
+        if (tlb_index >= 0) {
+            tlb_host_slots_[static_cast<std::size_t>(tlb_index)][slot / 64] |=
+                std::uint64_t{1} << (slot % 64);
+        }
     }
 };
 
