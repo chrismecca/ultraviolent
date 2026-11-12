@@ -23,6 +23,7 @@ add_library(ultraviolent_core
     src/core/address_space.cpp
     src/core/interrupt.cpp
     src/core/invariant.cpp
+    src/core/memory_block.cpp
     src/core/scheduler.cpp
     src/core/state_image.cpp
     src/core/trace.cpp

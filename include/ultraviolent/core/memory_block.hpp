@@ -3,9 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <memory>
-#include <new>
 #include <span>
 #include <vector>
 
@@ -15,9 +13,10 @@ namespace ultraviolent {
 // address of its own; an AddressSpace maps ranges of it, possibly more than once (aliases).
 //
 // Contents start zeroed so that runs are deterministic. Real DRAM contents at power-on are
-// undefined, so guest software cannot legitimately depend on this choice. The storage comes
-// from calloc, which takes fresh pages from the host already zeroed: a machine's RAM costs
-// host memory and time only as it is touched.
+// undefined, so guest software cannot legitimately depend on this choice. The storage is
+// fresh anonymous pages from the host, already zeroed: a machine's RAM costs host memory and
+// time only as it is touched. (Not calloc: an allocator may zero the memory itself, as
+// ThreadSanitizer's does, which commits every page of a 1 GB directory window at once.)
 //
 // Not copyable or movable: mappings refer to the block's storage for its whole lifetime.
 class MemoryBlock {
@@ -89,17 +88,10 @@ class MemoryBlock {
 
   private:
     struct Free {
-        void operator()(std::byte* bytes) const {
-            std::free(bytes);
-        }
+        std::size_t size;
+        void operator()(std::byte* bytes) const;
     };
-    static std::unique_ptr<std::byte[], Free> allocate(std::size_t size) {
-        auto* bytes = static_cast<std::byte*>(std::calloc(size == 0 ? 1 : size, 1));
-        if (bytes == nullptr) {
-            throw std::bad_alloc{};
-        }
-        return std::unique_ptr<std::byte[], Free>{bytes};
-    }
+    static std::unique_ptr<std::byte[], Free> allocate(std::size_t size);
 
     std::unique_ptr<std::byte[], Free> bytes_;
     std::size_t size_;
