@@ -1918,6 +1918,14 @@ class X86_64NativeCode final : public NativeCode {
                 if (!result && op.opcode == DecodedOpcode::bc1 && cpu_.coprocessor_usable(1)) {
                     result = b.bc1(op.instruction);
                 }
+                // PREF: a hint with no effect, reserved only in User mode without Status.XX
+                // (semantics.hpp). XX is not in the translation key and the mode is, so only
+                // blocks outside User mode emit it, as nothing. Measured: 8.4 million helper
+                // calls in `boot` (IRIX's kernel copies).
+                if (!result && op.opcode == DecodedOpcode::pref &&
+                    cpu_.mode() != OperatingMode::user) {
+                    result = EmitBuilder::sequential();
+                }
                 if (result) {
                     for (auto& r : raises) {
                         raise_exits.push_back({std::move(r), i, boundary});

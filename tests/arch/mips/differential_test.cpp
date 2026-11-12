@@ -246,6 +246,42 @@ const test::Registration coprocessor_unusable_tier1{"mips.differential.tier1.cop
 const test::Registration coprocessor_unusable_tier1_tiny{"mips.differential.tier1_tiny_cache.coprocessor_unusable",
                                            coprocessor_unusable<Tier1TinyCacheEngine>};
 
+template <class Engine> void prefetch_gating(test::Context& t) {
+    // PREF is a hint with no effect, reserved in User mode unless XX is set (UM 14.10); tier 1
+    // emits it natively outside User mode only (the mode is in the translation key, XX is not).
+    enum class Mode { kernel, user, user_xx };
+    for (const Mode mode : {Mode::kernel, Mode::user, Mode::user_xx}) {
+        DifferentialWith<Engine> d;
+        d.load_skip_handlers();
+        d.load(System::code, mode == Mode::kernel ? code : System::code,
+               {pref(0, 0, s1), addiu(v0, v0, 1), pref(1, 8, s1), daddu(v1, v1, v0), nop(),
+                beq(zero, zero, -4), nop()});
+        d.both([&](System& s) {
+            if (mode == Mode::kernel) {
+                s.start_kernel(code, status::kx);
+                s.set(s1, kseg0(System::data));
+            } else {
+                s.map_user_low();
+                s.cpu.mtc0(cp0::status, (2u << status::ksu_shift) |
+                                            (mode == Mode::user_xx ? status::xx : 0));
+                s.jump(System::code);
+                s.set(s1, System::data);
+            }
+        });
+        d.run(t, 40);
+        check_decoded(t, d);
+    }
+}
+
+const test::Registration prefetch_gating_predecoded{
+    "mips.differential.predecoded.prefetch_gating", prefetch_gating<PredecodedEngine>};
+const test::Registration prefetch_gating_blocks{"mips.differential.blocks.prefetch_gating",
+                                                prefetch_gating<BlockSteppingEngine>};
+const test::Registration prefetch_gating_tier0{"mips.differential.tier0.prefetch_gating",
+                                               prefetch_gating<Tier0Engine>};
+const test::Registration prefetch_gating_tier1{"mips.differential.tier1.prefetch_gating",
+                                               prefetch_gating<Tier1Engine>};
+
 template <class Engine> void fpu(test::Context& t) {
     DifferentialWith<Engine> d;
     d.load_skip_handlers();
