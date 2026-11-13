@@ -1,0 +1,76 @@
+= Ultraviolent 0.1.2 Release Notes
+
+Ultraviolent 0.1.2 runs the same machine about twice as fast as 0.1.1 on one CPU, with
+nothing the guest can see changed: every benchmark workload ends with the same console output
+and state, on one, two, and four CPUs. It also keeps the guest's clock with the host's on a
+slower host. `USING.adoc` is the guide.
+
+Ultraviolent ships no SGI firmware, media, or disk images. You supply your own PROM images
+and IRIX discs (`assets/README.adoc`).
+
+== What changed
+
+* **Speed.** Tier 1, the default execution engine, against 0.1.1 on the reference host
+  (Ryzen 5 3600, PGO builds, best of three, host seconds):
++
+[cols="1,1,1,1",options="header"]
+|===
+| Workload | 0.1.1 | 0.1.2 | Faster
+| PROM from power-on (`prom`) | 16.3 | 8.2 | 2.00x
+| IRIX from power-on to `login:` (`boot`) | 55.5 | 25.7 | 2.16x
+| awk arithmetic loop (`cpu`) | 7.5 | 3.8 | 1.98x
+| find and sum over /usr (`fs`) | 7.1 | 3.2 | 2.27x
+|===
++
+At the guest's 180 MHz that is 3.2 times real time for a boot to `login:` and 4.2 for user
+code. A scripted installation from blank takes 0.28 hours (0.36 with 0.1.1). Two and four
+CPUs gain less (1.01-1.14x): their time goes elsewhere. Where it came from (`JIT.adoc`
+"Device time", "Dispatch", "Native memory"): the CPU answers repeated reads of
+device registers that the device says cannot have changed (the firmware's delay loops and
+polling of the system controller and network link); IRIX's kernel code is translated once for
+all processes instead of once per address space; a second way in the host page cache; the
+directory test's back door read as memory; TLB writes that drop only their own cached pages;
+snapshots that load in half the time (a running machine's state is read in place, and memory
+is zeroed by the host); and smaller items in the generated code.
+* **The guest's clock on a slower host.** With `--realtime`, a machine that runs slower than
+  real time for a while used to lose that time for good; on a host about half as fast as the
+  reference, IRIX's clock on two CPUs fell 35 minutes behind in two days. `--realtime-catch-up SECONDS` sets how
+  far it may fall behind and still catch up (default 1); `--realtime-catch-up 3600` keeps the
+  clock with the host's, and a run prints how much it gave up, if any (`USING.adoc` "What the
+  options mean").
+* **PGO builds** train on a boot of an installed machine as well as on the PROM, if you have
+  one (`ULTRAVIOLENT_PGO_MACHINE`, `DEVELOPMENT.adoc` "Fast builds").
+* **Builds and tests.** The `gcc` preset builds again (it had not since a change during
+  0.1.2's development), and the ThreadSanitizer suite no longer needs more than 11 GB of
+  memory: guest memory is now fresh pages from the host, touched only as used.
+
+Systems installed with 0.1 or 0.1.1 keep working unchanged, and snapshots taken with 0.1.1
+load.
+
+== Build
+
+As 0.1 (`RELEASE-NOTES-0.1.adoc` "Build"): tag `v0.1.2`, Debian 13 on the reference host,
+Clang 19.1.7 (`scripts/build-pgo.sh`) and GCC 14.2, CMake 3.31, no third-party dependencies.
+
+== How it was checked
+
+* `ctest` on the `dev`, `gcc`, `asan`, and `tsan` presets: all suites pass, with new tests
+  for each speed change, each also checked by breaking the change and seeing a test fail
+  (`JIT.adoc`).
+* Benchmark workloads (`local/bench/r3600/ab-tier1.json`, `aa-tier1-multi.json`): every
+  digest, one CPU and the seven two- and four-CPU workloads, is the same as 0.1.1's.
+* Installation from blank on the release commit (`scripts/rc-ip27-demo.py --tap uv0`): PROM
+  log set up, five discs installed with the ssh server, cold boot, console and telnet
+  logins, the keyswitch shutdown and power-off, a file kept across it, `sshd` running after
+  the next cold boot, and `shutdown -i0`, in 0.28 hours of host time (the install itself 14.0
+  minutes); no core dumps.
+* That check first failed: holding the system controller's I2C status (one of the speed
+  changes) lost the controller's keyswitch message, so IRIX was powered off without shutting
+  down, and a `chkconfig` change made just before was lost. The benchmark digests had not
+  shown it. Fixed before the release (`JIT.adoc` "Hub registers that change only through
+  writes", with a test that fails without the fix), and the script's keyswitch check now
+  requires IRIX's shutdown messages, not only the power going off.
+
+== Known limits
+
+As 0.1.1 (`USING.adoc` "Known limits").

@@ -579,6 +579,21 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
     CPUs' startup, and IRIX's startup waits end differently (disk I/O order differs in a few
     places; compared against a v0.1.0 build, `--trace scsi`). One-CPU `boot` moves by 9 M
     cycles.
+.. **Release 0.1.2** (the user, 2026-11-12: "go"; `doc/RELEASE-NOTES-0.1.2.adoc`): the
+   tier-1 speed work since 0.1.1 (one CPU about twice as fast, every digest equal) and
+   `--realtime-catch-up`. The release check (`scripts/rc-ip27-demo.py` from blank) first
+   failed: `sshd` was off after the cold start, because IRIX had lost the system
+   controller's keyswitch message and was powered off without shutting down, losing the
+   `chkconfig sshd on` written just before. Cause: the held I2C status reads of `6e3120e`
+   were stamped with the Hub's writes, but the master receiver's data read sets PIN with no
+   write (found by switching holds off per register, then instrumenting the controller);
+   fixed in `58d2d93` (`Pcf8584::changes`, test `ip27.i2c_status_reads_see_reads_with_effect`),
+   and the script's keyswitch check now requires IRIX's shutdown messages (it had passed on
+   power removal alone). Then: fresh install from blank on the release commit in 0.28 h
+   (the install 14.0 min), every check true, no core dumps; benchmark digests unchanged
+   (`local/bench/r3600/ab-tier1.json`). Not done: the second host at the release commit
+   (access from this session was not permitted). Lesson: speed changes to device reads need
+   a run that exercises the device's protocol in IRIX, not only the benchmark digests.
 +
 The two-CPU machine on a second host ("build a working smp sgi 'in the cloud'", the user
 2026-11-03) is that machine, above. Next: the order below (device loads, tier 0's share, FPU,

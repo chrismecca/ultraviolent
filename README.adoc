@@ -104,6 +104,7 @@ Start here, in order:
 . `doc/IP27-TARGET.adoc`
 . `doc/ROADMAP.adoc`
 . `doc/RC-IP27.adoc`
+. `doc/RELEASE-NOTES-0.1.2.adoc`
 . `doc/RELEASE-NOTES-0.1.1.adoc`
 . `doc/RELEASE-NOTES-0.1.adoc`
 . `doc/RELEASE-NOTES-RC-IP27.adoc`
