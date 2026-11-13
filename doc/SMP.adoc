@@ -482,6 +482,30 @@ ADR-022).
   `machine.node_slot`; absent, rack n1) and refuse another. Every benchmark digest and
   snapshot changed once; the fixture was rebuilt and the new results are the baselines
   (STATUS session log 2026-10-15).
+* **S4.4 (2026-11-13): host-parallel speed after the tier-1 work.** One run each,
+  `--parallel`, on 0.1.2's build: `cpu2` and `cpu4` looked 0.62x of 11-02's, but varied from
+  run to run (`cpu4` 6.1-8.1 s); a thread's CPU time showed why: the four CPU threads started
+  4.2 s into an 8.2 s run, after the four-CPU snapshot loaded, cold, from the fixture (5.2 s
+  cold, 0.74 s warm). `bench.py` now copies the snapshot into memory with the disk: `cpu4`
+  4.78 s, `cpu2` 4.12 s (one CPU's `cpu` takes 3.8 s), release, best of 3. The boots: perf of
+  parallel `boot2` put about 35% of host time in device reads that one CPU holds but parallel
+  CPUs read in full, PI_RT_COUNT most, and a quarter of each thread's time in the window's
+  `yield`. Parallel CPUs now hold PI_RT_COUNT (read at the CPU's own time, which is what a
+  parallel read returns: a function of the cycle count and the counter's origin, stamped by
+  `Hub::rt_sequence`; `ip27.parallel.rt_count_stepped_reads`) and the Hub's reads without
+  effect, the PCF8584 and NI_STATUS_REV_ID (24 and 6 million locked reads in `boot2`; the
+  effect decided under the lock with the read; `ip27.parallel.i2c_status_reads_see_reads_with_effect`).
+  Release, one or two runs: `boot2` 79.2 -> 44.0 -> 38.1 s (2.16 times real time), `boot4`
+  86.2 -> 49.7 -> 41.6 s (2.01), `reboot2` 45.3 -> 38.7 s; IRIX on two parallel CPUs shuts
+  down from the keyswitch. Measured and not kept: publishing each CPU's count every half,
+  quarter, or eighth of the window (the waits stayed 22-24 s in `boot2`: the CPUs' work is
+  unequal phase by phase, not held back by a stale count); a window of 3,000 or 30,000
+  (within noise of 10,000; 100,000 slower); PI_INT_PEND0 and PI_INT_PEND1 read directly from
+  the Hub's word by the CPU and generated code (53 million slow paths in `boot2`, on the
+  waiting CPU: `boot2` 37.4 s against 38.1, `boot4` 41.3 against 41.6). What the critical CPU
+  does now (perf by second, the thread that waits less): generated code 60%, waiting 14%,
+  the rest spread over slow paths (the IO6PROM's SCSI polling through the Bridge 1.3%), so
+  parallel speed now follows generated code's, as one CPU's does.
 
 Reproduce (the cold boot to a two-CPU root shell; copy the disk and state first as in
 STATUS "How to reproduce"):
