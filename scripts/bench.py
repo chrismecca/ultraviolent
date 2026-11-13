@@ -17,8 +17,8 @@ behavior.
 
 The fixture holds copies of the user's private disk and firmware state; keep it out of Git
 (the default is on local disk, off the network file system that holds the repository). Each
-run works on copies in memory (--scratch, default /dev/shm), so `boot` and `fs` time the
-emulator rather than the host disk.
+run works on copies in memory (--scratch, default /dev/shm), disks and snapshots alike, so
+the workloads time the emulator rather than the host disk.
 
 Workloads:
   prom   power-on to the PROM menu, no disk: memory tests, discovery, diagnostics
@@ -243,8 +243,11 @@ def run_once(args, name, workload):
     command = base_command(args, scratch, cpus)
     if workload.get("snapshot"):
         copy(paths["shell-disk.img"], os.path.join(scratch, "disk.img"))
+        # The snapshot too: read from the fixture, it is often out of the page cache after the
+        # disk copies (measured: the four-CPU snapshot loads in 5.2 s cold, 0.74 s warm).
+        copy(paths["shell.uvstate"], os.path.join(scratch, "shell.uvstate"))
         command += ["--disk", os.path.join(scratch, "disk.img"),
-                    "--load-state", paths["shell.uvstate"]]
+                    "--load-state", os.path.join(scratch, "shell.uvstate")]
     elif workload.get("disk"):
         copy(paths["disk.img"], os.path.join(scratch, "disk.img"))
         command += ["--disk", os.path.join(scratch, "disk.img")]
