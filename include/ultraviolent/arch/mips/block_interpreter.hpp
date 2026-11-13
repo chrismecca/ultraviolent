@@ -113,8 +113,9 @@ class BlockInterpreter {
     // blocks not yet translated, which a small cache keeps evicting before they reach the
     // translation threshold: 32768 measured best on every workload (JIT.adoc "Progress").
     static constexpr std::size_t default_cache_entries = 32768;
-    // Chosen from J2's measurements (JIT.adoc "Progress").
-    static constexpr std::uint64_t default_native_threshold = 64;
+    // Chosen from J2's measurements, and measured again with regions and fast-forward
+    // (JIT.adoc "Progress", "Fast-forward").
+    static constexpr std::uint64_t default_native_threshold = 128;
 
     explicit BlockInterpreter(Cpu& cpu, std::size_t cache_entries = default_cache_entries);
 

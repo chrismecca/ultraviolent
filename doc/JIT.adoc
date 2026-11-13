@@ -660,7 +660,11 @@ Result (PGO, best of 3, against `ac-tier1.json`): `boot` 1.09x (23.7 s, 3.47 tim
 time; 1.9 G of its 14.8 G cycles skipped), `prom`, `cpu`, `fs` 1.00x; every digest equal, one
 CPU and the seven multi-CPU workloads in the reference schedule; `--parallel` unchanged. What it does not reach: the
 delay loops on PI_RT_COUNT (their held value changes every counter tick, and with it the
-loop's next pass), and loops that call helpers each pass. Release builds measured `prom`
+loop's next pass), and loops that call helpers each pass. The translation threshold, measured again with regions
+and fast-forward (PGO, best of 2, host seconds `boot` / `fs` / `cpu`): 16: 26.00 / 3.49 /
+3.79; 32: 24.52 / 3.12 / 3.77; 64: 23.64 / 3.13 / 3.77; 128: 23.40 / 3.08 / 3.78; 256:
+23.44 / 3.14 / 3.81; 512: 23.80 / 3.27 / 3.82; `prom` and the parallel boots alike or a little
+faster at 128, now the default. Release builds measured `prom`
 0.98x with it on or off (the CPU's layout and the store path's extra test); PGO builds do
 not.
 
