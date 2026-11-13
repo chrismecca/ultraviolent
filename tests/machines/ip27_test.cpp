@@ -902,6 +902,51 @@ const test::Registration rt_count_stepped{
         t.check(fits, "every read is the count of its cycle");
     }};
 
+// The same on host threads (SMP.adoc "S4"): a CPU there reads PI_RT_COUNT at its own time,
+// and the read holds for the count's window and steps through later ones
+// (Ip27Machine::SynchronizedTarget::mmio_read_held), so every read must still be the count of
+// its own cycle. CPU A reads; B (PI_CPU_NUM 1) waits in a loop.
+const test::Registration rt_count_stepped_parallel{
+    "ip27.parallel.rt_count_stepped_reads", [](test::Context& t) {
+        std::vector<std::uint32_t> words(32, nop());
+        const std::initializer_list<std::uint32_t> code = {
+            lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2),
+            ld(t9, 0x20, t0), bne(t9, zero, 60), nop(),
+            // A: t2 = the Hub's registers + 0x30000; t5 = physical 0x1000; t7 = 2000.
+            lui(t2, 3), daddu(t2, t0, t2), lui(t5, 0xa800), dsll32(t5, t5, 0),
+            ori(t5, t5, 0x1000), addiu(t7, zero, 2000),
+            // Loop (index 13): read, store, step.
+            ld(t1, 0x100, t2), sd(t1, 0, t5), daddiu(t5, t5, 8), addiu(t7, t7, -1),
+            bne(t7, zero, -20), nop(), beq(zero, zero, -4), nop(),
+            // B (index 21).
+            beq(zero, zero, -4), nop()};
+        std::ranges::copy(code, words.begin());
+        std::vector<std::byte> prom(words.size() * 4);
+        for (std::size_t w = 0; w < words.size(); ++w) {
+            store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
+        }
+        Ip27Machine machine{two_cpu_config(), prom};
+        for (unsigned cpu = 0; cpu < 2; ++cpu) {
+            machine.cpu(cpu).mtc0(mips::cp0::status, mips::status::kx);
+        }
+        machine.set_parallel(true, 100);
+        machine.run(40000);
+        std::vector<std::uint64_t> reads;
+        for (unsigned i = 0; i < 2000; ++i) {
+            reads.push_back(memory_word(machine, 0x1000 + 8 * i) - memory_word(machine, 0x1000));
+        }
+        constexpr std::uint64_t period = 180'000'000 / 1'250'000;
+        bool fits = false;
+        for (std::uint64_t o = 0; o < period && !fits; ++o) {
+            fits = true;
+            for (std::uint64_t i = 0; i < reads.size() && fits; ++i) {
+                fits = reads[i] == (o + 6 * i) / period - o / period;
+            }
+        }
+        t.check(reads.back() >= 80, std::format("{} ticks", reads.back()));
+        t.check(fits, "every read is the count of its cycle");
+    }};
+
 // An inter-processor interrupt is an ordinary Hub interrupt level (IP27.adoc "Hub
 // interrupts"; LINUX intr.h CPU_ACTION_B = 11): B unmasks level 11 in INT_MASK0_B and enables
 // IP2; A sets the level through PI_INT_PEND_MOD; B takes the interrupt at its BEV general
