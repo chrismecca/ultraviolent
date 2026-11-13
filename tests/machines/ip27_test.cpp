@@ -813,7 +813,7 @@ const test::Registration i2c_status_held{
             lui(t2, 0x22), daddu(t1, t0, t2)};
         // Own address, 90 kHz clock, serial output on, then a START with address 0xa1 (a
         // read; pcf8584_test.cpp "initialize"): the address byte completes 100 us later.
-        for (const auto [a0, value] : {std::pair{true, 0x80}, {false, 0x08}, {true, 0xa0},
+        for (const auto& [a0, value] : {std::pair{true, 0x80}, {false, 0x08}, {true, 0xa0},
                                        {false, 0x1c}, {true, 0xc1}, {false, 0xa1},
                                        {true, 0xc5}}) {
             code.push_back(addiu(t3, zero, value));
