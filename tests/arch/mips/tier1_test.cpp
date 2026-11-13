@@ -541,6 +541,68 @@ template <class Engine> void paired_device_reads(test::Context& t) {
     t.check(three > 300, std::format("three registers, two slots: {}", three));
 }
 
+// Loop fast-forward (JIT.adoc "Fast-forward"): loops run 300,000 cycles against the
+// reference in chunks of 100,000, the first look at 32,768. A loop that only polls memory,
+// and one that changes memory within a pass but restores it, repeat exactly and are skipped;
+// one that changes memory each pass (its registers the same at the loop's head) and one that
+// reads Count are not. Returns the cycles skipped.
+template <class Engine>
+std::uint64_t fast_forward_loop(test::Context& t, std::initializer_list<std::uint32_t> loop) {
+    DifferentialWith<Engine> d;
+    d.max_chunk = 100'000;
+    d.load_skip_handlers();
+    d.load(System::code, kseg0(System::code), loop);
+    d.both([&](System& s) {
+        s.start_kernel();
+        s.set(s0, kseg0(System::data));
+        s.set(t3, 0x5a5a);
+    });
+    t.check(d.run(t, 300'000), "matches the reference");
+    return d.engine.statistics().fast_forward_cycles;
+}
+
+// A loop polling a device whose reads hold for windows of 50,000 cycles: skipped within each
+// window, never past its end, so each read is the window's value (against the reference).
+template <class Engine> std::uint64_t fast_forward_held(test::Context& t) {
+    constexpr std::uint64_t device = 0x20'0000;
+    DifferentialWith<Engine> d;
+    d.max_chunk = 30'000;
+    HoldingDevice reference_device{d.reference.cpu, 50'000, Hold::window};
+    HoldingDevice candidate_device{d.candidate.cpu, 50'000, Hold::window};
+    t.check(
+        d.reference.bus.map_mmio({PhysicalAddress{device}, 0x1000}, reference_device).has_value());
+    t.check(
+        d.candidate.bus.map_mmio({PhysicalAddress{device}, 0x1000}, candidate_device).has_value());
+    d.load_skip_handlers();
+    d.load(System::code, kseg0(System::code),
+           {ld(v0, 0x60, s0), beq(zero, zero, -8), nop()});
+    d.both([&](System& s) {
+        s.start_kernel();
+        s.set(s0, kseg0(device));
+    });
+    t.check(d.run(t, 400'000), "matches the reference");
+    return d.engine.statistics().fast_forward_cycles;
+}
+
+template <class Engine> void fast_forward_loops(test::Context& t) {
+    const std::uint64_t polls = fast_forward_loop<Engine>(
+        t, {ld(t0, 0, s0), beq(t0, zero, -8), nop(), beq(zero, zero, -4), nop()});
+    t.check(polls > 90'000, std::format("polling memory: {} cycles skipped", polls));
+    const std::uint64_t restores = fast_forward_loop<Engine>(
+        t, {ld(t4, 0, s0), sd(t3, 0, s0), sd(t4, 0, s0), daddu(t4, zero, zero),
+            beq(zero, zero, -20), nop()});
+    t.check(restores > 90'000, std::format("memory restored: {} cycles skipped", restores));
+    const std::uint64_t changes = fast_forward_loop<Engine>(
+        t, {ld(t0, 0, s0), daddiu(t1, t0, 1), sd(t1, 0, s0), daddu(t0, zero, zero),
+            daddu(t1, zero, zero), beq(zero, zero, -24), nop()});
+    t.check_equal(changes, std::uint64_t{0});
+    const std::uint64_t held = fast_forward_held<Engine>(t);
+    t.check(held > 10'000, std::format("held reads: {} cycles skipped", held));
+    const std::uint64_t counts = fast_forward_loop<Engine>(
+        t, {mfc0(t0, cp0::count), daddu(t0, zero, zero), beq(zero, zero, -12), nop()});
+    t.check_equal(counts, std::uint64_t{0});
+}
+
 template <class Engine> void held_device_reads(test::Context& t) {
     const std::uint64_t held = held_device_reads<Engine>(t, Hold::window, 5);
     const std::uint64_t plain = held_device_reads<Engine>(t, Hold::none, 5);
@@ -1096,6 +1158,10 @@ const test::Registration held_reads_tier1{"mips.tier1.held_device_reads.tier1",
 const test::Registration held_reads_regions{"mips.tier1.held_device_reads.regions",
                                             held_device_reads<Tier1RegionEngine>};
 
+const test::Registration fast_forward_tier1{"mips.tier1.fast_forward_loops.tier1",
+                                            fast_forward_loops<Tier1Engine>};
+const test::Registration fast_forward_regions{"mips.tier1.fast_forward_loops.regions",
+                                              fast_forward_loops<Tier1RegionEngine>};
 const test::Registration paired_reads_tier0{"mips.tier1.paired_device_reads.tier0",
                                             paired_device_reads<Tier0Engine>};
 const test::Registration paired_reads_tier1{"mips.tier1.paired_device_reads.tier1",

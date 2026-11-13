@@ -607,6 +607,63 @@ PGO, best of 3: the TLB change `prom` 1.02x, `boot` 1.04x, `cpu` 1.03x, `fs` 1.0
 held Hub reads and PREF `prom` 1.15x, `boot` 1.05x, `cpu` and `fs` 1.01x (4.42 and 3.12 times
 real time); every digest equal.
 
+== Fast-forward
+
+Measured first (2026-11-13, a throwaway count in the reference interpreter: at each backward
+jump, the registers compared with the last arrival at the same pc): 39% of `prom`'s cycles,
+and more than half of `boot`'s, are passes of a loop that come back to their head with every
+register as before: IRIX's idle loop (about 3.4 G of `boot`'s 14.8 G cycles), the firmware's
+and IRIX's delay loops on PI_RT_COUNT, the PROM's waits for the system controller. A guest
+that is waiting costs host time cycle by cycle. A loop that repeats exactly need not be run to
+know where it ends.
+
+*The rule.* From a state in which nothing outside the CPU can change before some cycle count
+(one CPU: the run's limit is the next event, and the CPU's next internal event the timer), a
+stretch of execution that starts and ends at the same pc in the same architectural state
+(GPRs, HI, LO, the FPU, CP0, the interrupt inputs), that read no device except through held
+reads, wrote no device, took no exception, read neither Count nor Random, wrote no TLB entry,
+ran no cache operation or LL/SC, and left every doubleword of memory it stored to as it found
+it, is a period: the next run of it, from the same state, reads the same memory and the same
+held values, runs the same instructions in the same cycles, and ends in the same state. So
+whole periods are skipped by advancing the cycle count (`Cpu::skip_periods`, retired
+instructions with it), up to the earliest of the run's limit, the timer's cycle (reached as
+`end_cycle` would), and the end of any held read (`Cpu::held_horizon`). The result is the
+state the instructions would have produced, cycle for cycle; nothing else is guest-visible.
+
+*How it is found* (`BlockInterpreter::fast_forward`). Tier 1 stops at a pause cycle as at
+its deadline (`NativeCode::run`'s `pause`, kept in `Cpu::stop_hint` so that the deadline a
+helper's barrier sets again includes it at no extra cost). There the engine runs the
+reference interpreter (`Interpreter::step_in_run`, within the run so held reads last) for up
+to 512 steps with a `Cpu::Recorder` set, which the CPU marks for anything on the list above;
+stores go through `store_slow`, which keeps each stored doubleword as it was before
+(`Cpu::record_store`, at most 64), and `Cpu::memory_restored` compares them at the end (a
+loop that saves registers on its stack and restores them qualifies; a counter in memory does
+not). The interpreted steps are ordinary execution, so a look that finds nothing costs only
+the interpreter's speed. Looks are 32,768 cycles apart after one that finds a loop, further
+after one in busy code (up to 4 M cycles), and none at a pc where a loop's skip was cut short
+by a held read (a delay loop to the end of its counter tick, about 144 cycles: not worth a
+look) for 16 M cycles; the first look of a run waits 1,024 cycles, since held reads end with
+the run. Not with CPUs on host threads, where another CPU may change memory at any time. In
+the reference schedule of several CPUs it would be exact (the run's limit is the slice's end,
+and no other CPU runs inside it), but its slices are shorter than the 1,024 cycles a run
+waits before its first look, so it never looks there.
+
+Tests: `mips.tier1.fast_forward_loops.*` (a loop polling memory and one that changes memory
+within a pass and restores it are skipped; one that changes memory each pass with its
+registers the same at its head, and one that reads Count, are not; a loop polling a device
+whose reads hold for 50,000-cycle windows is skipped within them; all against the reference,
+cycle for cycle). Mutation checks: memory never compared, one period too many, held reads
+ignored: each fails. Every existing differential test that runs past 32,768 cycles runs with
+it too.
+
+Result (PGO, best of 3, against `ac-tier1.json`): `boot` 1.09x (23.7 s, 3.47 times real
+time; 1.9 G of its 14.8 G cycles skipped), `prom`, `cpu`, `fs` 1.00x; every digest equal, one
+CPU and the seven multi-CPU workloads in the reference schedule; `--parallel` unchanged. What it does not reach: the
+delay loops on PI_RT_COUNT (their held value changes every counter tick, and with it the
+loop's next pass), and loops that call helpers each pass. Release builds measured `prom`
+0.98x with it on or off (the CPU's layout and the store path's extra test); PGO builds do
+not.
+
 == FPU
 
 FPU operations are one decoded opcode (`cop1`) executed by `FpuExecutor` (fpu.cpp), whose

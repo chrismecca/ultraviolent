@@ -33,6 +33,10 @@ void Interpreter::step() {
     execute_cycle(cpu_);
 }
 
+void Interpreter::step_in_run() {
+    execute_cycle(cpu_);
+}
+
 void Interpreter::run_until(const std::uint64_t& limit) {
     cpu_.synchronize_host_pages();
     while (cpu_.cycles() < limit) {

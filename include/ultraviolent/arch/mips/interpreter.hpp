@@ -15,6 +15,9 @@ class Interpreter {
     // One processor cycle: takes a pending interrupt or delayed watch exception, or else
     // fetches and executes the instruction at pc (taking its exception if it raises one).
     void step();
+    // One cycle within the current run: held device reads and the run's other state last
+    // (loop fast-forward's recording, BlockInterpreter).
+    void step_in_run();
 
     void run(std::uint64_t steps) {
         for (std::uint64_t i = 0; i < steps; ++i) {

@@ -87,9 +87,12 @@ class NativeCode {
                                   std::vector<RegionEntry>& entries) = 0;
     // Runs `code`, the block at the CPU's pc, and the blocks it continues into through
     // `dispatch` (dispatch_entries long), until one of them leaves. The CPU is at a boundary
-    // with no pending exception and not in a delay slot. `limit` is the run limit.
+    // with no pending exception and not in a delay slot. `limit` is the run limit; native
+    // code also leaves at the first block boundary at or past `pause`, as at the limit, which
+    // the CPU knows too (Cpu::set_pause), so that the engine can look at the CPU there
+    // (BlockInterpreter's loop fast-forward).
     virtual NativeExit run(const void* code, const std::uint64_t& limit,
-                           const DispatchEntry* dispatch) = 0;
+                           const DispatchEntry* dispatch, std::uint64_t pause) = 0;
     [[nodiscard]] virtual std::uint64_t epoch() const = 0;
     [[nodiscard]] virtual const NativeStatistics& statistics() const = 0;
 };

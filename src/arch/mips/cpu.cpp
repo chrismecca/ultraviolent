@@ -105,6 +105,7 @@ Cpu::NativeLayout Cpu::native_layout() const {
             .cycles = at(&cycles_),
             .unretired_cycles = at(&unretired_cycles_),
             .timer_cycle = at(&timer_cycle_),
+            .stop_hint = at(&stop_hint_),
             .interrupt_check = at(&interrupt_check_),
             .left_host_path = at(&left_host_path_),
             .translation_context = at(&context_),
@@ -245,6 +246,7 @@ void Cpu::schedule_timer() {
     if (timer_cycle_ <= cycles_) {
         timer_cycle_ += timer_period();
     }
+    stop_hint_ = std::min(timer_cycle_, pause_);
 }
 
 std::expected<Translation, Exception> Cpu::translate_address(std::uint64_t address,
@@ -548,6 +550,9 @@ std::expected<std::uint64_t, Exception> Cpu::load_slow(std::uint64_t address, Ac
     filling_ = true;
     auto value = read(*translation, width, AccessKind::load);
     filling_ = false;
+    if (last_bus_access_ == BusAccess::device) {
+        disqualify();
+    }
     if (value) {
         remember_page(address, *translation, AccessKind::load);
         remember_device_page(address, *translation, AccessKind::load);
@@ -570,11 +575,14 @@ std::expected<std::uint64_t, Exception> Cpu::device_read(DevicePage& page, std::
         // The next window, one step on (tier 1's check takes the same single step).
         const std::uint64_t next = held.until + held.period;
         if (held.period != 0 && cycles() < next && next <= held.limit) {
+            // A new value: what a recorded period read is no longer what follows it.
+            disqualify();
             held.until = next;
             held.value += held.step;
             return held.value;
         }
     }
+    disqualify();
     left_host_path_ = true;
     last_bus_access_ = BusAccess::device;
     auto read = page.target->mmio_read_held(page.offset + offset, width);
@@ -662,8 +670,14 @@ std::expected<void, Exception> Cpu::store_slow(std::uint64_t address, AccessWidt
             Exception{.code = ExceptionCode::address_error_store, .bad_address = address});
     }
     if (DevicePage* page = device_page(address, true)) {
+        if (recorder_ != nullptr) [[unlikely]] {
+            disqualify();
+        }
         device_write(*page, address, width, value);
         return {};
+    }
+    if (recorder_ != nullptr) [[unlikely]] {
+        record_store(address, width, value);
     }
     auto translation = translate(address, AccessKind::store);
     if (!translation) {
@@ -810,6 +824,7 @@ void Cpu::unpark() {
 }
 
 void Cpu::note_load_linked(std::uint64_t address, AccessWidth width, std::uint64_t value) {
+    disqualify();
     if (coherence_ == nullptr) {
         return;
     }
@@ -828,6 +843,7 @@ void Cpu::note_load_linked(std::uint64_t address, AccessWidth width, std::uint64
 
 std::expected<bool, Exception> Cpu::store_conditional(const Translation& translation,
                                                       AccessWidth width, std::uint64_t value) {
+    disqualify();
     if (!state_.ll_bit) {
         return false;
     }
@@ -953,6 +969,69 @@ void Cpu::forget_tlb_pages(std::uint64_t entries) {
     }
 }
 
+// A store while recording: to cached memory only (not a device, not uncached), and the
+// doubleword it falls in is kept as it was before the stretch's first store to it, read as a
+// load would read it (for memory, without effect).
+void Cpu::record_store(std::uint64_t address, AccessWidth width, std::uint64_t /*value*/) {
+    const auto translation = translate(address, AccessKind::store);
+    if (!translation || translation->uncached ||
+        bus_.memory_bytes(translation->address, byte_count(width)).empty()) {
+        disqualify();
+        return;
+    }
+    Recorder& recorder = *recorder_;
+    const std::uint64_t doubleword = address & ~std::uint64_t{7};
+    for (std::size_t i = 0; i < recorder.stored_count; ++i) {
+        if (recorder.stored[i].address == doubleword) {
+            return;
+        }
+    }
+    if (recorder.stored_count == Recorder::max_stored) {
+        disqualify();
+        return;
+    }
+    recorder_ = nullptr;
+    const auto old = load(doubleword, AccessWidth::bits64);
+    recorder_ = &recorder;
+    if (!old) {
+        disqualify();
+        return;
+    }
+    recorder.stored[recorder.stored_count++] = {.address = doubleword, .value = *old};
+}
+
+bool Cpu::memory_restored(const Recorder& recorder) {
+    for (std::size_t i = 0; i < recorder.stored_count; ++i) {
+        const auto now = load(recorder.stored[i].address, AccessWidth::bits64);
+        if (!now || *now != recorder.stored[i].value) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::uint64_t Cpu::held_horizon() const {
+    std::uint64_t horizon = ~std::uint64_t{0};
+    for (const DevicePage& page : device_pages_) {
+        for (const Held& held : page.held) {
+            if (held.key != 0 && held.run == run_epoch_) {
+                horizon = std::min(horizon, held.until);
+            }
+        }
+    }
+    return horizon;
+}
+
+void Cpu::skip_periods(std::uint64_t cycles, std::uint64_t unretired) {
+    invariant(timer_cycle_ <= cycles_ || cycles_ + cycles <= timer_cycle_,
+              "a skip stops at the next internal event");
+    cycles_ += cycles;
+    unretired_cycles_ += unretired;
+    if (cycles_ == timer_cycle_) {
+        reach_internal_event();
+    }
+}
+
 void Cpu::remember_page(std::uint64_t address, const Translation& translation, AccessKind kind) {
     constexpr std::uint64_t page_size = page_offset_mask + 1;
     if ((kind != AccessKind::fetch && (cp0_.watch_lo & 3) != 0) ||
@@ -1052,6 +1131,7 @@ std::uint64_t Cpu::read_cp0(unsigned reg) const {
     case cp0::index:
         return cp0_.index;
     case cp0::random:
+        disqualify();
         return random();
     case cp0::entry_lo0:
         return cp0_.entry_lo0;
@@ -1066,6 +1146,7 @@ std::uint64_t Cpu::read_cp0(unsigned reg) const {
     case cp0::bad_vaddr:
         return cp0_.bad_vaddr;
     case cp0::count:
+        disqualify();
         return count();
     case cp0::entry_hi:
         return cp0_.entry_hi;
@@ -1252,6 +1333,7 @@ TlbEntry Cpu::tlb_entry_from_registers() const {
 }
 
 void Cpu::write_tlb(std::size_t index) {
+    disqualify();
     const std::uint64_t invalidated = tlb_.write(index, tlb_entry_from_registers());
     forget_tlb_pages(invalidated | std::uint64_t{1} << index);
     const bool conflict = invalidated != 0;
@@ -1307,6 +1389,7 @@ std::uint64_t Cpu::exception_return() {
 }
 
 void Cpu::take_exception(const Exception& exception) {
+    disqualify();
     const std::uint64_t address = exception.bad_address;
     if (is_tlb_exception(exception.code)) {
         // UM 17 "TLB Exceptions": BadVAddr, Context, XContext, and EntryHi describe the
@@ -1376,6 +1459,7 @@ bool Cpu::take_pending_exception() {
 }
 
 std::expected<void, Exception> Cpu::cache(unsigned operation, std::uint64_t address) {
+    disqualify();
     // Index operations use the virtual address (primary caches) or the translated physical
     // address (secondary); Hit operations compare the physical address (UM 10.1).
     auto translation = translate(address, AccessKind::load);

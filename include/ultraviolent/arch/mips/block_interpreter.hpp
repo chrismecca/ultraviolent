@@ -93,6 +93,12 @@ struct BlockStatistics {
     // happened since their stamp (Cpu::code_changes), and how many of those had become invalid.
     std::uint64_t dispatch_revalidations{};
     std::uint64_t dispatch_invalid{};
+    // Loop fast-forward (JIT.adoc "Fast-forward"): looks, looks not taken at a pc cooling down,
+    // periods found, and cycles skipped.
+    std::uint64_t fast_forward_looks{};
+    std::uint64_t fast_forward_cooled{};
+    std::uint64_t fast_forward_periods{};
+    std::uint64_t fast_forward_cycles{};
 };
 
 // Tier 0 (IR.adoc "Executor", "Keeping blocks valid"): decoded blocks in a direct-mapped
@@ -138,6 +144,11 @@ class BlockInterpreter {
     // has run (the default), or every one reachable (tests, which translate on first
     // execution and would otherwise rarely join any).
     enum class RegionJoins : std::uint8_t { ran, reachable };
+    // Loop fast-forward with tier 1 (JIT.adoc "Fast-forward"): on by default; tests turn it
+    // off to compare.
+    void set_fast_forward(bool on) {
+        fast_forward_ = on;
+    }
     void set_region_joins(RegionJoins joins) {
         region_joins_ = joins;
     }
@@ -227,6 +238,26 @@ class BlockInterpreter {
     std::vector<std::unique_ptr<Block>> region_storage_;
     RegionJoins region_joins_{RegionJoins::ran};
     std::vector<RegionEntry> region_entries_;
+    // Loop fast-forward: on; when it next looks; how far apart looks are now (doubled after a
+    // look that skips nothing, back to the least after one that does).
+    static constexpr std::uint64_t fast_forward_least_interval = 1 << 15;
+    static constexpr std::uint64_t fast_forward_most_interval = 1 << 22;
+    static constexpr std::uint64_t fast_forward_cooled_interval = 1 << 20;
+    static constexpr std::size_t fast_forward_steps = 512;
+    static constexpr std::uint64_t fast_forward_worthwhile = 1 << 16;
+    static constexpr std::uint64_t fast_forward_settle = 1 << 10;
+    // Where a look found a loop that skipped too little (a delay loop's period to the end of a
+    // counter tick): no look there again for a while, by pc, direct-mapped.
+    static constexpr std::uint64_t fast_forward_cooldown = 1 << 24;
+    struct Cooldown {
+        std::uint64_t pc{~std::uint64_t{0}};
+        std::uint64_t until{};
+    };
+    std::array<Cooldown, 64> cooldowns_{};
+    bool fast_forward_{true};
+    std::uint64_t next_look_{fast_forward_least_interval};
+    std::uint64_t look_interval_{fast_forward_least_interval};
+    void fast_forward(const std::uint64_t& limit);
 };
 
 } // namespace ultraviolent::mips

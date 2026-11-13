@@ -860,6 +860,13 @@ int main(int argc, char** argv) {
                          static_cast<unsigned long long>(b.dispatch_revalidations),
                          static_cast<unsigned long long>(b.dispatch_invalid));
             std::fprintf(stderr,
+                         "tier1: fast-forward %llu looks (%llu cooled), %llu periods, %llu cycles "
+                         "skipped\n",
+                         static_cast<unsigned long long>(b.fast_forward_looks),
+                         static_cast<unsigned long long>(b.fast_forward_cooled),
+                         static_cast<unsigned long long>(b.fast_forward_periods),
+                         static_cast<unsigned long long>(b.fast_forward_cycles));
+            std::fprintf(stderr,
                          "tier1: %llu blocks translated (%llu regions, %llu joined), %llu "
                          "native bytes, %.3f s translating, %llu discards, %llu operations "
                          "native, %llu through call_semantics\n",

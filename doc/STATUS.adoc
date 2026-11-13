@@ -679,6 +679,13 @@ PGO training); the clock lag on slower hosts has `--realtime-catch-up` (2026-11-
   `mix2` 5.92, `boot2` 35.9 (2.29 times real time), `reboot2` 37.8, `cpu4` 4.96, `boot4`
   39.7 (2.11), `reboot4` 50.1; one CPU unchanged (`ac-tier1.json`). Parallel speed now
   follows generated code's.
+  Then loop fast-forward (JIT.adoc "Fast-forward"): measured first, 39% of `prom`'s cycles
+  and over half of `boot`'s are passes of loops that come back to their head unchanged (IRIX's
+  idle loop alone about 3.4 G of `boot`'s 14.8 G cycles). The engine now looks from time to
+  time with the reference interpreter and a recorder in the CPU, and skips whole periods of a
+  loop that repeats exactly, up to the next event, timer, or held read's change: `boot` 1.09x
+  (23.7 s, 3.47 times real time; 1.9 G cycles skipped), the others 1.00x, every digest equal
+  (one CPU, and the multi-CPU workloads in the reference schedule; `--parallel` unchanged).
   Dispatch now happens at each block end (`boot` 1.02x, `fs` 1.04x, release). Where
   generated code's time goes is measured (JIT.adoc "Dispatch", "Where generated code's time
   goes"): about 17 host instructions per guest cycle at 2.68 per host cycle, block boundaries

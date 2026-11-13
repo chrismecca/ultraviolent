@@ -318,8 +318,9 @@ class Cpu final : public InterruptSink {
     std::expected<void, Exception> store(std::uint64_t address, AccessWidth width,
                                          std::uint64_t value) {
         const std::size_t size = byte_count(width);
-        if (const HostPage* page = data_page(address);
-            page != nullptr && page->writable_bytes != nullptr && address % size == 0) [[likely]] {
+        if (const HostPage* page = data_page(address); page != nullptr &&
+            page->writable_bytes != nullptr && address % size == 0 && recorder_ == nullptr)
+            [[likely]] {
             store_unsigned(std::span{page->writable_bytes + (address & page_offset_mask), size},
                            value, bus_.byte_order());
             return {};
@@ -341,8 +342,8 @@ class Cpu final : public InterruptSink {
     template <AccessWidth W>
     std::expected<void, Exception> store_as(std::uint64_t address, std::uint64_t value) {
         using Word = UnsignedOf<W>;
-        if (const HostPage* page = data_page(address);
-            page != nullptr && page->writable_bytes != nullptr && address % sizeof(Word) == 0)
+        if (const HostPage* page = data_page(address); page != nullptr &&
+            page->writable_bytes != nullptr && address % sizeof(Word) == 0 && recorder_ == nullptr)
             [[likely]] {
             detail::store_word(page->writable_bytes + (address & page_offset_mask),
                                static_cast<Word>(value), bus_.byte_order());
@@ -482,6 +483,42 @@ class Cpu final : public InterruptSink {
         check_host_pages();
     }
 
+    // Loop fast-forward (JIT.adoc "Fast-forward"). While a recorder is set, the CPU notes in it
+    // anything that would make a stretch of execution not repeat exactly from the same state:
+    // a store to anything but cached memory, a device read not answered from a held read (or
+    // one whose held value stepped), an exception, a read of Count or Random, a TLB write, a
+    // cache operation, LL or SC. It also keeps each doubleword of memory the stretch stores to
+    // as it was before the first such store (Recorder::stored), so that memory_restored() can
+    // tell whether the stretch left memory as it found it.
+    struct Recorder {
+        bool disqualified{};
+        struct Stored {
+            std::uint64_t address;
+            std::uint64_t value;
+        };
+        static constexpr std::size_t max_stored = 64;
+        std::array<Stored, max_stored> stored{};
+        std::size_t stored_count{};
+    };
+    // Whether every doubleword the recorder's stretch stored to holds its value from before.
+    [[nodiscard]] bool memory_restored(const Recorder& recorder);
+    void set_recorder(Recorder* recorder) {
+        recorder_ = recorder;
+    }
+    [[nodiscard]] bool parallel() const {
+        return parallel_;
+    }
+    // The first cycle count at which a held device read made in this run may change (none:
+    // all ones).
+    [[nodiscard]] std::uint64_t held_horizon() const;
+    // Advances the cycle count by `cycles`, `unretired` of them retiring nothing, as executing
+    // whole periods of a loop that repeats exactly would: called between instructions, never
+    // past the next internal event, which it reaches as end_cycle would.
+    void skip_periods(std::uint64_t cycles, std::uint64_t unretired);
+    [[nodiscard]] std::uint64_t unretired_cycles() const {
+        return unretired_cycles_;
+    }
+
     // CP0 moves with the R10000 width rules (UM 14.26, Table 14-26).
     [[nodiscard]] std::uint64_t mfc0(unsigned reg) const;
     [[nodiscard]] std::uint64_t dmfc0(unsigned reg) const;
@@ -556,7 +593,15 @@ class Cpu final : public InterruptSink {
         // Count became equal to Compare: IP[7] is set (UM 14.8).
         timer_interrupt_ = true;
         timer_cycle_ += timer_period();
+        stop_hint_ = std::min(timer_cycle_, pause_);
         update_derived_state();
+    }
+    // An engine's pause (BlockInterpreter's loop fast-forward): a cycle count at which tier 1
+    // stops at the next block boundary, as at its next internal event, though nothing happens
+    // there (stop_hint).
+    void set_pause(std::uint64_t cycle) {
+        pause_ = cycle;
+        stop_hint_ = std::min(timer_cycle_, pause_);
     }
 
     // Where generated code finds the fields it reads and writes directly, as byte offsets from
@@ -572,6 +617,9 @@ class Cpu final : public InterruptSink {
         std::int32_t cycles;
         std::int32_t unretired_cycles;
         std::int32_t timer_cycle;
+        // The earlier of the timer cycle and the engine's pause (Cpu::set_pause): where tier 1
+        // sets its deadline again after a helper.
+        std::int32_t stop_hint;
         std::int32_t interrupt_check; // bool
         std::int32_t left_host_path;  // bool
         std::int32_t translation_context;
@@ -671,6 +719,25 @@ class Cpu final : public InterruptSink {
         friend bool operator==(const State&, const State&) = default;
     };
     [[nodiscard]] State capture() const;
+    // The architectural state a loop's period must return to (State without the TLB, which a
+    // recorded stretch does not write, and without the cycle-derived counts).
+    struct LoopState {
+        IntegerState integer;
+        FpuState fpu;
+        Cp0Registers cp0;
+        std::uint32_t external_interrupts;
+        bool timer_interrupt;
+        bool watch_pending;
+        friend bool operator==(const LoopState&, const LoopState&) = default;
+    };
+    [[nodiscard]] LoopState loop_state() const {
+        return {.integer = state_,
+                .fpu = fpu_,
+                .cp0 = cp0_,
+                .external_interrupts = external_interrupts_,
+                .timer_interrupt = timer_interrupt_,
+                .watch_pending = watch_pending_};
+    }
     [[nodiscard]] const CacheArrays& caches() const {
         return caches_;
     }
@@ -855,6 +922,13 @@ class Cpu final : public InterruptSink {
     IntegerState state_;
     FpuState fpu_;
     Cp0Registers cp0_;
+    Recorder* recorder_{};
+    void disqualify() const {
+        if (recorder_ != nullptr) {
+            recorder_->disqualified = true;
+        }
+    }
+    void record_store(std::uint64_t address, AccessWidth width, std::uint64_t value);
     Tlb tlb_;
     CacheArrays caches_{model_.identity().config};
     std::uint64_t cycles_{};
@@ -881,6 +955,8 @@ class Cpu final : public InterruptSink {
     std::uint64_t unretired_cycles_{};
     std::uint64_t random_base_{};
     std::uint64_t timer_cycle_{};
+    std::uint64_t pause_{~std::uint64_t{0}};
+    std::uint64_t stop_hint_{};
     // Written by another thread too (raise_attention), so an atomic; one byte, as tier 1
     // tests it.
     std::atomic<bool> interrupt_check_{};

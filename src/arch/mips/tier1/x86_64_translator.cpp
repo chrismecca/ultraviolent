@@ -66,6 +66,9 @@ struct Context {
     // MXCSR to read its flags.
     std::uint32_t mxcsr;
     std::uint32_t scratch;
+    // The engine's pause (NativeCode::run): part of the deadline. A helper's barrier sets the
+    // deadline again from the run limit and Cpu::stop_hint, which includes it.
+    std::uint64_t pause;
 };
 constexpr std::int32_t context_cpu = offsetof(Context, cpu);
 constexpr std::int32_t context_limit = offsetof(Context, limit);
@@ -1265,15 +1268,16 @@ class X86_64NativeCode final : public NativeCode {
         return code;
     }
 
-    NativeExit run(const void* code, const std::uint64_t& limit,
-                   const DispatchEntry* dispatch) override {
+    NativeExit run(const void* code, const std::uint64_t& limit, const DispatchEntry* dispatch,
+                   std::uint64_t pause) override {
         Context context{.cpu = &cpu_,
                         .limit = &limit,
-                        .deadline = std::min(limit, cpu_.next_internal_event_cycle()),
+                        .deadline = std::min({limit, cpu_.next_internal_event_cycle(), pause}),
                         .dispatch = dispatch,
                         .code_changes = cpu_.code_changes(),
                         .mxcsr = 0x1f80,
-                        .scratch = 0};
+                        .scratch = 0,
+                        .pause = pause};
         // The FPU's fast paths load their own MXCSR; the host's comes back after.
         const unsigned host_mxcsr = _mm_getcsr();
         const std::uint64_t exit = entry_(&context, code);
@@ -1650,7 +1654,7 @@ class X86_64NativeCode final : public NativeCode {
         a.jcc_to(Cond::ne, exit(BlockExit::host_path));
         a.mov(Reg::rax, Mem{Reg::r12, context_limit});
         a.mov(Reg::rax, Mem{Reg::rax, 0});
-        a.mov(Reg::rcx, field(layout_.timer_cycle));
+        a.mov(Reg::rcx, field(layout_.stop_hint));
         a.cmp(Reg::rcx, Reg::rax);
         a.cmov(Cond::b, Reg::rax, Reg::rcx);
         a.mov(Mem{Reg::r12, context_deadline}, Reg::rax);

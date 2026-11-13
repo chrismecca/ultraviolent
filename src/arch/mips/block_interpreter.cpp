@@ -23,10 +23,17 @@ void BlockInterpreter::set_cache_entries(std::size_t entries) {
 
 void BlockInterpreter::run_until(const std::uint64_t& limit) {
     cpu_.synchronize_host_pages();
+    // Held reads end with the run: a look right at its start would find the loop's device reads
+    // going to the device. Native code runs a little first.
+    next_look_ = std::max(next_look_, cpu_.cycles() + fast_forward_settle);
     while (cpu_.cycles() < limit) {
         if (cpu_.service_pending_exceptions()) {
             cpu_.end_cycle(false);
             ++statistics_.pending_at_entry;
+            continue;
+        }
+        if (native_ != nullptr && fast_forward_ && cpu_.cycles() >= next_look_) {
+            fast_forward(limit);
             continue;
         }
         const NativeRun native = native_ != nullptr ? run_native(limit) : NativeRun::absent;
@@ -81,7 +88,10 @@ BlockInterpreter::NativeRun BlockInterpreter::run_native(const std::uint64_t& li
         entry.stamp = cpu_.code_changes();
     }
     const std::uint64_t cycles = cpu_.cycles();
-    const NativeExit exit = native_->run(entry.code, limit, dispatch_.data());
+    const std::uint64_t pause = fast_forward_ ? next_look_ : ~std::uint64_t{0};
+    cpu_.set_pause(pause);
+    const NativeExit exit = native_->run(entry.code, limit, dispatch_.data(), pause);
+    cpu_.set_pause(~std::uint64_t{0});
     // Every block that starts runs at least one operation, and every operation takes a cycle.
     if (cpu_.cycles() == cycles && exit.reason == BlockExit::run_limit) {
         ++statistics_.native_refusals;
@@ -99,6 +109,79 @@ BlockInterpreter::NativeRun BlockInterpreter::run_native(const std::uint64_t& li
     statistics_.cached_operations += operations;
     ++statistics_.exits[static_cast<std::size_t>(exit.reason)];
     return NativeRun::ran;
+}
+
+// Loop fast-forward (JIT.adoc "Fast-forward"). From time to time the engine runs the reference
+// interpreter from where the CPU is, with the CPU recording anything that would keep the
+// stretch it runs from repeating exactly (Cpu::Recorder). If the CPU comes back to the same pc
+// in the same architectural state with nothing recorded, and every doubleword the stretch
+// stored to holds its value from before (a loop that saves registers on its stack and restores
+// them), the stretch is a period of a loop:
+// from the same state, with memory left as it was and the same held device values, each
+// further period runs the same instructions in the same cycles and ends in the same state.
+// Nothing outside the CPU changes before the run limit (the next event), its next internal
+// event, or the first held read's change, so whole periods before the earliest of those are
+// skipped by advancing the cycle count. Not with CPUs on host threads, where another CPU may
+// change memory at any time.
+void BlockInterpreter::fast_forward(const std::uint64_t& limit) {
+    Cooldown& cooldown = cooldowns_[(cpu_.state().pc >> 2) % cooldowns_.size()];
+    if (cooldown.pc == cpu_.state().pc && cpu_.cycles() < cooldown.until) {
+        // Still in the delay loop, likely: looks further apart, though not as far as in busy
+        // code (an idle loop may follow it).
+        ++statistics_.fast_forward_cooled;
+        look_interval_ = std::min(look_interval_ * 2, fast_forward_cooled_interval);
+        next_look_ = cpu_.cycles() + look_interval_;
+        return;
+    }
+    ++statistics_.fast_forward_looks;
+    bool skipped = false;
+    bool periodic = false;
+    if (!cpu_.parallel() && !cpu_.state().delay_slot) {
+        const std::uint64_t pc = cpu_.state().pc;
+        const Cpu::LoopState start = cpu_.loop_state();
+        const std::uint64_t cycles = cpu_.cycles();
+        const std::uint64_t unretired = cpu_.unretired_cycles();
+        Cpu::Recorder recorder;
+        cpu_.set_recorder(&recorder);
+        for (std::size_t n = 0;
+             n < fast_forward_steps && cpu_.cycles() < limit && !recorder.disqualified; ++n) {
+            reference_.step_in_run();
+            const IntegerState& s = cpu_.state();
+            if (s.pc == pc && !s.delay_slot && !recorder.disqualified &&
+                cpu_.loop_state() == start) {
+                periodic = true;
+                break;
+            }
+        }
+        cpu_.set_recorder(nullptr);
+        periodic = periodic && cpu_.memory_restored(recorder);
+        if (periodic) {
+            ++statistics_.fast_forward_periods;
+            const std::uint64_t period = cpu_.cycles() - cycles;
+            const std::uint64_t now = cpu_.cycles();
+            const std::uint64_t held = cpu_.held_horizon();
+            const std::uint64_t horizon = std::min({limit, cpu_.next_internal_event_cycle(), held});
+            const std::uint64_t skips = horizon > now ? (horizon - now) / period : 0;
+            if (skips != 0) {
+                cpu_.skip_periods(skips * period,
+                                  skips * (cpu_.unretired_cycles() - unretired));
+                statistics_.fast_forward_cycles += skips * period;
+            }
+            // A look costs about as much as running tens of thousands of cycles natively; one
+            // that skips less (a delay loop to the end of a counter tick) is not repaid.
+            skipped = skips * period >= fast_forward_worthwhile;
+            // Cut short by a held read (a delay loop's counter tick), the loop will be again:
+            // cut short by the run's end, an idle loop may skip far at its next look.
+            if (!skipped && horizon == held) {
+                cooldown = {.pc = pc, .until = cpu_.cycles() + fast_forward_cooldown};
+            }
+        }
+    }
+    // Busy code (no period) pushes looks further apart; a loop, worthwhile or not, keeps them
+    // close (the next stretch may be an idle loop).
+    look_interval_ = periodic ? fast_forward_least_interval
+                              : std::min(look_interval_ * 2, fast_forward_most_interval);
+    next_look_ = cpu_.cycles() + look_interval_;
 }
 
 bool BlockInterpreter::install_native(Entry& entry) {
