@@ -570,19 +570,27 @@ against the commit before.
 67 million were the directory's stores, 23.4 million 64-bit reads of the Hub's junk-bus I2C
 controller (MD_UREG0_0 and MD_UREG0_1, the PCF8584's data and status, in turn, by the remote
 Hub alias) and 6.4 million of NI_STATUS_REV_ID: the PROM waiting for the system controller's
-token bytes and for the link. Neither changes within a run of one CPU except through a write
-of a Hub register: the controller's status and shift register change through its writes and
-its transfer and token events (`Pcf8584`, `Elsc`), the NI status through its own write. So
-`Hub::read_has_no_effect` names them (a data read by the master receiver starts the next byte
-and is not held; `Pcf8584::read_has_no_effect`, asked before the read), and with one CPU the
-synchronized target holds such a read for the rest of the run, stamped with
-`Hub::write_sequence`, which every Hub register write advances. The status and data
+token bytes and for the link. `Hub::read_has_no_effect` names them (a data read by the master
+receiver starts the next byte and is not held; `Pcf8584::read_has_no_effect`, asked before the
+read), and with one CPU the synchronized target holds such a read for the rest of the run,
+stamped with what changes it (`Hub::read_stamp`): for the controller its own count of changes
+(`Pcf8584::changes`: writes, transfers and their completion events, other masters' bytes,
+reset, snapshot loads), for the NI status the Hub's register writes and resets. The first
+build stamped the controller with the Hub's writes alone, on the argument that nothing else
+changes it within a run. That was wrong: the master receiver's data read starts the next byte
+and sets PIN with no write, so a held status answered with the old one, and IRIX's controller
+driver read a byte that had not arrived, lost the system controller's keyswitch message, and
+was powered off without shutting down. The benchmark digests did not show it (none of their
+workloads receives from the controller); a release check did (`scripts/rc-ip27-demo.py`,
+whose keyswitch check now also requires IRIX's shutdown messages). The status and data
 registers are 8 bytes apart in one device page, and a page held one read, so each read of the
 pair replaced the other's: a device page now holds two (`DevicePage::held`, by bit 3 of the
 address, `Cpu::held_slot`; 256 bytes, and tier 1's check adds 72 bytes for the second).
 Tests: `ip27.ni_status_reads_hold_until_a_hub_write` (a settings write in a polling loop shows
-at the next read), `pcf8584.master_write_then_read` and `pcf8584.monitors_other_masters` (which
-reads have an effect), `mips.tier1.paired_device_reads.*` (two registers polled in turn are
+at the next read), `ip27.i2c_status_reads_see_reads_with_effect` (a dummy data read sets PIN,
+and the next status read shows it; it fails with the Hub's writes as the stamp),
+`pcf8584.master_write_then_read` and `pcf8584.monitors_other_masters` (which reads have an
+effect, and that completions and other masters' bytes count as changes), `mips.tier1.paired_device_reads.*` (two registers polled in turn are
 both held; a third in the first's slot replaces it; against the reference). Mutation checks
 (no `write_sequence` advance; one held read per page): each fails a test. `prom`'s slow paths
 111 to 80 million, `boot`'s 167 to 129 million (with PREF, below).

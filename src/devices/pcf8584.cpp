@@ -32,6 +32,7 @@ Pcf8584::Pcf8584(Scheduler& scheduler, Tracer& tracer, I2cBus& bus, std::string_
 }
 
 void Pcf8584::reset() {
+    changed();
     scheduler_.cancel(transfer_done_);
     control_ = 0;
     own_address_ = 0;
@@ -78,6 +79,7 @@ void Pcf8584::save_state(StateImage& image) const {
 }
 
 void Pcf8584::load_state(const StateImage& image) {
+    changed();
     Registers r{};
     if (image.get("pcf8584.registers", r)) {
         control_ = r.control;
@@ -131,6 +133,7 @@ std::uint8_t Pcf8584::read(bool a0) {
 }
 
 void Pcf8584::write(bool a0, std::uint8_t value) {
+    changed();
     if (!a0) {
         if ((control_ & eso) != 0) {
             data_ = value;
@@ -181,12 +184,14 @@ void Pcf8584::write(bool a0, std::uint8_t value) {
 }
 
 void Pcf8584::begin(Transfer transfer) {
+    changed();
     transfer_ = transfer;
     status_ |= pin;
     scheduler_.schedule_after(transfer_done_, byte_time());
 }
 
 void Pcf8584::finish_transfer() {
+    changed();
     bool acknowledged = true;
     switch (transfer_) {
     case Transfer::address:
@@ -215,6 +220,7 @@ void Pcf8584::finish_transfer() {
 }
 
 void Pcf8584::end_mastership() {
+    changed();
     scheduler_.cancel(transfer_done_);
     transfer_ = Transfer::none;
     master_ = false;
@@ -223,6 +229,7 @@ void Pcf8584::end_mastership() {
 }
 
 void Pcf8584::i2c_observed_byte(std::uint8_t byte) {
+    changed();
     // The shift register takes every byte on the bus.
     if (!master_) {
         data_ = byte;
@@ -230,6 +237,7 @@ void Pcf8584::i2c_observed_byte(std::uint8_t byte) {
 }
 
 void Pcf8584::i2c_observed_stop() {
+    changed();
     // A STOP from another agent ends any transfer this chip was running, and frees the bus.
     if (master_) {
         end_mastership();

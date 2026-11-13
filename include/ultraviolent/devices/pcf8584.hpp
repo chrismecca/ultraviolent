@@ -5,6 +5,7 @@
 #include <ultraviolent/core/trace.hpp>
 #include <ultraviolent/devices/i2c.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <string_view>
 
@@ -38,6 +39,13 @@ class Pcf8584 final : public I2cMonitor {
     // Whether read(a0) would change nothing: every read but S0's by the master receiver,
     // which starts the next byte.
     [[nodiscard]] bool read_has_no_effect(bool a0) const;
+    // Advances at every change of the registers a read returns: writes, transfers and their
+    // completion events, other masters' bytes and STOPs, reset, snapshot loads. A read without
+    // effect returns the same value while it is unchanged (a held read's stamp,
+    // Hub::read_stamp).
+    [[nodiscard]] const std::atomic<std::uint64_t>& changes() const {
+        return changes_;
+    }
     void write(bool a0, std::uint8_t value);
 
     void i2c_observed_byte(std::uint8_t byte) override;
@@ -74,6 +82,10 @@ class Pcf8584 final : public I2cMonitor {
     // Whether the last received byte was acknowledged; a NAK ends reception.
     bool last_acknowledged_{true};
     Transfer transfer_{Transfer::none};
+    std::atomic<std::uint64_t> changes_{};
+    void changed() {
+        changes_.fetch_add(1, std::memory_order_relaxed);
+    }
 };
 
 } // namespace ultraviolent::devices

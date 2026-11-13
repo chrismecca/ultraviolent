@@ -140,15 +140,28 @@ class Guest:
 
     def power_off(self, timeout=1800):
         """Turns the keyswitch off (monitor off) and waits until IRIX has shut down and the
-        system controller has removed power; returns whether it did."""
+        system controller has removed power; returns whether it did. The controller removes
+        power after its grace period whether IRIX shut down or not, so IRIX's own messages are
+        required too (observed 2026-11-13: a build that lost the controller's message passed
+        on power alone, and the unsynced chkconfig change was lost)."""
+        with self.lock:
+            start = len(self.text)
         self.monitor("off")
         try:
             self.proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return False
+        time.sleep(1)
+        with self.lock:
+            console = self.text[start:]
         self.err.flush()
         with open(self.err.name, "rb") as err:
-            return b"the system controller removed power" in err.read()
+            removed = b"the system controller removed power" in err.read()
+        shut_down = ("keyswitch turned OFF" in console and
+                     "The system is shutting down" in console)
+        if removed and not shut_down:
+            note("    power removed, but IRIX did not report the keyswitch and shut down")
+        return removed and shut_down
 
     def finish(self, timeout=600):
         """Ends the run as an operator would (monitor q) and waits for the files to be written."""

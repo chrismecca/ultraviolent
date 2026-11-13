@@ -798,6 +798,49 @@ const test::Registration ni_status_held{
         t.check(after, "every read after the write sees it");
     }};
 
+// The junk-bus I2C controller's status holds only while the controller is unchanged
+// (Pcf8584::changes), and some changes come with no Hub write: the master receiver's read of
+// S0 starts the next byte, which sets PIN. A START with the read bit, a loop polling S1 until
+// the address byte is done, then the dummy S0 read: the next S1 read
+// must show PIN set. observed 2026-11-13: with the Hub's write count as the stamp, that read
+// was answered with the old status, and IRIX lost the system controller's keyswitch message.
+const test::Registration i2c_status_held{
+    "ip27.i2c_status_reads_see_reads_with_effect", [](test::Context& t) {
+        std::vector<std::uint32_t> words(48, nop());
+        std::vector<std::uint32_t> code = {
+            // t1 = MD_UREG0_0 (S0; S1 at + 8).
+            lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2),
+            lui(t2, 0x22), daddu(t1, t0, t2)};
+        // Own address, 90 kHz clock, serial output on, then a START with address 0xa1 (a
+        // read; pcf8584_test.cpp "initialize"): the address byte completes 100 us later.
+        for (const auto [a0, value] : {std::pair{true, 0x80}, {false, 0x08}, {true, 0xa0},
+                                       {false, 0x1c}, {true, 0xc1}, {false, 0xa1},
+                                       {true, 0xc5}}) {
+            code.push_back(addiu(t3, zero, value));
+            code.push_back(sd(t3, a0 ? 8 : 0, t1));
+        }
+        const std::initializer_list<std::uint32_t> rest = {
+            lui(t5, 0xa800), dsll32(t5, t5, 0), ori(t5, t5, 0x1000), addiu(t7, zero, 0),
+            // Loop (index 24): S1 until PIN is clear; t7 counts passes.
+            ld(t2, 8, t1), andi(t4, t2, 0x80), bne(t4, zero, -12),
+            addiu(t7, t7, 1), sd(t2, 0, t5), sd(t7, 8, t5),
+            // The dummy read, then S1 again.
+            ld(t2, 0, t1), ld(t3, 8, t1), sd(t3, 16, t5), beq(zero, zero, -4), nop()};
+        code.insert(code.end(), rest);
+        t.check_equal(code.size(), std::size_t{35});
+        std::ranges::copy(code, words.begin());
+        std::vector<std::byte> prom(words.size() * 4);
+        for (std::size_t w = 0; w < words.size(); ++w) {
+            store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
+        }
+        Ip27Machine machine{small_config(), prom};
+        machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
+        machine.run(100000);
+        t.check((memory_word(machine, 0x1000) & 0x80) == 0, "PIN clear after the address byte");
+        t.check(memory_word(machine, 0x1008) > 100, "polled until then");
+        t.check((memory_word(machine, 0x1010) & 0x80) != 0, "the dummy read starts a byte");
+    }};
+
 // A held PI_RT_COUNT read steps through later windows, one count every P = f / 1.25 MHz
 // cycles (Ip27Machine::SynchronizedTarget::mmio_read_held), which is exact only if the
 // counter's tick at cycle c, as the Hub converts it (the cycle's time, then that time's

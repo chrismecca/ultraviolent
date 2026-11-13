@@ -122,7 +122,10 @@ const test::Registration master_transfers{
         // bit, a dummy read, NAK before the last byte, then more reads.
         b.chip.write(false, 0xa0);
         b.chip.write(true, 0xc5); // START
+        // The completion event changes what a read returns (Pcf8584::changes).
+        const std::uint64_t before = b.chip.changes().load();
         byte_time(b);
+        t.check(b.chip.changes().load() != before, "a completed byte is a change");
         t.check((b.chip.read(true) & (pin | lrb)) == 0, "address acknowledged");
         b.chip.write(false, 0x07);
         byte_time(b);
@@ -156,7 +159,10 @@ const test::Registration monitoring{"pcf8584.monitors_other_masters", [](test::C
                                         initialize(b);
                                         // Another master's byte lands in the shift register, which
                                         // S0 reads.
+                                        const std::uint64_t before = b.chip.changes().load();
                                         b.bus.broadcast(0xe0);
+                                        t.check(b.chip.changes().load() != before,
+                                                "another master's byte is a change");
                                         t.check(b.chip.read_has_no_effect(false),
                                                 "S0 reads have no effect when not the master");
                                         t.check_equal(b.chip.read(false), std::uint8_t{0xe0});

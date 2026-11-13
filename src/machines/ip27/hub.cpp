@@ -624,6 +624,7 @@ void Hub::run_bte(unsigned engine) {
 }
 
 void Hub::local_reset() {
+    write_sequence_.fetch_add(1, std::memory_order_relaxed);
     // hypothesis: a Hub local reset resets the node's CPUs with a cold reset and reinitializes
     // the Hub's modeled registers, except the error stack addresses, which the PROM relies on
     // to survive it (IP27.adoc "Hub local reset").
@@ -835,6 +836,7 @@ void Hub::save_state(StateImage& image) const {
 }
 
 void Hub::load_state(const StateImage& image) {
+    write_sequence_.fetch_add(1, std::memory_order_relaxed);
     for (std::size_t i = 0; i < stored_register_count; ++i) {
         image.get(std::format("hub.register.{:#08x}", stored_registers[i].offset), stored_[i]);
     }
@@ -950,6 +952,7 @@ std::optional<std::uint64_t> Hub::serve_vector_pio(unsigned type, std::uint64_t 
 }
 
 void Hub::reset(ResetKind kind) {
+    write_sequence_.fetch_add(1, std::memory_order_relaxed);
     if (kind == ResetKind::warm) {
         // hypothesis: a soft reset leaves the Hub's registers unchanged.
         return;
@@ -997,8 +1000,8 @@ std::expected<void, AccessFault> Hub::Port::mmio_write(std::uint64_t offset, Acc
 }
 
 bool Hub::read_has_no_effect(std::uint64_t offset) const {
-    // The PCF8584 changes only through its own writes and its transfer events; NI_STATUS_REV_ID
-    // only through its own write (the link is cabled or not for the machine's life).
+    // The PCF8584 counts its own changes; NI_STATUS_REV_ID changes only through its own write
+    // or a reset (the link is cabled or not for the machine's life).
     switch (offset) {
     case md_ureg0_0:
     case md_ureg0_1:
@@ -1008,6 +1011,10 @@ bool Hub::read_has_no_effect(std::uint64_t offset) const {
     default:
         return false;
     }
+}
+
+const std::atomic<std::uint64_t>& Hub::read_stamp(std::uint64_t offset) const {
+    return offset == md_ureg0_0 || offset == md_ureg0_1 ? i2c_.changes() : write_sequence_;
 }
 
 std::expected<std::uint64_t, AccessFault> Hub::read(unsigned slice, std::uint64_t offset,
