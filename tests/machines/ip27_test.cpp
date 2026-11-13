@@ -804,41 +804,72 @@ const test::Registration ni_status_held{
 // the address byte is done, then the dummy S0 read: the next S1 read
 // must show PIN set. observed 2026-11-13: with the Hub's write count as the stamp, that read
 // was answered with the old status, and IRIX lost the system controller's keyswitch message.
+// The program: with `gate`, a CPU other than A (PI_CPU_NUM 0) waits in a loop.
+std::vector<std::byte> i2c_dummy_read_prom(bool gate) {
+    std::vector<std::uint32_t> words(64, nop());
+    std::vector<std::uint32_t> code = {lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100),
+                                       daddu(t0, t0, t2)};
+    std::size_t gate_branch = 0;
+    if (gate) {
+        code.push_back(ld(t9, 0x20, t0));
+        gate_branch = code.size();
+        code.push_back(nop()); // the branch to the waiting loop, below
+        code.push_back(nop());
+    }
+    // t1 = MD_UREG0_0 (S0; S1 at + 8).
+    code.insert(code.end(), {lui(t2, 0x22), daddu(t1, t0, t2)});
+    // Own address, 90 kHz clock, serial output on, then a START with address 0xa1 (a read;
+    // pcf8584_test.cpp "initialize"): the address byte completes 100 us later.
+    for (const auto& [a0, value] : {std::pair{true, 0x80}, {false, 0x08}, {true, 0xa0},
+                                    {false, 0x1c}, {true, 0xc1}, {false, 0xa1}, {true, 0xc5}}) {
+        code.push_back(addiu(t3, zero, value));
+        code.push_back(sd(t3, a0 ? 8 : 0, t1));
+    }
+    // S1 until PIN is clear (t7 counts passes), the dummy read, then S1 again.
+    code.insert(code.end(),
+                {lui(t5, 0xa800), dsll32(t5, t5, 0), ori(t5, t5, 0x1000), addiu(t7, zero, 0),
+                 ld(t2, 8, t1), andi(t4, t2, 0x80), bne(t4, zero, -12), addiu(t7, t7, 1),
+                 sd(t2, 0, t5), sd(t7, 8, t5), ld(t2, 0, t1), ld(t3, 8, t1), sd(t3, 16, t5),
+                 beq(zero, zero, -4), nop()});
+    if (gate) {
+        const auto wait = static_cast<std::int32_t>(code.size());
+        code[gate_branch] =
+            bne(t9, zero, (wait - static_cast<std::int32_t>(gate_branch) - 1) * 4);
+        code.insert(code.end(), {beq(zero, zero, -4), nop()});
+    }
+    std::ranges::copy(code, words.begin());
+    std::vector<std::byte> prom(words.size() * 4);
+    for (std::size_t w = 0; w < words.size(); ++w) {
+        store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
+    }
+    return prom;
+}
+
+void check_i2c_dummy_read(test::Context& t, Ip27Machine& machine) {
+    t.check((memory_word(machine, 0x1000) & 0x80) == 0, "PIN clear after the address byte");
+    t.check(memory_word(machine, 0x1008) > 100, "polled until then");
+    t.check((memory_word(machine, 0x1010) & 0x80) != 0, "the dummy read starts a byte");
+}
+
 const test::Registration i2c_status_held{
     "ip27.i2c_status_reads_see_reads_with_effect", [](test::Context& t) {
-        std::vector<std::uint32_t> words(48, nop());
-        std::vector<std::uint32_t> code = {
-            // t1 = MD_UREG0_0 (S0; S1 at + 8).
-            lui(t0, 0x9200), dsll32(t0, t0, 0), lui(t2, 0x0100), daddu(t0, t0, t2),
-            lui(t2, 0x22), daddu(t1, t0, t2)};
-        // Own address, 90 kHz clock, serial output on, then a START with address 0xa1 (a
-        // read; pcf8584_test.cpp "initialize"): the address byte completes 100 us later.
-        for (const auto& [a0, value] : {std::pair{true, 0x80}, {false, 0x08}, {true, 0xa0},
-                                       {false, 0x1c}, {true, 0xc1}, {false, 0xa1},
-                                       {true, 0xc5}}) {
-            code.push_back(addiu(t3, zero, value));
-            code.push_back(sd(t3, a0 ? 8 : 0, t1));
-        }
-        const std::initializer_list<std::uint32_t> rest = {
-            lui(t5, 0xa800), dsll32(t5, t5, 0), ori(t5, t5, 0x1000), addiu(t7, zero, 0),
-            // Loop (index 24): S1 until PIN is clear; t7 counts passes.
-            ld(t2, 8, t1), andi(t4, t2, 0x80), bne(t4, zero, -12),
-            addiu(t7, t7, 1), sd(t2, 0, t5), sd(t7, 8, t5),
-            // The dummy read, then S1 again.
-            ld(t2, 0, t1), ld(t3, 8, t1), sd(t3, 16, t5), beq(zero, zero, -4), nop()};
-        code.insert(code.end(), rest);
-        t.check_equal(code.size(), std::size_t{35});
-        std::ranges::copy(code, words.begin());
-        std::vector<std::byte> prom(words.size() * 4);
-        for (std::size_t w = 0; w < words.size(); ++w) {
-            store_unsigned(std::span{prom}.subspan(w * 4, 4), words[w], ByteOrder::big);
-        }
-        Ip27Machine machine{small_config(), prom};
+        Ip27Machine machine{small_config(), i2c_dummy_read_prom(false)};
         machine.cpu().mtc0(mips::cp0::status, mips::status::kx);
         machine.run(100000);
-        t.check((memory_word(machine, 0x1000) & 0x80) == 0, "PIN clear after the address byte");
-        t.check(memory_word(machine, 0x1008) > 100, "polled until then");
-        t.check((memory_word(machine, 0x1010) & 0x80) != 0, "the dummy read starts a byte");
+        check_i2c_dummy_read(t, machine);
+    }};
+
+// The same on host threads, where the Hub's reads without effect hold too
+// (Ip27Machine::SynchronizedTarget::mmio_read_held), deciding the effect under the device lock.
+const test::Registration i2c_status_held_parallel{
+    "ip27.parallel.i2c_status_reads_see_reads_with_effect", [](test::Context& t) {
+        Ip27Machine machine{two_cpu_config(), i2c_dummy_read_prom(true)};
+        for (unsigned cpu = 0; cpu < 2; ++cpu) {
+            machine.cpu(cpu).mtc0(mips::cp0::status, mips::status::kx);
+        }
+        machine.set_parallel(true, 100);
+        machine.run(100000);
+        check_i2c_dummy_read(t, machine);
     }};
 
 // A held PI_RT_COUNT read steps through later windows, one count every P = f / 1.25 MHz

@@ -1083,6 +1083,28 @@ Ip27Machine::SynchronizedTarget::mmio_read_held(std::uint64_t offset, AccessWidt
         // cycle count and the counter's origin, which changes only with rt_sequence: so the read
         // holds for the count's window and steps through later ones, as with one CPU (SMP.adoc
         // "S4", JIT.adoc "Device time"). Read under the sequence, as Hub::rt_count_at.
+        if (hub_ != nullptr && width == AccessWidth::bits64 && offset != Hub::rt_count_offset &&
+            offset != Hub::int_pend0_offset && offset != Hub::int_pend1_offset) {
+            // A Hub register read without effect holds while its stamp is unchanged, as with one
+            // CPU: the CPU's run stops at the next event, and another CPU's changes (under the
+            // device lock) advance the stamp. Whether the read has an effect is decided under the
+            // lock with the read, so that no other CPU changes the register in between.
+            return machine_.locked_access([&]() -> std::expected<HeldRead, AccessFault> {
+                const bool no_effect = hub_->read_has_no_effect(offset);
+                auto value = target_.mmio_read(offset, width);
+                if (!value) {
+                    return std::unexpected(value.error());
+                }
+                if (!no_effect) {
+                    return HeldRead{.value = *value};
+                }
+                const std::atomic<std::uint64_t>& stamp = hub_->read_stamp(offset);
+                return HeldRead{.value = *value,
+                                .until = ~std::uint64_t{0},
+                                .stamp = &stamp,
+                                .stamp_value = stamp.load(std::memory_order_relaxed)};
+            });
+        }
         if (hub_ == nullptr || offset != Hub::rt_count_offset || width != AccessWidth::bits64) {
             auto value = mmio_read(offset, width);
             if (!value) {
