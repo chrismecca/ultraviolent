@@ -107,12 +107,12 @@ std::expected<void, std::string> validate(const Ip27Config& config,
     if (config.module == ModuleType::deskside && config.node_slot > 2) {
         return std::unexpected("a deskside module has node slots n1 and n2");
     }
-    if (config.nodes < 1 || config.nodes > 2) {
-        return std::unexpected("one or two node boards");
+    if (config.nodes < 1 || config.nodes > (config.module == ModuleType::deskside ? 2 : 4)) {
+        return std::unexpected("a deskside module holds one or two node boards, a rack module one "
+                               "to four");
     }
-    if (config.nodes == 2 && (config.module != ModuleType::deskside || config.node_slot != 1)) {
-        // A rack module's n1 and n2 are on different Crossbows, which is not modeled.
-        return std::unexpected("two nodes are modeled in a deskside module, in n1 and n2");
+    if (config.nodes > 1 && config.node_slot != 1) {
+        return std::unexpected("several node boards fill the module's node slots from n1");
     }
     if (config.cpus < 1 || config.cpus > 2) {
         return std::unexpected("a node holds one or two CPUs");
@@ -245,6 +245,12 @@ unsigned hub_xbow_port(ModuleType module, unsigned slot) {
     return ports[slot];
 }
 
+unsigned hub_xbow(ModuleType module, unsigned slot) {
+    // observed: the rack module's Crossbow 0 holds n1 and n3, Crossbow 1 n2 and n4 (IP27.adoc
+    // "Crossbow", the PROM's IO slot tables).
+    return module == ModuleType::rack && (slot == 2 || slot == 4) ? 1 : 0;
+}
+
 unsigned node_slot_id(ModuleType module, unsigned slot) {
     // observed: the PROM maps SN0 slot IDs 0-7 through 0xf0, 0xf0, 0x52, 0x51, 4, 3, 2, 1
     // (0xf0 invalid): IDs 3 and 2 are deskside n1 and n2, IDs 7-4 rack n1-n4.
@@ -256,7 +262,8 @@ unsigned node_slot_id(ModuleType module, unsigned slot) {
 
 Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
                         std::span<const std::byte> prom)
-    : machine{owner}, index{node_index}, memory{owner.config_.memory_bytes}, flash{flash_size},
+    : machine{owner}, index{node_index}, slot{slot}, memory{owner.config_.memory_bytes},
+      flash{flash_size},
       flash_device{owner.scheduler_, owner.tracer_, flash.bytes(), [this] { flash_mode_changed(); },
                    node_index == 0 ? std::string{} : std::format("node{}.flash", node_index)},
       flash_interface{flash_device, owner.tracer_}, flash_commands{flash_interface},
@@ -315,18 +322,16 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     : config_{config} {
     invariant(validate(config, prom).has_value(),
               "Ip27Machine built from an invalid configuration");
-    Node& node = *nodes_.emplace_back(std::make_unique<Node>(*this, 0, config.node_slot, prom));
-    processors_[0] = &node.cpu_a;
-    if (node.cpu_b) {
-        processors_[1] = &*node.cpu_b;
-    }
-    if (config.nodes == 2) {
-        Node& second = *nodes_.emplace_back(std::make_unique<Node>(*this, 1, 2, prom));
-        processors_[2] = &second.cpu_a;
-        if (second.cpu_b) {
-            processors_[3] = &*second.cpu_b;
+    // Node boards fill the module's slots from n1 (one may sit in any slot).
+    for (unsigned i = 0; i < config.nodes; ++i) {
+        Node& n = *nodes_.emplace_back(
+            std::make_unique<Node>(*this, i, config.nodes == 1 ? config.node_slot : i + 1, prom));
+        processors_[2 * i] = &n.cpu_a;
+        if (n.cpu_b) {
+            processors_[2 * i + 1] = &*n.cpu_b;
         }
     }
+    Node& node = *nodes_.front();
     for (Processor* p : processors_) {
         if (p != nullptr) {
             installed_[cpu_count_++] = p;
@@ -353,15 +358,23 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
         }
     });
     elsc_.connect_power_off([this] { request_stop(); });
-    if (nodes_.size() == 2) {
+    if (nodes_.size() == 2 && config_.module == ModuleType::deskside) {
         // slate's two Hubs are cabled to each other without a router (SMP.adoc "S5").
         nodes_[0]->hub.connect_link(nodes_[1]->hub);
         nodes_[1]->hub.connect_link(nodes_[0]->hub);
+    } else if (nodes_.size() > 1) {
+        connect_routers();
     }
     for (auto& n : nodes_) {
-        n->hub.connect_xtalk(xbow_);
-        xbow_.attach(hub_xbow_port(config_.module, n->index == 0 ? config_.node_slot : 2),
-                     n->hub.widget());
+        devices::Xbow* xbow = &xbow_;
+        if (hub_xbow(config_.module, n->slot) == 1) {
+            if (xbow1_ == nullptr) {
+                xbow1_ = std::make_unique<devices::Xbow>(tracer_);
+            }
+            xbow = xbow1_.get();
+        }
+        n->hub.connect_xtalk(*xbow);
+        xbow->attach(hub_xbow_port(config_.module, n->slot), n->hub.widget());
     }
     xbow_.attach(baseio_port(config_.module), baseio_bridge_);
     baseio_bridge_.connect(xbow_);
@@ -428,6 +441,39 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     map_views();
 }
 
+Ip27Machine::RouterBoard::RouterBoard(Tracer& tracer, unsigned board_slot)
+    : slot{board_slot}, router{tracer, std::format("r{}", board_slot), 0x10 - board_slot},
+      nic{0x09, 0x20 + board_slot} {
+    // hypothesis: the router board's NIC holds a manufacturing record like the node board's;
+    // its part number and name are not known (synthetic).
+    nic.memory() = board_nic_memory({.serial = std::format("UVXR{:02}", board_slot),
+                                     .part = "030-9999-002", .revision = "A", .name = "ROUTER"});
+    mlan.attach(nic);
+    router.connect_mlan(mlan);
+}
+
+void Ip27Machine::connect_routers() {
+    // A rack module's routers (MULTINODE.adoc; Rackmount Owner's Guide 007-3456-003, chapter
+    // 2: each router board links two node boards and the module's other router). r1 serves n1
+    // and n2, r2 n3 and n4. hypothesis: Hubs on ports 4 and 5, the routers joined by port 6.
+    constexpr unsigned first_hub_port = 4;
+    constexpr unsigned router_port = 6;
+    const unsigned boards = nodes_.size() > 2 ? 2 : 1;
+    for (unsigned board = 1; board <= boards; ++board) {
+        routers_.push_back(std::make_unique<RouterBoard>(tracer_, board));
+    }
+    for (auto& n : nodes_) {
+        Router& router = routers_[(n->slot - 1) / 2]->router;
+        const unsigned port = first_hub_port + (n->slot - 1) % 2;
+        router.connect(port, n->hub, 0);
+        n->hub.connect_link(router, port);
+    }
+    if (boards == 2) {
+        routers_[0]->router.connect(router_port, routers_[1]->router, router_port);
+        routers_[1]->router.connect(router_port, routers_[0]->router, router_port);
+    }
+}
+
 void Ip27Machine::map_views() {
     // Each view changes as a whole (AddressSpace::begin_update).
     for (auto& node : nodes_) {
@@ -446,8 +492,14 @@ void Ip27Machine::Node::map_system_windows() {
     bus.clear();
     map_resources(*this, std::uint64_t{hub.node_id()} << node_id_shift);
     map_aliases();
+    // While the PROM hands out node IDs, several nodes may still share one: the first in
+    // index order holds those addresses (hypothesis; software addresses a node by ID only once
+    // its ID is unique).
+    std::array<bool, std::size_t{1} << 9> mapped{};
+    mapped[hub.node_id()] = true;
     for (const auto& other : machine.nodes_) {
-        if (other.get() != this && other->hub.node_id() != hub.node_id()) {
+        if (other.get() != this && !mapped[other->hub.node_id()]) {
+            mapped[other->hub.node_id()] = true;
             map_resources(*other, std::uint64_t{other->hub.node_id()} << node_id_shift);
         }
     }
@@ -707,11 +759,21 @@ StateImage Ip27Machine::save_state() {
     node.directory.save_state(image);
     image.put_sparse("memory", node.memory.bytes());
     if (nodes_.size() > 1) {
-        // The second node's components keep their field names under "node1.".
+        // Each further node's components keep their field names under "node<index>.".
         image.put("machine.nodes", std::uint64_t{nodes_.size()});
-        StateImage second;
-        nodes_[1]->save_state(second);
-        image.put_image("node1.", second);
+        for (std::size_t i = 1; i < nodes_.size(); ++i) {
+            StateImage other;
+            nodes_[i]->save_state(other);
+            image.put_image(std::format("node{}.", i), other);
+        }
+    }
+    if (xbow1_ != nullptr) {
+        StateImage crossbow;
+        xbow1_->save_state(crossbow);
+        image.put_image("crossbow1.", crossbow);
+    }
+    for (const auto& board : routers_) {
+        board->router.save_state(image, std::format("router{}.", board->slot));
     }
     return image;
 }
@@ -822,8 +884,16 @@ std::expected<void, std::string> Ip27Machine::load_state(const StateImage& image
     ethernet_phy_.load_state(image);
     controller_nvram_.load_state(image, "controller_nvram");
     node.directory.load_state(image);
-    if (nodes_.size() > 1 && !nodes_[1]->load_state(image.sub_image("node1."))) {
-        return std::unexpected("snapshot memory is malformed");
+    for (std::size_t i = 1; i < nodes_.size(); ++i) {
+        if (!nodes_[i]->load_state(image.sub_image(std::format("node{}.", i)))) {
+            return std::unexpected("snapshot memory is malformed");
+        }
+    }
+    if (xbow1_ != nullptr) {
+        xbow1_->load_state(image.sub_image("crossbow1."));
+    }
+    for (const auto& board : routers_) {
+        board->router.load_state(image, std::format("router{}.", board->slot));
     }
     // The Hubs' node IDs and the flash modes decide each node's view.
     map_views();
@@ -837,6 +907,12 @@ void Ip27Machine::reset(ResetKind kind) {
     }
     if (kind != ResetKind::warm) {
         xbow_.reset();
+        if (xbow1_ != nullptr) {
+            xbow1_->reset();
+        }
+        for (const auto& board : routers_) {
+            board->router.reset();
+        }
         baseio_bridge_.reset();
     }
     for (auto& node : nodes_) {
@@ -880,25 +956,27 @@ void Ip27Machine::step() {
 
 void Ip27Machine::step(Processor& processor) {
     const mips::IntegerState& state = processor.cpu.state();
-    // With several CPUs, each line names the CPU's slice, and with two nodes its node slot.
-    constexpr std::array<std::string_view, 4> slices = {"A ", "B ", "n2 A ", "n2 B "};
-    constexpr std::array<std::string_view, 4> node_slices = {"n1 A ", "n1 B ", "n2 A ",
-                                                             "n2 B "};
-    const auto index = static_cast<std::size_t>(std::ranges::find(processors_, &processor) -
-                                                processors_.begin());
-    const std::string_view slice = cpu_count() == 1   ? ""
-                                   : nodes_.size() > 1 ? node_slices[index]
-                                                       : slices[index];
+    // With several CPUs, each line names the CPU's slice, and with several nodes its node
+    // slot.
+    // Named only when a line is written: this runs on every reference-mode instruction.
+    const auto slice = [&] {
+        const auto index = static_cast<std::size_t>(std::ranges::find(processors_, &processor) -
+                                                    processors_.begin());
+        return cpu_count() == 1 ? std::string{}
+               : nodes_.size() > 1
+                   ? std::format("n{} {} ", nodes_[index / 2]->slot, index % 2 == 0 ? 'A' : 'B')
+                   : std::string{index % 2 == 0 ? "A " : "B "};
+    };
     for (const std::uint64_t probe : pc_probes_) {
         if (probe == state.pc) {
             tracer_.log(TraceCategory::cpu,
                         "{}probe {:#018x} a0 {:#x} a1 {:#x} a2 {:#x} a3 {:#x} ra {:#x} v0 {:#x}",
-                        slice, state.pc, state.gpr[4], state.gpr[5], state.gpr[6], state.gpr[7],
+                        slice(), state.pc, state.gpr[4], state.gpr[5], state.gpr[6], state.gpr[7],
                         state.gpr[31], state.gpr[2]);
         }
     }
     if (tracer_.enabled(TraceCategory::cpu) && pc_probes_.empty()) {
-        tracer_.log(TraceCategory::cpu, "{}pc {:#018x}", slice, state.pc);
+        tracer_.log(TraceCategory::cpu, "{}pc {:#018x}", slice(), state.pc);
     }
     executing_ = true;
     processor.interpreter.step();

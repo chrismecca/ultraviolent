@@ -107,6 +107,7 @@ ultraviolent_enable_sanitizers(ultraviolent_devices)
 add_library(ultraviolent_ip27
     src/machines/ip27/directory_memory.cpp
     src/machines/ip27/hub.cpp
+    src/machines/ip27/router.cpp
     src/machines/ip27/ip27_machine.cpp
     src/machines/ip27/prom_image.cpp
 )

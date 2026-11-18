@@ -71,7 +71,7 @@ void usage() {
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
         "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
         "                    [--parallel] [--parallel-window CYCLES]\n"
-        "                    [--module rack|deskside] [--nodes 1|2] [--cpu r10000|r12000]\n"
+        "                    [--module rack|deskside] [--nodes 1-4] [--cpu r10000|r12000]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
         "from a snapshot. Snapshots are for exploration; checkpoints need a cold run.\n"
@@ -128,8 +128,9 @@ void usage() {
         "--parallel-window cycles ahead of the slowest (default 10000; doc/SMP.adoc \"S4\"):\n"
         "faster, not deterministic, and without --trace cpu, --probe, or --sample-pc.\n"
         "--module rack puts the node in a rack module (default deskside, as slate;\n"
-        "doc/IP27.adoc \"Machine type\"). --nodes 2 adds a second node board in n2 (deskside\n"
-        "only; doc/SMP.adoc); give --flash once per node to keep each node's flash PROM.\n"
+        "doc/IP27.adoc \"Machine type\"). --nodes 2 adds a second node board in n2 (doc/SMP.adoc);\n"
+        "a rack module takes up to 4 (doc/MULTINODE.adoc); give --flash once per node to\n"
+        "keep each node's flash PROM.\n"
         "--cpu r12000 fits R12000s of slate's revision (default r10000; the clock is the\n"
         "flash PROM's; doc/SMP.adoc \"S6\").\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
@@ -436,11 +437,11 @@ std::optional<Options> parse(std::span<char*> arguments) {
             options.processor =
                 value == "r12000" ? ip27::ProcessorType::r12000 : ip27::ProcessorType::r10000;
         } else if (flag == "--nodes") {
-            if (value != "1" && value != "2") {
-                std::fprintf(stderr, "--nodes takes 1 or 2\n");
+            if (value.size() != 1 || value[0] < '1' || value[0] > '4') {
+                std::fprintf(stderr, "--nodes takes 1 to 4\n");
                 return std::nullopt;
             }
-            options.nodes = value == "2" ? 2 : 1;
+            options.nodes = static_cast<unsigned>(value[0] - '0');
         } else if (flag == "--cpus") {
             if (value != "1" && value != "2") {
                 std::fprintf(stderr, "--cpus takes 1 or 2\n");

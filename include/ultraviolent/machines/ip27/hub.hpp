@@ -10,6 +10,7 @@
 #include <ultraviolent/devices/one_wire.hpp>
 #include <ultraviolent/devices/pcf8584.hpp>
 #include <ultraviolent/machines/ip27/directory_memory.hpp>
+#include <ultraviolent/machines/ip27/numalink.hpp>
 #include <ultraviolent/xtalk/xtalk.hpp>
 
 #include <array>
@@ -33,7 +34,7 @@ namespace ultraviolent::ip27 {
 // Each CPU reaches the registers through its own port, as each processor has its own SysAD
 // connection into the processor interface (PI): the port is how the Hub knows which CPU is
 // asking (PI_CPU_NUM; ADR-023).
-class Hub final {
+class Hub final : public VectorTarget {
   public:
     // IALIAS: 8 MB at the start of widget 1's I/O window.
     static constexpr std::uint64_t window_size = 0x80'0000;
@@ -166,11 +167,17 @@ class Hub final {
         node_id_changed_ = std::move(changed);
     }
 
-    // The NUMAlink cable to `neighbor`'s NI, with no router between (SMP.adoc "S5"): the link
-    // reports up, and vector PIO reaches the neighbor's NI registers. Connect both ends.
-    void connect_link(Hub& neighbor) {
+    // The NUMAlink cable to `neighbor`'s `port`: another Hub's NI with no router between
+    // (SMP.adoc "S5"; port 0), or a router's port (MULTINODE.adoc). The link reports up, and
+    // vector PIO goes out along it. Connect both ends.
+    void connect_link(VectorTarget& neighbor, unsigned port = 0) {
         neighbor_ = &neighbor;
+        neighbor_port_ = port;
     }
+    // A vector request arriving over the link: served on this Hub's NI registers.
+    // hypothesis: whatever route remains, it ends here (a Hub has one port).
+    VectorResult vector_request(std::uint64_t route, unsigned port, unsigned type,
+                                std::uint64_t address, std::uint64_t data) override;
     // The node board's MicroLAN (MD_MLAN_CTL), with its NICs (IP27.adoc "NICs").
     void connect_mlan(devices::OneWireBus& bus) {
         mlan_bus_ = &bus;
@@ -243,8 +250,6 @@ class Hub final {
     // serves one that arrives from the neighbor, returning the read value or no value for an
     // address error.
     void start_vector_pio();
-    std::optional<std::uint64_t> serve_vector_pio(unsigned type, std::uint64_t address,
-                                                  std::uint64_t data);
 
     Scheduler& scheduler_;
     Tracer& tracer_;
@@ -277,7 +282,8 @@ class Hub final {
     // The line sampled by the last MicroLAN operation; released (1) with nothing attached.
     bool mlan_line_{true};
     devices::OneWireBus* mlan_bus_{};
-    Hub* neighbor_{};
+    VectorTarget* neighbor_{};
+    unsigned neighbor_port_{};
     // NI_META_TABLE(0-31) then NI_LOCAL_TABLE(0-15): routing table exit ports.
     std::array<std::uint64_t, 48> routing_tables_{};
     // NI_VECTOR_STATUS, NI_RETURN_VECTOR, NI_VECTOR_READ_DATA: the last vector PIO response.

@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 namespace ultraviolent::mips {
 
@@ -23,8 +24,8 @@ class Cpu;
 // is parked: waiting where it stores nothing before it checks the generation again.
 class Coherence {
   public:
-    // Two nodes of two CPUs (SMP.adoc "S5: the second node").
-    static constexpr unsigned max_cpus = 4;
+    // Eight nodes of two CPUs (MULTINODE.adoc).
+    static constexpr unsigned max_cpus = 16;
     // hypothesis: a reservation covers one secondary-cache block, 128 bytes (SCBlkSize 32
     // words in the IP27's R10000 mode bits, IP27.adoc "Reset mode bits"); a store by another
     // CPU anywhere in it breaks the reservation.
@@ -128,15 +129,19 @@ class Coherence {
         advance_generation();
     }
 
-    // CPUs 0 and 1 keep the two-CPU snapshot field; CPUs 2 and 3 have their own.
+    // CPUs 0 and 1 keep the two-CPU snapshot field, 2 and 3 the four-CPU one; each further
+    // pair its own, saved only when one of its CPUs is attached.
     void save_state(StateImage& image) const {
-        image.put("coherence.reservations", half(0));
-        image.put("coherence.reservations_2", half(2));
+        for (unsigned first = 0; first < max_cpus; first += 2) {
+            if (first < 4 || cpus_[first] != nullptr || cpus_[first + 1] != nullptr) {
+                image.put(field(first), half(first));
+            }
+        }
     }
     void load_state(const StateImage& image) {
-        for (const unsigned first : {0u, 2u}) {
-            std::array<Reservation, 2> pair = half(first);
-            image.get(first == 0 ? "coherence.reservations" : "coherence.reservations_2", pair);
+        for (unsigned first = 0; first < max_cpus; first += 2) {
+            std::array<Reservation, 2> pair{};
+            image.get(field(first), pair);
             reservations_[first] = pair[0];
             reservations_[first + 1] = pair[1];
         }
@@ -157,6 +162,10 @@ class Coherence {
     void advance_generation() {
         generation_.store(generation_.load(std::memory_order_relaxed) + 1,
                           std::memory_order_relaxed);
+    }
+    [[nodiscard]] static std::string field(unsigned first) {
+        return first == 0 ? std::string{"coherence.reservations"}
+                          : "coherence.reservations_" + std::to_string(first);
     }
     [[nodiscard]] std::array<Reservation, 2> half(unsigned first) const {
         return {reservations_[first], reservations_[first + 1]};

@@ -516,8 +516,23 @@ const test::Registration controller{
         config.node_slot = 1;
         config.nodes = 2;
         t.check(ip27::validate(config, program({nop()})).has_value(), "two nodes, deskside");
+        config.nodes = 3;
+        t.check(!ip27::validate(config, program({nop()})), "a deskside holds two nodes");
         config.module = ip27::ModuleType::rack;
-        t.check(!ip27::validate(config, program({nop()})), "two nodes need one Crossbow");
+        t.check(ip27::validate(config, program({nop()})).has_value(), "three nodes, rack");
+        config.nodes = 4;
+        t.check(ip27::validate(config, program({nop()})).has_value(), "four nodes, rack");
+        config.nodes = 5;
+        t.check(!ip27::validate(config, program({nop()})), "a rack module holds four");
+        config.nodes = 2;
+        config.node_slot = 2;
+        t.check(!ip27::validate(config, program({nop()})), "several nodes start at n1");
+        // The rack module's Crossbows: n1 and n3 on 0, n2 and n4 on 1.
+        t.check_equal(ip27::hub_xbow(ip27::ModuleType::rack, 1), 0u);
+        t.check_equal(ip27::hub_xbow(ip27::ModuleType::rack, 2), 1u);
+        t.check_equal(ip27::hub_xbow(ip27::ModuleType::rack, 3), 0u);
+        t.check_equal(ip27::hub_xbow(ip27::ModuleType::rack, 4), 1u);
+        t.check_equal(ip27::hub_xbow(ip27::ModuleType::deskside, 2), 0u);
     }};
 
 const test::Registration crosstalk{

@@ -28,6 +28,7 @@
 #include <ultraviolent/devices/xbow.hpp>
 #include <ultraviolent/machines/ip27/directory_memory.hpp>
 #include <ultraviolent/machines/ip27/hub.hpp>
+#include <ultraviolent/machines/ip27/router.hpp>
 #include <ultraviolent/scsi/cdrom.hpp>
 #include <ultraviolent/scsi/disk.hpp>
 
@@ -88,12 +89,12 @@ struct Ip27Config {
     // hypothesis: Hub 2.4 (IP27.adoc "Hub").
     unsigned hub_revision{Hub::default_revision};
     // The node board's module slot, n1-n4 (IP27.adoc "Machine type"); n1 like slate's first
-    // node board. With two nodes they are n1 and n2.
+    // node board. With several nodes they fill n1, n2, ... in order.
     unsigned node_slot{1};
     // Deskside, slate's chassis (ADR-021, the target); a rack module is the other layout.
     ModuleType module{ModuleType::deskside};
-    // Node boards: 1, or 2 in a deskside module (SMP.adoc "S5: the second node"). Each has
-    // `memory_bytes` and `cpus`.
+    // Node boards: 1, 2 in a deskside module (SMP.adoc "S5: the second node"), or up to 4 in a
+    // rack module (MULTINODE.adoc). Each has `memory_bytes` and `cpus`.
     unsigned nodes{1};
     // CPUs on the node board, from slice A: 1 or 2 (SMP.adoc; slate's node boards hold two).
     unsigned cpus{1};
@@ -157,6 +158,15 @@ std::uint32_t reset_config_word(const Ip27Config& config, std::span<const std::b
 // Host configuration errors, reported before a machine is built (ENGINEERING "Errors").
 std::expected<void, std::string> validate(const Ip27Config& config,
                                           std::span<const std::byte> prom);
+
+// The most node boards a machine holds (MULTINODE.adoc: two modules of four).
+inline constexpr unsigned max_nodes = 8;
+// The most CPUs: two per node board.
+inline constexpr unsigned max_cpus = 2 * max_nodes;
+
+// The Crossbow a rack module's node slot n`slot` is cabled to (IP27.adoc "Crossbow"): 0 for
+// n1 and n3, with the BaseIO; 1 for n2 and n4. A deskside module has one.
+unsigned hub_xbow(ModuleType module, unsigned slot);
 
 // The IP27 machine personality: owns the node's components and their wiring (ARCHITECTURE
 // "Machine personality"). Decoding follows IP27.adoc.
@@ -588,6 +598,8 @@ class Ip27Machine {
 
         Ip27Machine& machine;
         unsigned index;
+        // The module slot, n1-n4.
+        unsigned slot;
         AddressSpace bus{ByteOrder::big};
         MemoryBlock memory;
         MemoryBlock flash;
@@ -642,9 +654,9 @@ class Ip27Machine {
     mips::Coherence coherence_;
     std::vector<std::unique_ptr<Node>> nodes_;
     // Indexed node * 2 + slice; null where no CPU is installed.
-    std::array<Processor*, 4> processors_{};
+    std::array<Processor*, max_cpus> processors_{};
     // The installed CPUs in index order, the first cpu_count_ entries.
-    std::array<Processor*, 4> installed_{};
+    std::array<Processor*, max_cpus> installed_{};
     unsigned cpu_count_{};
     // The CPU run() is running, an index into installed_.
     unsigned running_{};
@@ -655,6 +667,19 @@ class Ip27Machine {
     mips::ExecutionEngine engine_{mips::ExecutionEngine::tier0};
     // The module's crossbow and the Hub's crosstalk windows (IP27.adoc "Xtalk").
     devices::Xbow xbow_{tracer_};
+    // A rack module's second Crossbow, for node slots n2 and n4, when a node is there.
+    std::unique_ptr<devices::Xbow> xbow1_;
+    // A rack module's router boards (MULTINODE.adoc), r1 then r2: the Router ASIC and the
+    // board's MicroLAN with its NIC.
+    struct RouterBoard {
+        RouterBoard(Tracer& tracer, unsigned slot);
+        unsigned slot;
+        Router router;
+        devices::OneWireBus mlan;
+        devices::Nic nic;
+    };
+    std::vector<std::unique_ptr<RouterBoard>> routers_;
+    void connect_routers();
     // The BaseIO board's Bridge, on Crossbow port `baseio_port`.
     devices::Bridge baseio_bridge_{tracer_, baseio_port(config_.module)};
     // The BaseIO board's NICs on the Bridge's NIC bus: the MIO daughterboard and the BASEIO

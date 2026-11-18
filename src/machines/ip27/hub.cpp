@@ -318,9 +318,6 @@ constexpr std::uint64_t nvp_address = 0xf'fff8;
 constexpr std::uint64_t nvp_type = 0x3;
 constexpr std::uint64_t nvs_valid = std::uint64_t{1} << 63;
 constexpr std::uint64_t nvs_overrun = std::uint64_t{1} << 62;
-constexpr unsigned piotype_read = 0;
-constexpr unsigned piotype_write = 1;
-constexpr unsigned piotype_exchange = 3;
 constexpr unsigned piotype_addr_err = 4;
 constexpr unsigned piotype_cmd_err = 5;
 
@@ -907,14 +904,18 @@ void Hub::start_vector_pio() {
         // No cable: the request goes nowhere and no response arrives.
         return;
     }
-    // hypothesis: with no router, every route ends at the neighbor Hub, and the response
-    // arrives before the CPU's next access (link latency is not modeled). TARGET and the
-    // return route are 0.
+    // hypothesis: the response arrives before the CPU's next access (link latency is not
+    // modeled). TARGET and the return route are 0.
     unsigned result = type;
     std::uint64_t read = 0;
     if (type == piotype_read || type == piotype_write || type == piotype_exchange) {
-        if (const auto value = neighbor_->serve_vector_pio(type, address, data)) {
-            read = *value;
+        const VectorResult response =
+            neighbor_->vector_request(route, neighbor_port_, type, address, data);
+        if (response.kind == VectorResult::Kind::no_response) {
+            return;
+        }
+        if (response.kind == VectorResult::Kind::response) {
+            read = response.value;
         } else {
             result = piotype_addr_err;
         }
@@ -932,8 +933,8 @@ void Hub::start_vector_pio() {
                 vector_status_, vector_read_data_);
 }
 
-std::optional<std::uint64_t> Hub::serve_vector_pio(unsigned type, std::uint64_t address,
-                                                   std::uint64_t data) {
+VectorResult Hub::vector_request(std::uint64_t /*route*/, unsigned /*port*/, unsigned type,
+                                 std::uint64_t address, std::uint64_t data) {
     // The address is an offset in this Hub's NI space (observed: the PROM's discovery reads the
     // neighbor's NI_STATUS_REV_ID at 0 and assigns its node ID at 0x108, NI_SCRATCH_REG1).
     const std::uint64_t offset = ni_base | address;
@@ -941,14 +942,14 @@ std::optional<std::uint64_t> Hub::serve_vector_pio(unsigned type, std::uint64_t 
     if (type != piotype_write) {
         const auto read_value = read(0, offset, AccessWidth::bits64);
         if (!read_value) {
-            return std::nullopt;
+            return {.kind = VectorResult::Kind::address_error};
         }
         value = *read_value;
     }
     if (type != piotype_read && !write(offset, AccessWidth::bits64, data)) {
-        return std::nullopt;
+        return {.kind = VectorResult::Kind::address_error};
     }
-    return value;
+    return {.kind = VectorResult::Kind::response, .value = value};
 }
 
 void Hub::reset(ResetKind kind) {
