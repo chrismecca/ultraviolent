@@ -137,4 +137,4 @@ Ultraviolent is released under the MIT License (`LICENSE`). The license covers t
 repository's code and documentation only; it grants nothing for SGI firmware, IRIX, or any
 other asset you supply.
 
-Absolutely obviously vibe-coded with Anthropic Opus 5.5
+Machine-assisted. Human-directed. Evidence-verified. Bugs remain.
