@@ -1,0 +1,188 @@
+= Multi-node Origin 2000
+
+Status: proposed to the user 2026-11-18, after the speed phase's endpoint (STATUS "Next
+task"). The plan follows `SMP.adoc`: what is known, what must be observed before modeling,
+the design, and stages with acceptance gates. The decisions for the user are at the end.
+
+== Goal and scope
+
+ROADMAP "Multi-node Origin 2000": routers and the NUMAlink (CrayLink) generation of IP27,
+distributed memory topology, guest-visible directory and coherence behavior, and partition
+and topology work as required. The step is toward VISION's "very fast virtual Origin 2000"
+and "large virtual NUMA machines".
+
+Today the machine has at most two nodes joined by a direct Hub-to-Hub link, slate's shape
+(SMP.adoc "S5"; PROM: "Found 2 objects (2 hubs, 0 routers)"). Everything beyond two nodes
+needs a router chip, which no machine we can observe has: slate has a Null Router board
+(no router chip). Router behavior therefore comes from public SGI manuals, the PROM's and
+IRIX's own code (observed by running and disassembly, SOURCES "Observed PROM behavior"), and
+IRIX-derived public headers where they apply.
+
+Out of scope: IP35 (a different machine, ROADMAP), graphics, the rack's multi-module system
+controller (MMSC) display unless the PROM or IRIX are seen to need it, and Cray Router
+(meta router) configurations until the stages before them pass.
+
+One node and slate's two-node deskside stay unchanged: their benchmark digests and
+same-cycle snapshots must not change.
+
+== The configuration ladder (documented)
+
+From the _Origin2000 Rackmount Owner's Guide_ (007-3456-003, chapter 2 "Router Boards",
+chapter 4 figure 4-1) and the _Origin and Onyx2 Theory of Operations Manual_ (007-3439-002,
+chapter 2 "Router Board", chapter 3 "Router ASIC"):
+
+* A module (a deskside is one module) has node slots n1-n4 and up to two router boards.
+  One node board needs no router.
+* **Null Router:** two node boards in a deskside; no external connectors; cannot be expanded.
+* **Star Router:** three or four node boards in a deskside, always paired with a Rack Router;
+  its one external connector goes to the companion Rack Router through a jumper.
+* **Rack Router (Standard Router):** the Router ASIC, a six-port non-blocking crossbar. Three
+  ports are internal (STL on the midplane: two to node boards, one to the module's other
+  router); three are external cables (PECL) to routers in other modules. From 2 to 32 node
+  boards (64 CPUs) in up to 8 modules: 8 nodes is two modules with four routers in a square,
+  16 nodes four modules (a cube), 32 nodes a hypercube of 16 routers. Xpress links add cables
+  between otherwise unused ports in 16- and 32-CPU systems.
+* **Cray Router (meta router):** separate router modules for 33 to 64 node boards (65 to
+  128 CPUs), a hierarchical hypercube.
+* Routing is by programmable tables in each Router ASIC; they allow sizes that are not a
+  power of two and routing around broken links (ToO "Router Board").
+* The Router ASIC also does adaptive routing, wormhole routing, link-level retransmission,
+  virtual channels, and aging: timing and reliability mechanisms software does not see (VISION
+  "What is not sacred": "router hop timing where software cannot observe it").
+
+== What is known
+
+=== The PROM discovers and programs routers (observed, strings)
+
+The user's IP27 PROM 6.156 contains the router side of discovery, named by its messages
+(IMAGE; addresses to be read in N0):
+
+* discovery walks objects by vector route: "discover_object: vector read 0x%lx NSRI failed"
+  (NSRI: the object's status and revision register), "Path 0x%llx is not a router",
+  "Router path 0x%llx link %lld is down", "Router path 0x%llx inport is %llx",
+  "discover_router: path=0x%lx status=%y", "WARNING: Max vector length 15 exceeded";
+* a router's NIC is read and cached through its scratch register 0 under a router lock:
+  "cache_router_nic: vector read 0x%lx SCR0 failed", "could not lock router", "Unable to
+  read router NIC (vector 0x%lx); using random number";
+* the count: "Found %d objects (%d hubs, %d routers) in %ld usec";
+* routing tables computed and distributed: local and meta tables per router and per Hub
+  ("Router index %d nic 0x%lx local entry %d = 0x%06x", "... meta entry ...", "Set router
+  index %d nic 0x%lx nasid %d ltab %d leaving %d to %d turns"): table entries are expressed
+  as turns from the incoming port, not absolute ports;
+* partitions and fences: "erect_fences", "router_fence_ports", "has the same partitionid";
+* checks that name configurations: "possible null router", "Origin200 NUMAlinked with
+  Origin2000. Configuration unsupported!", "Hub at 100 MHz and router at 90 MHz is an
+  unsupported configuration", "ROUTER MFG NIC".
+
+=== IRIX uses routers after boot (observed, symbols)
+
+slate's `/unix` (`local/slate/unix.nm`) has `router_init`, `router_map_init`,
+`router_reg_read`/`_write`, `router_poll_ticks`, `router_util_factor`,
+`router_hist_reselect`, `router_port_hist_reselect` (it samples utilization histograms),
+`router_set_leds`, `router_set_fences`, `router_guardians_set`, `router_decode_port_errors`,
+`router_nic_get`, and the vector operations `vector_read`/`write`/`exch` (and `_node`
+forms), plus `hubni_*` error handlers. So routers are visible to the running system, not
+only to the PROM: their registers, counters, LEDs, and error state.
+
+=== Leads only (different chip)
+
+The IRIX-derived Linux headers for the SN1 router (Linux 2.4.x
+`include/asm-ia64/sn/sn1/router.h`, `sn/vector.h`) name a router register set of the same
+family (`RR_STATUS_REV_ID` at 0, `RR_PORT_RESET`, `RR_PROT_CONF`, `RR_GLOBAL_PARMS`, scratch
+registers at `0x100`, per-port parameters, error, and global and local tables). SN1's router
+is a different chip (eight ports, NUMAlink 3): its offsets are leads to look for in the
+PROM, never facts for SN0. No public header for the SN0 router is known.
+
+=== The machine today
+
+* Nodes (`Ip27Machine::Node`) each with a Hub, memory, flash, MicroLAN, directory, and
+  CPUs; `--module rack|deskside`, `--nodes 1|2` (two only in a deskside).
+* The Hub NI: link status, vector PIO to the neighbor Hub only ("with no router every route
+  ends at the neighbor Hub", IP27.adoc "Vector PIO"), routing tables as storage.
+* Each node's view of physical memory is rebuilt from the node IDs; a remote access goes
+  straight to the owning node.
+* `Coherence::max_cpus` is 4; scheduling, snapshots (`node1.`), and `--parallel` take any
+  number of CPUs in principle.
+
+== What must be observed (N0)
+
+Each by running the PROM with a router whose registers record and answer accesses, and by
+disassembling the functions the messages above lead to:
+
+. The vector route format: how many bits per hop, how the route ends, how a response
+  returns (`NI_RETURN_VECTOR`), and what "turns" are relative to.
+. The router's NSRI register: the chip ID and revision fields that distinguish a router
+  from a Hub ("is not a router"), and the per-port link status discovery tests.
+. Router NIC: where the router board's MicroLAN is, and the SCR0 lock protocol.
+. The table layouts (local, meta) and which entries the PROM writes for 4, 8, 16 nodes.
+. Module and slot identity for routers (`/hw/module/M/slot/r1/router`), module IDs for more
+  than one module (each module's system controller), and the node slot IDs in a rack module
+  (n1-n4 are slot IDs 7-4 today, `ModuleType::rack`).
+. What IRIX reads at boot and while running: `router_init`, the polling of counters,
+  `hinv`'s router lines, the hwgraph, and the NUMA distance it derives.
+
+== Design (proposed)
+
+* **The router is a chip of the IP27 machine family** (`machines/ip27`, like the Hub):
+  registers, six ports, routing tables, NIC, LEDs, counters. It owns its behavior; the
+  machine owns the topology (AGENTS "Machines own topology").
+* **The fabric is a graph** the machine builds from the configuration: Hubs and routers
+  with numbered ports and links. Vector PIO walks a route through the graph hop by hop, as
+  the hardware does, and answers from the object it ends at (or the error the PROM expects).
+* **Ordinary traffic (memory, PIO, interrupts by node ID) is delivered directly**, as today:
+  hop timing is not guest-visible. The routing tables are kept as written. Reference mode
+  checks, as a diagnostic, that the programmed tables route every node pair to its
+  destination, so a table the hardware would misroute is seen rather than silently
+  delivered.
+* **Distance is guest-visible through topology only:** IRIX derives NUMA distance from the
+  discovered graph, so the graph must match the documented cabling of each configuration.
+* **Coherence and scheduling** grow past four CPUs (`Coherence::max_cpus`, the CPU list's
+  fast paths), measured so one and two nodes stay as fast as now.
+* **Configuration:** `--module rack --nodes 1..4` for one module; then `--modules N` for
+  multi-module rack systems; the deskside Star Router (three or four nodes) as a variant if
+  its evidence (one router chip or two) is settled.
+
+== Stages and gates
+
+* **N0, observation.** The items above, recorded in IP27.adoc and here. No guest-visible
+  change.
+* **N1, one module, four nodes, two Rack Routers (8 CPUs).** The router chip and the fabric
+  graph; vector PIO through routers. Gate: the PROM prints "Found 6 objects (4 hubs, 2
+  routers)" (the form of its message), distributes router tables without error, and reports
+  "No. of NODEs enabled = 4", "No. of CPUs enabled = 8", "No. of RTRs enabled = 2"; unit
+  tests for vector routes, tables, and router registers; one- and two-node digests unchanged.
+* **N2, IRIX on four nodes.** IRIX boots to `login:` with eight CPUs; `hinv` lists the
+  routers; the eight-CPU workloads (`boot8`, `cpu8`, `reboot8`) give identical digests on tier
+  1, tier 0, and the reference interpreter, and same-cycle snapshots; `--parallel` gives the
+  reference's output.
+* **N3, two modules (8 nodes, 16 CPUs, four routers).** Module identity for the second module,
+  external cables, the square topology (with and without Xpress links). Gate: discovery and
+  IRIX as above, on tier 1 and `--parallel`; the reference interpreter at least through the
+  PROM.
+* **N4, up to 32 nodes (64 CPUs).** The cube and hypercube cablings. Gate: discovery for 16
+  and 32 nodes; IRIX on 16 nodes if the host allows (below).
+* **N5 (optional), Cray Router configurations to 128 CPUs**, if the user wants them and the
+  PROM's meta-router path can be observed.
+
+Each stage ends with the dev, gcc, asan, and tsan suites passing, the one- and two-node
+benchmark digests unchanged, and STATUS updated.
+
+== Host limits
+
+The reference host has six cores and 15 GB of memory. Eight guest CPUs on `--parallel`
+already oversubscribe it. The reference interpreter runs about 105 M guest cycles per second
+however many CPUs share it (`boot4`: 626 s, `local/bench/r3600/p-s53-reference.json`), so a
+boot of eight CPUs takes about 21 minutes, sixteen about 42, and 32 would pass the
+60-minute cap. Gates for N3 and N4 therefore use tier 1 and `--parallel`, with the reference
+interpreter at four nodes and through the PROM beyond. Memory per node can be lowered (`--memory`), as IRIX needs only
+tens of megabytes per node.
+
+== Decisions for the user
+
+. **First target:** one rack module with four nodes and two Rack Routers (recommended: the
+  building block every larger system is cabled from, and today's `ModuleType::rack`
+  layout), or a deskside with three or four nodes (Rack Router plus Star Router).
+. **How far:** through N3 (16 CPUs, two modules) as the milestone's end, with N4 and N5
+  later; or through N4 (64 CPUs).
+. **Review:** N0 and N1 change nothing for one or two nodes; proceed through them without
+  stopping, as with S5, and review before N2?

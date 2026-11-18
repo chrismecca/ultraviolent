@@ -83,6 +83,11 @@ In use:
 * SCSI: ANSI X3.131-1994 (SCSI-2) for CDBs, INQUIRY, sense data, and mode pages. Toshiba
   CD-ROM vendor-unique commands (the caddy eject, 0xc4): the public CD players xmcd 2.5
   (`libdi_d/vu_tosh.c`, `vu_tosh.h`) and WorkMan 1.3a (`drv_toshiba.c`).
+* Router (SN0, the Origin 2000 Router ASIC): _Origin and Onyx2 Theory of Operations Manual_
+  (007-3439-002, chapters 2 and 3) and _Origin2000 Rackmount Owner's Guide_ (007-3456-003,
+  chapters 2 and 4) for router boards and configurations. Register-level leads only from
+  the SN1 router's IRIX-derived Linux 2.4 headers (`asm-ia64/sn/sn1/router.h`, `sn/vector.h`),
+  a different chip (MULTINODE.adoc "Leads only").
 * Local copies of these public files are in `local/sources/` (git-ignored).
 
 == Observational evidence

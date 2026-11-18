@@ -100,6 +100,7 @@ Start here, in order:
 . `doc/IR.adoc`
 . `doc/JIT.adoc`
 . `doc/SMP.adoc`
+. `doc/MULTINODE.adoc`
 . `doc/IP27.adoc`
 . `doc/IP27-TARGET.adoc`
 . `doc/ROADMAP.adoc`

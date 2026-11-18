@@ -4,6 +4,14 @@ Update this file at the end of every significant development session.
 
 == Current milestone
 
+**Multi-node Origin 2000 (ROADMAP "Multi-node Origin 2000"; plan doc/MULTINODE.adoc), started
+2026-11-18** after the speed phase's endpoint (the user, 2026-11-18: "that makes the most
+sense.. lets do that"). The plan is proposed: routers past two nodes, from one rack module of
+four nodes and two Rack Routers (N1-N2) to two modules (N3) and up to 32 nodes (N4). Next: see
+Next task.
+
+Before it, SMP IP27 (below), Usable VM and releases 0.1.0-0.1.2, and tier-1 speed (Next task).
+
 **SMP IP27 (ROADMAP "SMP IP27"; ADR-021, ADR-023; plan doc/SMP.adoc), started 2026-10-12.
 S0-S3 are done: `--cpus 2` puts a second R10000 in the node's slice B; the PROM finds both
 ("2 CPUs on 1 nodes found"), IRIX boots with two processors, and a two-process workload
@@ -446,6 +454,13 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
+. **Multi-node Origin 2000 (doc/MULTINODE.adoc; the user, 2026-11-18).** Proposed: the
+  configuration ladder from SGI's manuals (Null, Star, Rack, and Cray routers), what the PROM
+  and IRIX are known to do with routers (messages and symbols), and stages N0-N5. Evidence:
+  no observable machine has a router chip (slate's Null Router has none), so router behavior
+  comes from the manuals, the PROM's and IRIX's code, and IRIX-derived headers (SN1's router
+  header only as leads). Next: the user's decisions (MULTINODE "Decisions for the user"),
+  then N0, observing the PROM's router discovery with a recording router.
 . **Usable VM (ROADMAP "Usable VM"; agreed with the user 2026-11-02: "do it").** Done so
   far (2026-11-02/03):
 .. **Real time.** `--realtime` (backends::RealTimePacer, `Ip27Machine::hold_host_until`;
