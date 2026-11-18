@@ -1245,6 +1245,107 @@ const test::Registration two_node_link{
         t.check_equal(reg(a, ni_vector_status) & 7, std::uint64_t{4});
     }};
 
+// A rack module's routers (MULTINODE.adoc "N1"): with four node boards, r1 links n1 and n2,
+// r2 links n3 and n4, and the routers are joined. Vector PIO takes one port per nibble of the
+// route from the lowest; a router at the end of the route serves its own registers.
+Ip27Config rack_config(unsigned nodes) {
+    Ip27Config config = small_config();
+    config.module = ip27::ModuleType::rack;
+    config.nodes = nodes;
+    return config;
+}
+
+const test::Registration rack_routers{
+    "ip27.rack.vector_pio_through_routers", [](test::Context& t) {
+        Ip27Machine machine{rack_config(4), program({nop()})};
+        mips::Cpu& a = machine.cpu(0);
+        a.mtc0(mips::cp0::status, mips::status::kx);
+        const auto reg = [&a](std::uint64_t offset) {
+            return a.load(ialias + offset, AccessWidth::bits64).value_or(0xbad);
+        };
+        const auto set = [&t, &a](std::uint64_t offset, std::uint64_t value) {
+            t.check(a.store(ialias + offset, AccessWidth::bits64, value).has_value());
+        };
+        // One request: route, address, type, data; returns the status (0 when no response).
+        const auto vector = [&](std::uint64_t route, std::uint64_t address, std::uint64_t type,
+                                std::uint64_t data = 0) {
+            (void)reg(ni_vector_clear);
+            set(ni_vector, route);
+            set(ni_vector_data, data);
+            set(ni_vector_parms, vector_parms(1, 0, address, type));
+            return reg(ni_vector_status);
+        };
+        t.check((reg(ni_status_rev_id) & (nsri_link_up | nsri_down_reason)) == nsri_link_up,
+                "n1's link is up to r1");
+        constexpr std::uint64_t link = 1ull << 29;
+        // r1, the end of an empty route: a router (chip ID 1), slot r1 (0xf), the request in
+        // through port 4 (n1's), ports 4 and 5 (Hubs) and 6 (r2) up.
+        t.check_equal(vector(0, 0, 0) & 7, std::uint64_t{0});
+        const std::uint64_t r1 = reg(ni_vector_read_data);
+        t.check_equal(r1 & 0xf, std::uint64_t{1});
+        t.check_equal((r1 >> 8) & 0xf, std::uint64_t{0xf});
+        t.check_equal((r1 >> 46) & 7, std::uint64_t{4});
+        t.check_equal(r1 & (link | link << 3 | link << 6 | link << 9 | link << 12 | link << 15),
+                      link << 9 | link << 12 | link << 15);
+        // r2, out of r1's port 6: slot r2 (0xe), in through its port 6.
+        t.check_equal(vector(6, 0, 0) & 7, std::uint64_t{0});
+        const std::uint64_t r2 = reg(ni_vector_read_data);
+        t.check_equal((r2 >> 8) & 0xf, std::uint64_t{0xe});
+        t.check_equal((r2 >> 46) & 7, std::uint64_t{6});
+        // n4's Hub, r2's port 5: a Hub's NI_STATUS_REV_ID (chip ID 0, link up).
+        t.check_equal(vector(0x56, 0, 0) & 7, std::uint64_t{0});
+        const std::uint64_t n4 = reg(ni_vector_read_data);
+        t.check_equal(n4 & 0xf, std::uint64_t{0});
+        t.check((n4 & nsri_link_up) != 0, "n4's link is up");
+        // r2's SCR0 keeps a write; an exchange of SCR1 returns the old value (the PROM's lock).
+        t.check_equal(vector(6, 0x20, 1, 0x1234) & 7, std::uint64_t{1});
+        t.check_equal(vector(6, 0x20, 0) & 7, std::uint64_t{0});
+        t.check_equal(reg(ni_vector_read_data), std::uint64_t{0x1234});
+        t.check_equal(vector(6, 0x28, 3, 0xffff) & 7, std::uint64_t{3});
+        t.check_equal(reg(ni_vector_read_data), std::uint64_t{0});
+        t.check_equal(vector(6, 0x28, 3, 0xffff) & 7, std::uint64_t{3});
+        t.check_equal(reg(ni_vector_read_data), std::uint64_t{0xffff});
+        // Out of an unconnected port no response arrives.
+        t.check_equal(vector(1, 0, 0), std::uint64_t{0});
+
+        // Two node boards share one router: n2 is out of r1's port 5, and r1 has no port 6.
+        Ip27Machine two{rack_config(2), program({nop()})};
+        mips::Cpu& b = two.cpu(0);
+        b.mtc0(mips::cp0::status, mips::status::kx);
+        t.check(b.store(ialias + ni_vector, AccessWidth::bits64, 0).has_value());
+        t.check(b.store(ialias + ni_vector_parms, AccessWidth::bits64, vector_parms(1, 0, 0, 0))
+                    .has_value());
+        const std::uint64_t only = b.load(ialias + ni_vector_read_data, AccessWidth::bits64).value_or(0);
+        t.check_equal(only & (link << 9 | link << 12 | link << 15), link << 9 | link << 12);
+    }};
+
+// A rack module's snapshot keeps every node, the second Crossbow, and the routers.
+const test::Registration rack_snapshot{
+    "ip27.rack.snapshot", [](test::Context& t) {
+        Ip27Machine machine{rack_config(4), program({nop()})};
+        machine.cpu(6).mtc0(mips::cp0::status, mips::status::kx);
+        mips::Cpu& a = machine.cpu(0);
+        a.mtc0(mips::cp0::status, mips::status::kx);
+        t.check(a.store(ialias + ni_vector, AccessWidth::bits64, 6).has_value());
+        t.check(a.store(ialias + ni_vector_data, AccessWidth::bits64, 0x55).has_value());
+        t.check(a.store(ialias + ni_vector_parms, AccessWidth::bits64, vector_parms(1, 0, 0x20, 1))
+                    .has_value());
+        t.check(machine.cpu(6).store(ialias + ni_scratch_reg1, AccessWidth::bits64, 0x77).has_value());
+        const StateImage image = machine.save_state();
+        Ip27Machine copy{rack_config(4), program({nop()})};
+        t.check(copy.load_state(image).has_value(), "loads");
+        mips::Cpu& c = copy.cpu(0);
+        c.mtc0(mips::cp0::status, mips::status::kx);
+        t.check(c.store(ialias + ni_vector, AccessWidth::bits64, 6).has_value());
+        t.check(c.store(ialias + ni_vector_parms, AccessWidth::bits64, vector_parms(1, 0, 0x20, 0))
+                    .has_value());
+        t.check_equal(c.load(ialias + ni_vector_read_data, AccessWidth::bits64).value_or(0),
+                      std::uint64_t{0x55});
+        copy.cpu(6).mtc0(mips::cp0::status, mips::status::kx);
+        t.check_equal(copy.cpu(6).load(ialias + ni_scratch_reg1, AccessWidth::bits64).value_or(0),
+                      std::uint64_t{0x77});
+    }};
+
 // The node boards' MicroLANs (IP27.adoc "NICs"): each Hub reaches its node board's NIC; n1's
 // bus also holds the module's. A Read ROM on n2, whose bus holds one part, returns the
 // node board NIC's ROM ID: family 0x09, serial 6.

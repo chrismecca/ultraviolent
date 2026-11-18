@@ -8,7 +8,8 @@ Update this file at the end of every significant development session.
 2026-11-18** after the speed phase's endpoint (the user, 2026-11-18: "that makes the most
 sense.. lets do that"). The plan is accepted (2026-11-18): routers past two nodes, from one
 rack module of four nodes and two Rack Routers (N1-N2) to two modules, 16 CPUs (N3, the
-milestone's end). Next: see Next task.
+milestone's end). N0 and N1 are done: the PROM discovers and passes four nodes of two CPUs
+through two routers. Next: see Next task.
 
 Before it, SMP IP27 (below), Usable VM and releases 0.1.0-0.1.2, and tier-1 speed (Next task).
 
@@ -460,8 +461,12 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   no observable machine has a router chip (slate's Null Router has none), so router behavior
   comes from the manuals, the PROM's and IRIX's code, and IRIX-derived headers (SN1's router
   header only as leads). Accepted 2026-11-18 (MULTINODE "Decisions"): rack module of four
-  nodes first, end at N3, N0-N1 without stopping, review before N2. Next: N0, observing the
-  PROM's router discovery with a recording router.
+  nodes first, end at N3, N0-N1 without stopping, review before N2. **N0 and N1 are done
+  (2026-11-18, MULTINODE "Progress", IP27.adoc "Router"):** the SN0 router's registers and
+  route format observed in the PROM by disassembly; `--module rack --nodes 1-4` with two
+  routers; the PROM finds "6 objects (4 hubs, 2 routers)", "8 CPUs on 4 nodes", and passes all
+  diagnostics; the one-, two-, and four-CPU benchmark digests are unchanged. Next: the user's
+  review, then N2 (IRIX on four nodes).
 . **Usable VM (ROADMAP "Usable VM"; agreed with the user 2026-11-02: "do it").** Done so
   far (2026-11-02/03):
 .. **Real time.** `--realtime` (backends::RealTimePacer, `Ip27Machine::hold_host_until`;

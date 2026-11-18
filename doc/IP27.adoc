@@ -395,6 +395,54 @@ software can also write (`observed`: the PROM writes `0xdeadbeefdeadbeef` there 
 read). Reading NI_VECTOR_CLEAR returns the status and clears it; NI_VECTOR_STATUS and
 NI_RETURN_VECTOR ignore writes. On one node a request goes nowhere and no response arrives.
 
+=== Router
+
+The SN0 Router ASIC of a rack module's router boards (`ip27::Router`; MULTINODE.adoc). No
+public source gives its registers (the SN1 router's header is a different chip), so each
+fact below is `observed` in the user's PROM by disassembly (payload addresses `0x1fc...`)
+and by running it, unless marked.
+
+* Routes (`vector_get` `0x1fc238a4`, `vector_length` `0x1fc238dc`): one port number per
+  nibble, the lowest first; a zero nibble ends the route at the object reached; at most 15
+  hops ("Max vector length 15 exceeded"). A router takes its nibble off the route and sends
+  the request out of that port. Port numbers are absolute (1-6). An empty route reaches the
+  object at the other end of the Hub's own link.
+* The request's address field (NI_VECTOR_PARMS 19:3) is an offset in the target's space:
+  `get_chipid` (`0x1fc230fc`) reads offset `0x600000` & `0xffff8`, which is a Hub's
+  NI_STATUS_REV_ID and a router's status register.
+* Status (offset 0; `discover_object` `0x1fc23388`, `discover_router` `0x1fc22984`): bits 3:0
+  chip ID, 0 for a Hub and 1 for a router (else "unknown chip ID"); 7:4 revision (kept by the
+  PROM; 1, `hypothesis`); 11:8 slot bits, which the PROM maps through two tables (payload
+  `0xd1eb8` for module routers: `0xf` r1, `0xe` r2; `0xd1ef8` for meta routers, bit 11 clear:
+  7-0 are r1-r8; slot bits 0 gave "nodes attached to meta router" at "slot r8"); port p's
+  link-up bit is 29 + 3 × (p − 1); 48:46 the port the request came in on ("Router path ...
+  inport is"). With bit 60 set the PROM also keeps bits 59:56 and register `0x10` bits 10:6
+  (not modeled; meaning unknown).
+* `0x10`: read by discovery as a per-port mask (bit p − 1); a clear bit marks the port in the
+  PROM's record (meaning unknown; storage, reads 0).
+* `0x20` SCR0 (`cache_router_nic` `0x1fc21f44`): bits 47:0 cache the router board's NIC; the
+  PROM reads the NIC only when they are 0, under the lock, and writes it back keeping bits
+  63:48.
+* `0x28` SCR1, the PROM's router lock (`0x1fc3c5cc`, `0x1fc3c5a8`): an exchange of `0xffff`
+  takes it when bits 15:0 were 0; a write of 0 releases it.
+* `0x38`, the router board's MicroLAN (`0x1fc32a4c`): written and polled like the Hub's
+  MD_MLAN_CTL (PULSE 19:10, SAMPLE 9:2; DONE 1; RD_DATA 0). The board's NIC is on it
+  (synthetic record, name "ROUTER", `hypothesis`).
+* Port p's registers at p << 16; `discover_router` reads + 8 of ports 1-6 into its error
+  record (reads 0: no link errors are modeled).
+* Routing tables: the PROM writes entries at `0x70100` + 8 × entry ("Set router path ...
+  entry %d leaving %lld to %lld turns", `0x1fc23910`), each a turn count from the incoming
+  port. Kept as storage; traffic between nodes is delivered by node ID (hop timing is not
+  guest-visible).
+* Every other offset is storage, written and read back, and traced under `hub`.
+* Wiring (`Ip27Machine::connect_routers`): a rack module of two node boards has r1, of three
+  or four r1 and r2 (Rackmount Owner's Guide 007-3456-003, chapter 2, `documented`); r1 links
+  n1 and n2, r2 n3 and n4. `hypothesis`: Hubs on ports 4 and 5 and the routers joined by port
+  6. The PROM accepted it: "Found 6 objects (4 hubs, 2 routers)", "8 CPUs on 4 nodes found",
+  "No. of RTRs enabled = 2", "ALL DIAGS PASSED" (2026-11-18).
+* While the PROM hands out node IDs, several nodes may share one: each node's view maps only
+  the first node at a shared ID (`hypothesis`).
+
 === The Hub over crosstalk
 
 The Hub is a crosstalk widget on its Crossbow port. Its widget configuration space starts at

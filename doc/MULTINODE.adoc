@@ -179,6 +179,36 @@ boot of eight CPUs takes about 21 minutes, sixteen about 42, and 32 would pass t
 interpreter at four nodes and through the PROM beyond. Memory per node can be lowered (`--memory`), as IRIX needs only
 tens of megabytes per node.
 
+== Progress
+
+* **N0 and N1 (2026-11-18).** The machine takes one to four node boards in a rack module
+  (`--module rack --nodes 1-4`): node boards fill n1, n2, ...; n2 and n4 are on the module's
+  second Crossbow (`ip27::hub_xbow`); up to 16 CPUs (`max_cpus`, `Coherence::max_cpus`); each
+  node, the second Crossbow, and each router are in snapshots (`node<i>.`, `crossbow1.`,
+  `router<n>.`). The router chip and its wiring are in IP27.adoc "Router": its registers,
+  route format, and slot bits observed in the PROM by disassembly, then run against it. Hubs
+  and routers answer vector requests through one interface (`ip27::VectorTarget`).
+  - Found by running: slot bits 0 made the PROM take both routers for meta routers ("nodes
+    attached to meta router", "slot r8"); the PROM's slot tables gave r1 `0xf` and r2 `0xe`.
+    Two other nodes sharing a node ID while IDs are handed out mapped twice (fixed: the first
+    holds the addresses). New nodes need an initialized PROM log, as on an installed machine
+    ("Cannot assign moduleid on nasid 1"): the runs use the bench fixture's flash for each.
+  - Gate met (release build, 128 MB per node, fixture flash and NVRAM): with one CPU per node
+    "Found 6 objects (4 hubs, 2 routers) in 65466 usec", "4 CPUs on 4 nodes found"; with two,
+    "8 CPUs on 4 nodes found", "No. of NODEs enabled = 4", "No. of CPUs enabled = 8", "No. of
+    RTRs enabled = 2", "ALL DIAGS PASSED", the menu (4.58 G cycles per CPU, 222 s). Two node
+    boards in a rack module: "Found 3 objects (2 hubs, 1 routers)", all diagnostics pass.
+  - Tests: `ip27.rack.vector_pio_through_routers` (router status fields, a Hub two routers
+    away, scratch registers and the lock's exchange, an unconnected port, one router for two
+    nodes), `ip27.rack.snapshot`, and the configuration rules in
+    `ip27.system_controller_configuration`; each checked by mutation (entry port, slot bits,
+    route shift, router snapshot, the routers' link).
+  - Checks: dev and asan suites (asan found a null `memcpy` in an empty router snapshot,
+    fixed); the eleven benchmark digests equal `ad-tier1.json` and `ad-tier1-multi.json`.
+  - "update_klcfg_cpuinfo: Couldn't find my structure." is printed with one CPU per node,
+    also by the default one-CPU deskside: older than this work, not router-related.
+  - Next: review with the user (decision 3), then N2, IRIX on four nodes.
+
 == Decisions (the user, 2026-11-18)
 
 . First target: one rack module with four nodes and two Rack Routers (not the deskside Star

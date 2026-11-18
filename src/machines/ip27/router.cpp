@@ -125,7 +125,9 @@ void Router::load_state(const StateImage& image, const std::string& prefix) {
     registers_.clear();
     if (const auto bytes = image.get_bytes(prefix + "registers")) {
         std::vector<std::uint64_t> pairs(bytes->size() / sizeof(std::uint64_t));
-        std::memcpy(pairs.data(), bytes->data(), pairs.size() * sizeof(std::uint64_t));
+        if (!pairs.empty()) {
+            std::memcpy(pairs.data(), bytes->data(), pairs.size() * sizeof(std::uint64_t));
+        }
         for (std::size_t i = 0; i + 1 < pairs.size(); i += 2) {
             registers_[pairs[i]] = pairs[i + 1];
         }
