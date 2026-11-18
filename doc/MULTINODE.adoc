@@ -1,7 +1,9 @@
 = Multi-node Origin 2000
 
-Status: proposed to the user 2026-11-18, after the speed phase's endpoint (STATUS "Next
-task"). The plan follows `SMP.adoc`: what is known, what must be observed before modeling,
+Status: accepted with the user 2026-11-18, after the speed phase's endpoint (STATUS "Next
+task"): the first target is one rack module of four nodes and two Rack Routers; the
+milestone ends at N3 (two modules, 16 CPUs), with N4 and N5 later; N0 and N1 proceed without
+stopping, and the plan is reviewed with the user before N2. The plan follows `SMP.adoc`: what is known, what must be observed before modeling,
 the design, and stages with acceptance gates. The decisions for the user are at the end.
 
 == Goal and scope
@@ -177,12 +179,10 @@ boot of eight CPUs takes about 21 minutes, sixteen about 42, and 32 would pass t
 interpreter at four nodes and through the PROM beyond. Memory per node can be lowered (`--memory`), as IRIX needs only
 tens of megabytes per node.
 
-== Decisions for the user
+== Decisions (the user, 2026-11-18)
 
-. **First target:** one rack module with four nodes and two Rack Routers (recommended: the
-  building block every larger system is cabled from, and today's `ModuleType::rack`
-  layout), or a deskside with three or four nodes (Rack Router plus Star Router).
-. **How far:** through N3 (16 CPUs, two modules) as the milestone's end, with N4 and N5
-  later; or through N4 (64 CPUs).
-. **Review:** N0 and N1 change nothing for one or two nodes; proceed through them without
-  stopping, as with S5, and review before N2?
+. First target: one rack module with four nodes and two Rack Routers (not the deskside Star
+  Router variant).
+. The milestone ends at N3 (two modules, 16 CPUs); N4 (to 64 CPUs) and N5 (Cray Routers)
+  are later work.
+. N0 and N1 proceed without stopping; review with the user before N2.
