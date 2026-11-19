@@ -1346,6 +1346,69 @@ const test::Registration rack_snapshot{
                       std::uint64_t{0x77});
     }};
 
+// A warm reset sent down the link (NI_PORT_RESET PORTRESET) resets the Hub at the other end,
+// and a router passes it on out of the ports in the arriving port's reset mask (port register
+// + 0x18), which the PROM sets to the connected ports (MULTINODE.adoc "N2"). Each node marks
+// its Hub's NI_SCRATCH_REG1, which a Hub local reset clears.
+constexpr std::uint64_t ni_port_reset = 0x60'0008;
+constexpr std::uint64_t npr_portreset = 0x80;
+
+const test::Registration warm_reset_spreads{
+    "ip27.rack.warm_reset_spreads_through_routers", [](test::Context& t) {
+        const auto mark = [&t](Ip27Machine& machine, unsigned cpu) {
+            mips::Cpu& c = machine.cpu(cpu);
+            c.mtc0(mips::cp0::status, mips::status::kx);
+            t.check(c.store(ialias + ni_scratch_reg1, AccessWidth::bits64, 0x77).has_value());
+        };
+        const auto marked = [](Ip27Machine& machine, unsigned cpu) {
+            mips::Cpu& c = machine.cpu(cpu);
+            c.mtc0(mips::cp0::status, mips::status::kx);
+            return c.load(ialias + ni_scratch_reg1, AccessWidth::bits64).value_or(0) == 0x77;
+        };
+        const auto vector_write = [&t](mips::Cpu& a, std::uint64_t route, std::uint64_t address,
+                                       std::uint64_t data) {
+            t.check(a.store(ialias + ni_vector, AccessWidth::bits64, route).has_value());
+            t.check(a.store(ialias + ni_vector_data, AccessWidth::bits64, data).has_value());
+            t.check(a.store(ialias + ni_vector_parms, AccessWidth::bits64,
+                            vector_parms(1, 0, address, 1))
+                        .has_value());
+        };
+        for (const bool masks : {true, false}) {
+            // One CPU per node: CPU 2n is node n + 1's CPU A.
+            Ip27Machine machine{rack_config(4), program({nop()})};
+            for (unsigned cpu = 0; cpu < 8; cpu += 2) {
+                mark(machine, cpu);
+            }
+            mips::Cpu& a = machine.cpu(0);
+            if (masks) {
+                // Ports 4-6 of r1 (the empty route) and of r2 (route 6), as the PROM writes them.
+                for (const std::uint64_t route : {std::uint64_t{0}, std::uint64_t{6}}) {
+                    for (std::uint64_t port = 4; port <= 6; ++port) {
+                        vector_write(a, route, port << 16 | 0x18, 0x38);
+                    }
+                }
+            }
+            t.check(a.store(ialias + ni_port_reset, AccessWidth::bits64, npr_portreset).has_value());
+            machine.run(100);
+            t.check(marked(machine, 0), "PORTRESET alone leaves the sender's own Hub");
+            for (unsigned cpu = 2; cpu < 8; cpu += 2) {
+                t.check(marked(machine, cpu) != masks,
+                        masks ? "the reset reaches every other node"
+                              : "with no reset mask the router keeps it");
+            }
+        }
+
+        // With no router between (a deskside module's two nodes), it reaches the other Hub.
+        Ip27Machine two{two_node_config(), program({nop()})};
+        mark(two, 0);
+        mark(two, 2);
+        t.check(two.cpu(2).store(ialias + ni_port_reset, AccessWidth::bits64, npr_portreset)
+                    .has_value());
+        two.run(100);
+        t.check(!marked(two, 0), "n1 reset from n2's link");
+        t.check(marked(two, 2), "n2 keeps its own");
+    }};
+
 // The node boards' MicroLANs (IP27.adoc "NICs"): each Hub reaches its node board's NIC; n1's
 // bus also holds the module's. A Read ROM on n2, whose bus holds one part, returns the
 // node board NIC's ROM ID: family 0x09, serial 6.

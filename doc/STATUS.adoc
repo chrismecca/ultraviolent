@@ -8,8 +8,9 @@ Update this file at the end of every significant development session.
 2026-11-18** after the speed phase's endpoint (the user, 2026-11-18: "that makes the most
 sense.. lets do that"). The plan is accepted (2026-11-18): routers past two nodes, from one
 rack module of four nodes and two Rack Routers (N1-N2) to two modules, 16 CPUs (N3, the
-milestone's end). N0 and N1 are done: the PROM discovers and passes four nodes of two CPUs
-through two routers. Next: see Next task.
+milestone's end). N0, N1, and N2 are done: the PROM discovers and passes four nodes of two
+CPUs through two routers, and IRIX boots, runs, and reboots on all eight CPUs with identical
+results on all three engines. Next: see Next task.
 
 Before it, SMP IP27 (below), Usable VM and releases 0.1.0-0.1.2, and tier-1 speed (Next task).
 
@@ -465,8 +466,21 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   (2026-11-18, MULTINODE "Progress", IP27.adoc "Router"):** the SN0 router's registers and
   route format observed in the PROM by disassembly; `--module rack --nodes 1-4` with two
   routers; the PROM finds "6 objects (4 hubs, 2 routers)", "8 CPUs on 4 nodes", and passes all
-  diagnostics; the one-, two-, and four-CPU benchmark digests are unchanged. Next: the user's
-  review, then N2 (IRIX on four nodes).
+  diagnostics; the one-, two-, and four-CPU benchmark digests are unchanged. Reviewed with the
+  user 2026-11-18 ("yep absolutely"). **N2 is done (2026-11-19, MULTINODE "Progress"):** IRIX
+  boots to `login:` on eight CPUs in four nodes; `boot8`, `cpu8`, `reboot8` give identical
+  digests and same-cycle snapshots on tier 1, tier 0, and the reference interpreter, and
+  `--parallel` gives the reference's output (1.19-1.49x real time). Disproven: that a link's
+  warm reset has no visible effect (IP27.adoc "NI_PORT_RESET"). `reboot8` failed (the reboot
+  reset only one node; the others lost memory when its node ID went back to 0, and the PROM
+  found 5 routers): PORTRESET now resets the Hub at the other end of the link, and routers
+  pass it on by their reset masks; this changes the two-node `boot4` and `reboot4` digests
+  (console output differs only in a reported time). Open: IRIX's "Cannot read router nic"
+  (the master's MicroLAN probe cuts off n2's and n4's reads of their router's NIC; real
+  timing presumably keeps them apart, e.g. console output at 9600 baud); a rack module's
+  module NICs ("Inventory table ID value is 0"); `hinv` lists no router; POD `pcfg v` faults.
+  A capture from a real Onyx2 rack was requested through the user (2026-11-19). Next: N3,
+  two modules (16 CPUs).
 . **Usable VM (ROADMAP "Usable VM"; agreed with the user 2026-11-02: "do it").** Done so
   far (2026-11-02/03):
 .. **Real time.** `--realtime` (backends::RealTimePacer, `Ip27Machine::hold_host_until`;

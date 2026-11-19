@@ -208,6 +208,81 @@ tens of megabytes per node.
   - "update_klcfg_cpuinfo: Couldn't find my structure." is printed with one CPU per node,
     also by the default one-CPU deskside: older than this work, not router-related.
   - Next: review with the user (decision 3), then N2, IRIX on four nodes.
+* **N2 (2026-11-19).** IRIX boots to `login:` on the rack module (four nodes of
+  two CPUs, 512 MB each, fixture flash for each node): `hinv` "8 180 MHZ IP27 Processors",
+  "Main memory size: 2048 Mbytes"; `mpadmin -s` processors 0-7; `/hw/module/1/slot` holds
+  n1-n4, r1, r2, io1; `/hw/nodenum` 0 n1, 1 n4, 2 n3, 3 n2. Plain `hinv` prints no router
+  line; whether a real system's does is open (the capture below).
+  - 256 MB per node is not a bank size the IP27 PROM accepts ("256 MB dimm banks not
+    allowed", then "No useable RAM" and a failed discovery): runs use 512 or 128 MB.
+  - Open: IRIX warns "Cannot read router nic in module 1, slot r1" (and r2), on the reference
+    order (one host thread) as on `--parallel`. Cause, from `--trace hub` and PC probes: after
+    "Checking partitioning information", n2's and n4's PROMs read their router's NIC
+    manufacturing record over the router MicroLAN (Match ROM, Read Memory), while the master
+    (n1) checks for presence on both routers' MicroLANs through the same register (two
+    resets; its NIC access routine `0x1fc5a93c`, objects by number through `0x1fc46b84`).
+    n1's reset cuts n2's and n4's reads short (n2 had read `8d 01 "UVXR01  "`), so the
+    router's KLCONFIG record holds no manufacturing string: the PROM's `hinv -mvvv` shows
+    "NIC: data not available" (r1) and "NIC:Failure reading interface" (r2), and IRIX's
+    `klhwg_add_all_routers` warns when the record lacks "Part" (it then looks for
+    "030-0841", by our reading the router board's part number; the model's synthetic record
+    is "030-9999-002"). No PROM lock covers either access, so on a real machine the nodes'
+    timing keeps them apart. `hypothesis`: the master's console output takes time there
+    (9600 baud) and none here (the 16550 transmits at once, IP27.adoc "IOC3"). Not changed
+    on that guess, since console timing changes every benchmark digest; a capture of a real
+    Onyx2 rack (power-on log with timestamps, `hinv -mvv`, POD `vr`/`rnic`/`rtab`) has been
+    requested through the user (2026-11-19).
+  - Found by `reboot8`: IRIX's reboot (`init 6`) reset only the rebooting node. Its node ID
+    went back to 0, which another node held; the other three, still in IRIX, lost the memory
+    at that ID (CPUs at the exception vector, a PC of 1), and the PROM's rediscovery found "5
+    routers" ("router 22 is not connected on any port") before IRIX panicked with a data bus
+    error. Model change: NI_PORT_RESET PORTRESET sends a warm reset down the link, a Hub that
+    receives one takes a local reset, and a router passes it on out of the ports in the
+    arriving port's reset mask (port register + `0x18`, which the PROM sets to `0x38`, the
+    connected ports 4-6), IP27.adoc "Router" and "Hub local reset". Evidence: Linux's IP27
+    restart (IRIX-derived) relies on PORTRESET | LOCALRESET alone; the PROM's mask writes;
+    the SN1 router header's RR_RESET_MASK (a lead). Test:
+    `ip27.rack.warm_reset_spreads_through_routers` (through both routers with the masks, not
+    without them, and over the two-node link). The reboot then finds "6 objects (4 hubs, 2
+    routers)" and returns to `login:` with processors 0-7.
+  - The two-node `boot4` and `reboot4` digests change with it (the PROM's early PORTRESET now
+    reaches the other node; at IRIX's reboot the other node resets at once instead of 2.9 s
+    later, `reboot4` 91.1 -> 88.4 s virtual). Their console output differs from the earlier
+    build only in the reported discovery time ("Found 2 objects ... in 10274" -> 10277 usec,
+    408 -> 409); the other nine benchmark digests are unchanged.
+  - Eight-CPU workloads (`bench.py fixture --cpus 8`: one rack module, four nodes of two,
+    each node with its own flash; `boot8`, `cpu8` with eight awk loops, `reboot8`):
+    identical digests on tier 1, tier 0, and the reference interpreter (`boot8`
+    `0859e07bbe2ee7c6`, `cpu8` `8104dd9123bf651c`, `reboot8` `69c3a19138525791`; the
+    changed `boot4` `9611c453686bbf5a` and `reboot4` `58a56f4b69b2b4ac` too;
+    `local/bench/n2/n2-*.json`). `cpu8` prints 749961 eight times; after `reboot8`
+    `mpadmin -s` lists processors 0-7. `boot8` and `cpu8` were the same before the reset
+    change (the routers' masks are 0 at power-on).
+  - Same-cycle snapshots: `cpu8` from the eight-CPU shell snapshot with `--save-state` stops
+    at 18,441,795,060 cycles on all three engines, with byte-identical console output,
+    snapshot, disk, NVRAM, and the four flash PROMs.
+  - `--parallel`: `boot8` and `cpu8` print the reference's output (the PROM's discovery time
+    masked); `reboot8` differs only in the order of the "CPU n rebooting" lines, as
+    `reboot4` did (S4.2). 1.19x (`boot8`), 1.49x (`cpu8`), 1.21x (`reboot8`) real time on the
+    six-core host; one thread (tier 1) 0.14-0.16x.
+  - Speed, one host thread: tier 1 199-225 M cycles/s; tier 0 and the reference 73-88.
+  - Checks: dev, gcc (a shadowed `slot` from N1 fixed), asan, and tsan suites; the nine
+    one-node and `cpu4` digests unchanged (`local/bench/n2/reg-tier1.json`).
+  - `hinv` prints no router line on IRIX. Whether a real rack's does is unknown until the
+    capture; the routers are in IRIX's hardware graph (`/hw/module/1/slot/r1`, `r2`).
+  - Open: a rack module has no module NICs in the model (where a rack keeps its MODULEID and
+    midplane NICs is not known), so every boot prints "Warning: Inventory table ID value is 0.
+    Check Midplane NIC" and IRIX "Invalid serial number for module 1, possible missing or
+    invalid NIC" (a deskside, with the NICs on n1's MicroLAN, prints neither).
+  - Open: in POD entered from the IO6 Command Monitor (`pod`, not in its help), `pcfg v`
+    takes a General Exception at `0x1fc46cc8` (a store to the PROM's data at
+    `0xc00000001fccbd00`); `vr`, `rnic`, and `rtab` work. Not yet compared with hardware.
+  - Gate met, with two exceptions: `hinv` lists no router (above; open until a real
+    rack's output is known), and the two-node `boot4` and `reboot4` digests changed, by the
+    link warm reset (above; their console output differs only in a reported time).
+  - Next: N3, two modules (8 nodes, 16 CPUs). The captures requested of a real Onyx2 rack
+    may settle the open items above (the router NIC, the module NICs, router port wiring,
+    `hinv`, `pcfg`).
 
 == Decisions (the user, 2026-11-18)
 

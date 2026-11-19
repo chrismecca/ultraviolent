@@ -43,6 +43,10 @@ class Router final : public VectorTarget {
 
     VectorResult vector_request(std::uint64_t route, unsigned port, unsigned type,
                                 std::uint64_t address, std::uint64_t data) override;
+    // A warm reset arriving on `port` goes out of every other connected port whose bit (port
+    // − 1) is set in the arriving port's reset mask (MULTINODE.adoc "N2"). The router's own
+    // registers are kept.
+    void link_warm_reset(unsigned port) override;
 
     void reset();
     // Under `prefix`, such as "router1.".
@@ -68,6 +72,9 @@ class Router final : public VectorTarget {
     bool mlan_line_{true};
     // Every other register software has written, by offset.
     std::map<std::uint64_t, std::uint64_t> registers_;
+    // Set while a warm reset passes through, so one that comes back around a loop of routers
+    // stops here.
+    bool passing_reset_{};
 };
 
 } // namespace ultraviolent::ip27

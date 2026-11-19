@@ -620,6 +620,11 @@ void Hub::run_bte(unsigned engine) {
     }
 }
 
+void Hub::link_warm_reset(unsigned /*port*/) {
+    tracer_.log(TraceCategory::hub, "{}warm reset from the link", trace_name_);
+    scheduler_.schedule_after(local_reset_event_, VirtualDuration{0});
+}
+
 void Hub::local_reset() {
     write_sequence_.fetch_add(1, std::memory_order_relaxed);
     // hypothesis: a Hub local reset resets the node's CPUs with a cold reset and reinitializes
@@ -1293,9 +1298,13 @@ std::expected<void, AccessFault> Hub::write(std::uint64_t offset, AccessWidth wi
                 scheduler_.schedule_after(local_reset_event_, VirtualDuration{0});
             }
             if ((value & npr_portreset) != 0) {
-                // hypothesis: the link's warm reset has no modeled effect on either end.
+                // A warm reset down the link: the Hub or router at the other end takes it
+                // (link_warm_reset). hypothesis: it arrives at once (link timing is not modeled).
                 tracer_.log(TraceCategory::hub, "{}port reset{}", trace_name_,
                             neighbor_ != nullptr ? "" : " (no link)");
+                if (neighbor_ != nullptr) {
+                    neighbor_->link_warm_reset(neighbor_port_);
+                }
             }
             return {};
         default:

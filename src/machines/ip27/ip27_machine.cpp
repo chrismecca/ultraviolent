@@ -260,9 +260,9 @@ unsigned node_slot_id(ModuleType module, unsigned slot) {
     return (8 - slot) & 7;
 }
 
-Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned slot,
+Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned board_slot,
                         std::span<const std::byte> prom)
-    : machine{owner}, index{node_index}, slot{slot}, memory{owner.config_.memory_bytes},
+    : machine{owner}, index{node_index}, slot{board_slot}, memory{owner.config_.memory_bytes},
       flash{flash_size},
       flash_device{owner.scheduler_, owner.tracer_, flash.bytes(), [this] { flash_mode_changed(); },
                    node_index == 0 ? std::string{} : std::format("node{}.flash", node_index)},

@@ -311,8 +311,11 @@ the revision is a `hypothesis`). One node: link down, reason "never came out of 
 (`hypothesis`: no CrayLink cable). Two nodes: link up (bit 29, NSRI_LINKUP, which the PROM's
 link test polls, `observed`). The PROM reads the node ID with mask `0x1ff00` (`observed`).
 |`0x600008` |NI_PORT_RESET |LOCALRESET (bit 0) performs a Hub local reset after the
-requesting store completes. PORTRESET (bit 7) is traced; its effect on the link is not
-modeled (`hypothesis`: none visible).
+requesting store completes. PORTRESET (bit 7) sends a warm reset down the link: the Hub at
+the other end takes a local reset, and a router passes it on (see "Router"). `inferred`:
+Linux's IP27 restart, derived from IRIX and printing IRIX's "Reboot started from CPU %d",
+restarts the machine with PORTRESET | LOCALRESET on its own Hub alone, so the link's warm
+reset must reset the other nodes. `hypothesis`: it arrives at once.
 |`0x600010` |NI_PROTECTION |Storage (`hypothesis`: no effect on one node).
 |`0x600100`, `0x600108` |NI_SCRATCH_REG0/1 |Scratch storage.
 |`0x200018` |MD_MEMORY_CONFIG |Resets to MMC_RESET_DEFAULTS (`0x001e7fbc3fffffff`, IRIX-derived
@@ -434,6 +437,14 @@ and by running it, unless marked.
   entry %d leaving %lld to %lld turns", `0x1fc23910`), each a turn count from the incoming
   port. Kept as storage; traffic between nodes is delivered by node ID (hop timing is not
   guest-visible).
+* Port p's + `0x18`, the reset mask: after discovery the PROM writes 0 and then `0x38` to
+  every port of both routers (`observed`), whose connected ports are 4-6. The SN1 router's
+  header names the register at that offset of its port block RR_RESET_MASK, "Remote reset
+  mask", with RRM_RESETOK(L) = 1 << (L − 1) (a lead). `hypothesis`: a warm reset arriving on
+  a port goes out of the other connected ports set in that port's mask, so the masks of 0 at
+  power-on keep a node's early reset (the PROM's "Rst0" reset, "Hub local reset") at its own
+  router; a reset that comes back around a loop of routers stops. The router's registers are
+  kept (`hypothesis`; its SCR0 cache of the board's NIC is consistent with that).
 * Every other offset is storage, written and read back, and traced under `hub`.
 * Wiring (`Ip27Machine::connect_routers`): a rack module of two node boards has r1, of three
   or four r1 and r2 (Rackmount Owner's Guide 007-3456-003, chapter 2, `documented`); r1 links
@@ -596,6 +607,13 @@ The PROM reads PI_ERR_STACK_ADDR_B early in its reset path and compares it with
 
 Model (`hypothesis` for the CPU reset kind): the reset event reinitializes the Hub's modeled
 registers except PI_ERR_STACK_ADDR_A/B, and gives the CPU a cold reset.
+
+A warm reset arriving over the NUMAlink (another Hub's PORTRESET, NI_PORT_RESET above) takes
+the same path. So IRIX's reboot (`init 6`), which writes PORTRESET | LOCALRESET on the
+rebooting CPU's Hub, resets every node it reaches at once. Before 2026-11-19 PORTRESET had no
+effect: with two nodes the other node reset itself about 2.9 s later, and with four (MULTINODE.adoc
+"N2") the rebooting node's node ID went back to 0 while the other three still ran IRIX, which
+then lost the memory at that ID and failed (the PROM found 5 routers, IRIX panicked).
 
 === Junk bus
 

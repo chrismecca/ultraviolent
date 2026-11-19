@@ -178,6 +178,10 @@ class Hub final : public VectorTarget {
     // hypothesis: whatever route remains, it ends here (a Hub has one port).
     VectorResult vector_request(std::uint64_t route, unsigned port, unsigned type,
                                 std::uint64_t address, std::uint64_t data) override;
+    // A warm reset arriving over the link resets this Hub and its CPUs as a local reset does.
+    // inferred: Linux's IP27 restart (derived from IRIX) restarts every node with PORTRESET |
+    // LOCALRESET on its own Hub alone, so the link's warm reset must reset the Hubs it reaches.
+    void link_warm_reset(unsigned port) override;
     // The node board's MicroLAN (MD_MLAN_CTL), with its NICs (IP27.adoc "NICs").
     void connect_mlan(devices::OneWireBus& bus) {
         mlan_bus_ = &bus;

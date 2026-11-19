@@ -33,10 +33,14 @@ Workloads:
   boot4  boot with four CPUs: two nodes of two (--nodes 2 --cpus 2, SMP.adoc "S5")
   cpu4   from a four-CPU root shell: four cpu loops at once
   reboot4  from a four-CPU root shell: init 6, through the four PROMs, to a root shell again
+  boot8  boot with eight CPUs: a rack module of four nodes of two and two routers
+         (--module rack --nodes 4 --cpus 2, MULTINODE.adoc "N2")
+  cpu8   from an eight-CPU root shell: eight cpu loops at once
+  reboot8  from an eight-CPU root shell: init 6, through the eight PROMs, to a root shell again
 
 The default set is the one-CPU workloads; name the others to run them. They need the shell
-snapshot for their CPU count: scripts/bench.py fixture --cpus 2 (or 4), after the one-CPU
-fixture. With two nodes each node has its flash PROM; both start from the fixture's.
+snapshot for their CPU count: scripts/bench.py fixture --cpus 2 (or 4, 8), after the one-CPU
+fixture. With several nodes each node has its flash PROM; all start from the fixture's.
 
 Rates count only each workload's own cycles: a snapshot workload starts where the fixture's
 login stopped (fixture/shell.json). With two CPUs the rate counts both CPUs' cycles (twice
@@ -99,6 +103,13 @@ WORKLOADS = {
     "reboot4": {"cpus": 4, "snapshot": True,
                 "console": ["init 6", "@expect login:", "root", "@expect TERM", "vt100"]
                 + SHELL + ["mpadmin -s"] + SHELL + ["@stop"]},
+    "boot8": {"cpus": 8, "disk": True, "console": LOGIN + ["@stop"]},
+    "cpu8": {"cpus": 8, "snapshot": True,
+             "console": [f'sh -c "for n in 1 2 3 4 5 6 7 8; do {AWK} & done; wait"']
+             + SHELL + ["@stop"]},
+    "reboot8": {"cpus": 8, "snapshot": True,
+                "console": ["init 6", "@expect login:", "root", "@expect TERM", "vt100"]
+                + SHELL + ["mpadmin -s"] + SHELL + ["@stop"]},
 }
 DEFAULT_WORKLOADS = [name for name, w in WORKLOADS.items() if w.get("cpus", 1) == 1]
 
@@ -122,9 +133,10 @@ def fixture_paths(work, cpus=1):
         fixture, f"nvram{cpus}.bin")
     if not os.path.exists(paths["boot-nvram.bin"]):
         paths["boot-nvram.bin"] = paths["nvram.bin"]
-    # The second node's flash PROM: the fixture's to boot, its own in a snapshot.
-    paths["flash1.bin"] = paths["flash.bin"]
-    paths["shell-flash1.bin"] = os.path.join(fixture, f"{shell}-flash1.bin")
+    # The other nodes' flash PROMs: the fixture's to boot, their own in a snapshot.
+    for node in range(1, nodes(cpus)):
+        paths[f"flash{node}.bin"] = paths["flash.bin"]
+        paths[f"shell-flash{node}.bin"] = os.path.join(fixture, f"{shell}-flash{node}.bin")
     paths["shell.uvstate"] = os.path.join(fixture, f"{shell}.uvstate")
     paths["shell.json"] = os.path.join(fixture, f"{shell}.json")
     return paths
@@ -143,15 +155,22 @@ def default_scratch():
     return None
 
 
+def nodes(cpus):
+    # Four CPUs are two nodes of two (a deskside module), eight four nodes of two (a rack
+    # module with two routers).
+    return {4: 2, 8: 4}.get(cpus, 1)
+
+
 def flash_files(cpus):
-    # One flash PROM per node: four CPUs are two nodes of two.
-    return ["flash.bin", "flash1.bin"] if cpus == 4 else ["flash.bin"]
+    # One flash PROM per node.
+    return ["flash.bin"] + [f"flash{node}.bin" for node in range(1, nodes(cpus))]
 
 
 def base_command(args, scratch, cpus=1):
     flashes = [arg for name in flash_files(cpus)
                for arg in ("--flash", os.path.join(scratch, name))]
-    topology = (["--nodes", "2", "--cpus", "2"] if cpus == 4 else
+    topology = (["--module", "rack", "--nodes", "4", "--cpus", "2"] if cpus == 8 else
+                ["--nodes", "2", "--cpus", "2"] if cpus == 4 else
                 ["--cpus", str(cpus)] if cpus != 1 else [])
     return [args.binary, "--machine", "ip27", "--prom", args.prom, "--io6prom", args.io6prom,
             ] + flashes + [
@@ -431,8 +450,8 @@ def main():
                          help="directory with disk.img, nvram.bin, flash.bin after a clean shutdown")
     fixture.add_argument("--nvram-only", action="store_true",
                          help="only settle the cold boots' NVRAM, keeping the snapshots")
-    fixture.add_argument("--cpus", type=int, choices=[1, 2, 4], default=1,
-                         help="2 or 4: only that shell snapshot, from the existing fixture")
+    fixture.add_argument("--cpus", type=int, choices=[1, 2, 4, 8], default=1,
+                         help="2, 4 or 8: only that shell snapshot, from the existing fixture")
     bench = commands.add_parser("run", parents=[common], help="run workloads")
     bench.add_argument("workloads", nargs="*", help=", ".join(WORKLOADS))
     bench.add_argument("--repeat", type=int, default=3)

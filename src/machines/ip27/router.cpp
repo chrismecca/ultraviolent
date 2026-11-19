@@ -13,9 +13,9 @@ namespace {
 // discover_router, cache_router_nic, router lock, and router MicroLAN functions, by
 // disassembly; names after the SN1 router's IRIX-derived header where the role matches.
 constexpr std::uint64_t rr_status_rev_id = 0x0;
-// observed: SCR0 caches the router board's NIC in bits 47:0; SCR1 is the PROM's lock (an
-// exchange of 0xffff takes it when bits 15:0 were 0; a write of 0 releases it).
-constexpr std::uint64_t rr_scratch0 = 0x20;
+// observed: SCR0 (0x20) caches the router board's NIC in bits 47:0; SCR1 (0x28) is the PROM's
+// lock (an exchange of 0xffff takes it when bits 15:0 were 0; a write of 0 releases it). Both
+// are storage.
 // observed: the router's MicroLAN control, written and polled like the Hub's MD_MLAN_CTL
 // (PULSE 19:10, SAMPLE 9:2, DONE 1, RD_DATA 0).
 constexpr std::uint64_t rr_mlan_ctl = 0x38;
@@ -30,6 +30,14 @@ constexpr unsigned status_slot_shift = 8;
 constexpr unsigned status_link_stride = 3;
 // hypothesis: revision 1 in bits 7:4 (the PROM keeps the field; no value is observed).
 constexpr std::uint64_t router_revision = 1;
+// Port p's registers are at p << 16 (observed: the PROM's discover_router reads + 8 of ports
+// 1-6). + 0x18 is the port's reset mask: observed, after discovery the PROM writes 0, then
+// 0x38, to + 0x18 of every port of both routers of a rack module, whose ports 4-6 are the
+// connected ones; the SN1 router's IRIX-derived header names the register at the same offset
+// in its port block RR_RESET_MASK ("Remote reset mask", RRM_RESETOK(L) = 1 << (L − 1)), a lead
+// only. hypothesis: a warm reset arriving on a port goes out of the ports in its mask.
+constexpr unsigned port_shift = 16;
+constexpr std::uint64_t port_reset_mask = 0x18;
 
 } // namespace
 
@@ -63,6 +71,21 @@ VectorResult Router::vector_request(std::uint64_t route, unsigned port, unsigned
     tracer_.log(TraceCategory::hub, "{} vector type {} address {:#x} from port {} data {:#x} -> {:#x}",
                 name_, type, address, port, data, old);
     return {.kind = VectorResult::Kind::response, .value = old};
+}
+
+void Router::link_warm_reset(unsigned port) {
+    if (passing_reset_) {
+        return;
+    }
+    passing_reset_ = true;
+    const std::uint64_t mask = read(std::uint64_t{port} << port_shift | port_reset_mask, port);
+    tracer_.log(TraceCategory::hub, "{} warm reset in on port {}, mask {:#x}", name_, port, mask);
+    for (unsigned out = 1; out <= port_count; ++out) {
+        if (out != port && (mask >> (out - 1) & 1) != 0 && links_[out].peer != nullptr) {
+            links_[out].peer->link_warm_reset(links_[out].peer_port);
+        }
+    }
+    passing_reset_ = false;
 }
 
 std::uint64_t Router::read(std::uint64_t offset, unsigned port) const {

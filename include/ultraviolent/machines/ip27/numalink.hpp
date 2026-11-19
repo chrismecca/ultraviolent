@@ -34,6 +34,9 @@ class VectorTarget {
     // with `route` the hops still to take.
     virtual VectorResult vector_request(std::uint64_t route, unsigned port, unsigned type,
                                         std::uint64_t address, std::uint64_t data) = 0;
+    // A warm reset sent down the cable arrived at this object's `port` (NI_PORT_RESET
+    // PORTRESET at a Hub, MULTINODE.adoc "N2").
+    virtual void link_warm_reset(unsigned port) = 0;
 
   protected:
     VectorTarget() = default;
