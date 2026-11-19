@@ -107,9 +107,12 @@ std::expected<void, std::string> validate(const Ip27Config& config,
     if (config.module == ModuleType::deskside && config.node_slot > 2) {
         return std::unexpected("a deskside module has node slots n1 and n2");
     }
-    if (config.nodes < 1 || config.nodes > (config.module == ModuleType::deskside ? 2 : 4)) {
-        return std::unexpected("a deskside module holds one or two node boards, a rack module one "
-                               "to four");
+    if (config.nodes < 1 || config.nodes > (config.module == ModuleType::deskside ? 2 : max_nodes)) {
+        return std::unexpected("a deskside module holds one or two node boards; rack modules hold "
+                               "one to four each, in up to two modules (one to eight)");
+    }
+    if (config.express_links && (config.module != ModuleType::rack || config.nodes <= nodes_per_module)) {
+        return std::unexpected("Xpress links join two rack modules");
     }
     if (config.nodes > 1 && config.node_slot != 1) {
         return std::unexpected("several node boards fill the module's node slots from n1");
@@ -148,7 +151,8 @@ mips::ProcessorModel processor_model(const Ip27Config& config, std::span<const s
 
 } // namespace
 
-std::array<std::byte, devices::I2cEeprom::size> initial_controller_nvram(const Ip27Config& config) {
+std::array<std::byte, devices::I2cEeprom::size> initial_controller_nvram(const Ip27Config& config,
+                                                                       unsigned module) {
     std::array<std::byte, devices::I2cEeprom::size> nvram{};
     std::ranges::fill(nvram, std::byte{0xff});
     // Bytes 0x700-0x70f as slate's controller holds them (real hardware, IP27.adoc "System
@@ -159,7 +163,8 @@ std::array<std::byte, devices::I2cEeprom::size> initial_controller_nvram(const I
     for (std::size_t i = 0; i < block.size(); ++i) {
         nvram[0x700 + i] = std::byte{block[i]};
     }
-    nvram[0x708] = std::byte{config.module_number};
+    // hypothesis: a further module's controller holds the next number.
+    nvram[0x708] = std::byte{static_cast<std::uint8_t>(config.module_number + module)};
     return nvram;
 }
 
@@ -260,14 +265,16 @@ unsigned node_slot_id(ModuleType module, unsigned slot) {
     return (8 - slot) & 7;
 }
 
-Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned board_slot,
-                        std::span<const std::byte> prom)
-    : machine{owner}, index{node_index}, slot{board_slot}, memory{owner.config_.memory_bytes},
+Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned board_module,
+                        unsigned board_slot, std::span<const std::byte> prom)
+    : machine{owner}, index{node_index}, module{board_module}, slot{board_slot},
+      memory{owner.config_.memory_bytes},
       flash{flash_size},
       flash_device{owner.scheduler_, owner.tracer_, flash.bytes(), [this] { flash_mode_changed(); },
                    node_index == 0 ? std::string{} : std::format("node{}.flash", node_index)},
       flash_interface{flash_device, owner.tracer_}, flash_commands{flash_interface},
-      i2c{owner.scheduler_, owner.tracer_, owner.i2c_bus_, event_prefix(node_index)},
+      i2c{owner.scheduler_, owner.tracer_, owner.modules_[board_module]->i2c_bus,
+          event_prefix(node_index)},
       directory{owner.tracer_, checked_bank_sizes(owner.config_), owner.config_.directory},
       board_nic{0x09, 0x5 + node_index},
       hub{owner.scheduler_,
@@ -311,7 +318,8 @@ Ip27Machine::Node::Node(Ip27Machine& owner, unsigned node_index, unsigned board_
     }
     hub.connect_node_id([&owner] { owner.map_views(); });
     if (owner.config_.nodes > 1) {
-        hub.set_trace_name(std::format("n{} ", slot));
+        hub.set_trace_name(module == 0 ? std::format("n{} ", slot)
+                                       : std::format("m{}.n{} ", module + 1, slot));
     }
     // Unprogrammed flash reads as 0xff.
     std::ranges::fill(flash.bytes(), std::byte{0xff});
@@ -322,10 +330,16 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     : config_{config} {
     invariant(validate(config, prom).has_value(),
               "Ip27Machine built from an invalid configuration");
-    // Node boards fill the module's slots from n1 (one may sit in any slot).
+    // Node boards fill a module's slots from n1 (one may sit in any slot), four to a rack
+    // module (MULTINODE.adoc "N3").
+    const unsigned modules = (config.nodes + nodes_per_module - 1) / nodes_per_module;
+    for (unsigned m = 0; m < modules; ++m) {
+        modules_.push_back(std::make_unique<Module>(*this, m));
+    }
     for (unsigned i = 0; i < config.nodes; ++i) {
+        const unsigned slot = config.nodes == 1 ? config.node_slot : i % nodes_per_module + 1;
         Node& n = *nodes_.emplace_back(
-            std::make_unique<Node>(*this, i, config.nodes == 1 ? config.node_slot : i + 1, prom));
+            std::make_unique<Node>(*this, i, i / nodes_per_module, slot, prom));
         processors_[2 * i] = &n.cpu_a;
         if (n.cpu_b) {
             processors_[2 * i + 1] = &*n.cpu_b;
@@ -349,15 +363,19 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     if (!set_execution_engine(mips::ExecutionEngine::tier1)) {
         set_execution_engine(mips::ExecutionEngine::tier0);
     }
-    i2c_bus_.attach(controller_nvram_);
-    // The system controller's message interrupt reaches every node in the module, and when
-    // it removes power the run ends (IP27.adoc "System controller").
-    elsc_.connect_message_interrupt([this] {
-        for (const auto& n : nodes_) {
-            n->hub.raise_system_controller_interrupt();
-        }
-    });
-    elsc_.connect_power_off([this] { request_stop(); });
+    for (auto& m : modules_) {
+        m->i2c_bus.attach(m->controller_nvram);
+        // The system controller's message interrupt reaches every node in its module, and
+        // when it removes power the run ends (IP27.adoc "System controller").
+        m->elsc.connect_message_interrupt([this, index = m->index] {
+            for (const auto& n : nodes_) {
+                if (n->module == index) {
+                    n->hub.raise_system_controller_interrupt();
+                }
+            }
+        });
+        m->elsc.connect_power_off([this] { request_stop(); });
+    }
     if (nodes_.size() == 2 && config_.module == ModuleType::deskside) {
         // slate's two Hubs are cabled to each other without a router (SMP.adoc "S5").
         nodes_[0]->hub.connect_link(nodes_[1]->hub);
@@ -366,18 +384,22 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
         connect_routers();
     }
     for (auto& n : nodes_) {
-        devices::Xbow* xbow = &xbow_;
+        Module& m = *modules_[n->module];
+        devices::Xbow* xbow = &m.xbow;
         if (hub_xbow(config_.module, n->slot) == 1) {
-            if (xbow1_ == nullptr) {
-                xbow1_ = std::make_unique<devices::Xbow>(tracer_);
+            if (m.xbow1 == nullptr) {
+                m.xbow1 = std::make_unique<devices::Xbow>(tracer_);
             }
-            xbow = xbow1_.get();
+            xbow = m.xbow1.get();
         }
         n->hub.connect_xtalk(*xbow);
         xbow->attach(hub_xbow_port(config_.module, n->slot), n->hub.widget());
     }
-    xbow_.attach(baseio_port(config_.module), baseio_bridge_);
-    baseio_bridge_.connect(xbow_);
+    // The BaseIO is the first module's; a further module has no IO board (hypothesis: its
+    // Crossbows hold only the Hubs).
+    devices::Xbow& baseio_xbow = modules_.front()->xbow;
+    baseio_xbow.attach(baseio_port(config_.module), baseio_bridge_);
+    baseio_bridge_.connect(baseio_xbow);
     // Slate's BaseIO boards (OBS-SLATE-0004), with synthetic barcodes.
     mio_nic_.memory() = board_nic_memory(
         {.serial = "UVX001", .part = "030-0880-003", .revision = "C", .name = "MIO"});
@@ -431,7 +453,6 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     ethernet_nic_.memory() = ethernet_nic_memory(config_.ethernet_address);
     ioc3_nic_bus_.attach(ethernet_nic_);
     ioc3_.connect_nic(ioc3_nic_bus_);
-    std::ranges::copy(initial_controller_nvram(config), controller_nvram_.bytes().begin());
     flash_hash_ = fnv1a(node.flash.bytes());
     for (auto& n : nodes_) {
         if (n.get() != &node) {
@@ -441,12 +462,51 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     map_views();
 }
 
-Ip27Machine::RouterBoard::RouterBoard(Tracer& tracer, unsigned board_slot)
-    : slot{board_slot}, router{tracer, std::format("r{}", board_slot), 0x10 - board_slot},
-      nic{0x09, 0x20 + board_slot} {
+Ip27Machine::Module::Module(Ip27Machine& machine, unsigned module_index)
+    : index{module_index},
+      elsc{machine.scheduler_, machine.tracer_, i2c_bus,
+           module_index == 0 ? std::string{} : std::format("module{}.", module_index + 1)},
+      xbow{machine.tracer_} {
+    std::ranges::copy(initial_controller_nvram(machine.config_, module_index),
+                      controller_nvram.bytes().begin());
+}
+
+void Ip27Machine::Module::save_state(StateImage& image) const {
+    elsc.save_state(image);
+    xbow.save_state(image);
+    controller_nvram.save_state(image, "controller_nvram");
+    if (xbow1 != nullptr) {
+        StateImage crossbow;
+        xbow1->save_state(crossbow);
+        image.put_image("crossbow1.", crossbow);
+    }
+    for (const auto& board : routers) {
+        board->router.save_state(image, std::format("router{}.", board->slot));
+    }
+}
+
+void Ip27Machine::Module::load_state(const StateImage& image) {
+    elsc.load_state(image);
+    xbow.load_state(image);
+    controller_nvram.load_state(image, "controller_nvram");
+    if (xbow1 != nullptr) {
+        xbow1->load_state(image.sub_image("crossbow1."));
+    }
+    for (const auto& board : routers) {
+        board->router.load_state(image, std::format("router{}.", board->slot));
+    }
+}
+
+Ip27Machine::RouterBoard::RouterBoard(Tracer& tracer, unsigned module, unsigned board_slot)
+    : slot{board_slot},
+      router{tracer,
+             module == 0 ? std::format("r{}", board_slot)
+                         : std::format("m{}.r{}", module + 1, board_slot),
+             0x10 - board_slot},
+      nic{0x09, 0x20 + 0x10 * module + board_slot} {
     // hypothesis: the router board's NIC holds a manufacturing record like the node board's;
     // its part number and name are not known (synthetic).
-    nic.memory() = board_nic_memory({.serial = std::format("UVXR{:02}", board_slot),
+    nic.memory() = board_nic_memory({.serial = std::format("UVXR{:02}", 10 * module + board_slot),
                                      .part = "030-9999-002", .revision = "A", .name = "ROUTER"});
     mlan.attach(nic);
     router.connect_mlan(mlan);
@@ -454,23 +514,60 @@ Ip27Machine::RouterBoard::RouterBoard(Tracer& tracer, unsigned board_slot)
 
 void Ip27Machine::connect_routers() {
     // A rack module's routers (MULTINODE.adoc; Rackmount Owner's Guide 007-3456-003, chapter
-    // 2: each router board links two node boards and the module's other router). r1 serves n1
-    // and n2, r2 n3 and n4. hypothesis: Hubs on ports 4 and 5, the routers joined by port 6.
+    // 2: each router board links two node boards and the module's other router; three of its
+    // six ports are internal, three external cables). r1 serves n1 and n2, r2 n3 and n4.
+    // hypothesis: Hubs on ports 4 and 5, the routers joined by port 6, external cables on
+    // ports 1-3.
     constexpr unsigned first_hub_port = 4;
     constexpr unsigned router_port = 6;
-    const unsigned boards = nodes_.size() > 2 ? 2 : 1;
-    for (unsigned board = 1; board <= boards; ++board) {
-        routers_.push_back(std::make_unique<RouterBoard>(tracer_, board));
+    for (auto& m : modules_) {
+        const auto in_module = std::ranges::count_if(
+            nodes_, [&m](const auto& n) { return n->module == m->index; });
+        const unsigned boards = modules_.size() > 1 || in_module > 2 ? 2 : 1;
+        for (unsigned board = 1; board <= boards; ++board) {
+            m->routers.push_back(std::make_unique<RouterBoard>(tracer_, m->index, board));
+        }
+        if (boards == 2) {
+            Router& r1 = m->routers[0]->router;
+            Router& r2 = m->routers[1]->router;
+            r1.connect(router_port, r2, router_port);
+            r2.connect(router_port, r1, router_port);
+        }
     }
     for (auto& n : nodes_) {
-        Router& router = routers_[(n->slot - 1) / 2]->router;
+        Router& router = modules_[n->module]->routers[(n->slot - 1) / 2]->router;
         const unsigned port = first_hub_port + (n->slot - 1) % 2;
         router.connect(port, n->hub, 0);
         n->hub.connect_link(router, port);
     }
-    if (boards == 2) {
-        routers_[0]->router.connect(router_port, routers_[1]->router, router_port);
-        routers_[1]->router.connect(router_port, routers_[0]->router, router_port);
+    if (modules_.size() == 2) {
+        // Two modules: four routers in a square (ToO "Router Board"; Owner's Guide: 8 node
+        // boards are two modules with four routers), each module's r1 cabled to the other's r1
+        // and r2 to r2. hypothesis: on port 1.
+        constexpr unsigned module_port = 1;
+        for (unsigned board = 0; board < 2; ++board) {
+            Router& a = modules_[0]->routers[board]->router;
+            Router& b = modules_[1]->routers[board]->router;
+            a.connect(module_port, b, module_port);
+            b.connect(module_port, a, module_port);
+        }
+        if (config_.express_links) {
+            // The Xpress links (Owner's Guide: extra cables between otherwise unused ports in
+            // 16- and 32-CPU systems; observed, the PROM: "express links must connect routers
+            // in different slots", at most one per router): r1 to the other module's r2.
+            // hypothesis: on port 2.
+            constexpr unsigned express_port = 2;
+            for (unsigned board = 0; board < 2; ++board) {
+                Router& a = modules_[0]->routers[board]->router;
+                Router& b = modules_[1]->routers[1 - board]->router;
+                a.connect(express_port, b, express_port);
+            }
+            for (unsigned board = 0; board < 2; ++board) {
+                Router& b = modules_[1]->routers[board]->router;
+                Router& a = modules_[0]->routers[1 - board]->router;
+                b.connect(express_port, a, express_port);
+            }
+        }
     }
 }
 
@@ -741,10 +838,8 @@ StateImage Ip27Machine::save_state() {
     node.cpu_a.cpu.save_state(image);
     node.hub.save_state(image);
     node.i2c.save_state(image);
-    elsc_.save_state(image);
     node.flash_device.save_state(image);
     baseio_flash_device_.save_state(image);
-    xbow_.save_state(image);
     baseio_bridge_.save_state(image);
     scsi0_.save_state(image);
     cdrom_.save_state(image, "scsi0.target6");
@@ -755,7 +850,7 @@ StateImage Ip27Machine::save_state() {
     ioc3_.save_state(image);
     timekeeper_.save_state(image);
     ethernet_phy_.save_state(image);
-    controller_nvram_.save_state(image, "controller_nvram");
+    modules_.front()->save_state(image);
     node.directory.save_state(image);
     image.put_sparse("memory", node.memory.bytes());
     if (nodes_.size() > 1) {
@@ -767,13 +862,11 @@ StateImage Ip27Machine::save_state() {
             image.put_image(std::format("node{}.", i), other);
         }
     }
-    if (xbow1_ != nullptr) {
-        StateImage crossbow;
-        xbow1_->save_state(crossbow);
-        image.put_image("crossbow1.", crossbow);
-    }
-    for (const auto& board : routers_) {
-        board->router.save_state(image, std::format("router{}.", board->slot));
+    // Each further module's under "module<number>.".
+    for (std::size_t m = 1; m < modules_.size(); ++m) {
+        StateImage other;
+        modules_[m]->save_state(other);
+        image.put_image(std::format("module{}.", m + 1), other);
     }
     return image;
 }
@@ -868,10 +961,8 @@ std::expected<void, std::string> Ip27Machine::load_state(const StateImage& image
     }
     node.hub.load_state(image);
     node.i2c.load_state(image);
-    elsc_.load_state(image);
     node.flash_device.load_state(image);
     baseio_flash_device_.load_state(image);
-    xbow_.load_state(image);
     baseio_bridge_.load_state(image);
     scsi0_.load_state(image);
     cdrom_.load_state(image, "scsi0.target6");
@@ -882,18 +973,15 @@ std::expected<void, std::string> Ip27Machine::load_state(const StateImage& image
     ioc3_.load_state(image);
     timekeeper_.load_state(image);
     ethernet_phy_.load_state(image);
-    controller_nvram_.load_state(image, "controller_nvram");
+    modules_.front()->load_state(image);
     node.directory.load_state(image);
     for (std::size_t i = 1; i < nodes_.size(); ++i) {
         if (!nodes_[i]->load_state(image.sub_image(std::format("node{}.", i)))) {
             return std::unexpected("snapshot memory is malformed");
         }
     }
-    if (xbow1_ != nullptr) {
-        xbow1_->load_state(image.sub_image("crossbow1."));
-    }
-    for (const auto& board : routers_) {
-        board->router.load_state(image, std::format("router{}.", board->slot));
+    for (std::size_t m = 1; m < modules_.size(); ++m) {
+        modules_[m]->load_state(image.sub_image(std::format("module{}.", m + 1)));
     }
     // The Hubs' node IDs and the flash modes decide each node's view.
     map_views();
@@ -906,12 +994,14 @@ void Ip27Machine::reset(ResetKind kind) {
         node->hub.reset(kind);
     }
     if (kind != ResetKind::warm) {
-        xbow_.reset();
-        if (xbow1_ != nullptr) {
-            xbow1_->reset();
-        }
-        for (const auto& board : routers_) {
-            board->router.reset();
+        for (auto& m : modules_) {
+            m->xbow.reset();
+            if (m->xbow1 != nullptr) {
+                m->xbow1->reset();
+            }
+            for (const auto& board : m->routers) {
+                board->router.reset();
+            }
         }
         baseio_bridge_.reset();
     }

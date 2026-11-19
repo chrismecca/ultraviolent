@@ -451,6 +451,17 @@ and by running it, unless marked.
   n1 and n2, r2 n3 and n4. `hypothesis`: Hubs on ports 4 and 5 and the routers joined by port
   6. The PROM accepted it: "Found 6 objects (4 hubs, 2 routers)", "8 CPUs on 4 nodes found",
   "No. of RTRs enabled = 2", "ALL DIAGS PASSED" (2026-11-18).
+* Two rack modules (`--module rack --nodes 5-8`; MULTINODE.adoc "N3"): each has r1 and r2,
+  and the four routers form a square (ToO "Router Board": eight node boards are two modules
+  with four routers), each module's r1 cabled to the other's r1 and r2 to r2. `hypothesis`:
+  on port 1, one of the three external ports (1-3, the internal ones being 4-6). With
+  `--express-links` the square's diagonals are added, each r1 to the other module's r2
+  (`observed`, the PROM: "express links must connect routers in different slots", "multiple
+  express links (max 1 allowed)"), `hypothesis` on port 2. The PROM assigns a hypercube
+  dimension to each linked port itself ("assigned dimn %d to port %d"), so the port numbers
+  are not known to matter. It accepted both: "Found 12 objects (8 hubs, 4 routers)", "No. of
+  RTRs enabled = 4", "ALL DIAGS PASSED", and with Xpress links it sends requests through every
+  router's port 2 (2026-11-19).
 * While the PROM hands out node IDs, several nodes may share one: each node's view maps only
   the first node at a shared ID (`hypothesis`).
 
@@ -694,6 +705,11 @@ Model:
 * `devices::I2cEeprom` (24C16 protocol) holds the NVRAM, initially erased except for the
   `0x700` block as slate has it, with `Ip27Config::module_number` (default 1) at `0x708`
   (`initial_controller_nvram`).
+* Each module has its own controller, NVRAM, and I²C bus, which only its own nodes' PCF8584s
+  share (`Ip27Machine::Module`; MULTINODE.adoc "N3"). `hypothesis`: a second module's
+  controller holds the next module number. With two rack modules the BASEIO PROM's `modnum`
+  lists "1 2" and IRIX names the second module's boards `/hw/module/2/slot/n1` and so on
+  (2026-11-19). The keyswitch is the first module's.
 * `devices::Elsc` models arbitration, the command packets, and the keyswitch.
   `hypothesis`: it offers the eight node-CPU tokens (`0xe0`–`0xe7`) in turn, 1 ms each,
   while the bus is idle, each plus 8 while a message waits; it frees the bus 100 µs after

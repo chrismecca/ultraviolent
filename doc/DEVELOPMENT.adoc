@@ -251,6 +251,14 @@ out exceed IRIX's terminal line), and `reboot4`, from a four-CPU shell snapshot
 (`scripts/bench.py fixture --cpus 4`). Each node has its own flash PROM file; both start
 from the fixture's.
 
+Eight- and sixteen-CPU workloads use rack modules (MULTINODE.adoc): `boot8`, `cpu8`,
+`reboot8` on one module of four nodes of two (`--module rack --nodes 4 --cpus 2`), and
+`prom16`, `boot16`, `cpu16`, `reboot16` on two modules of four (`--nodes 8`; add
+`--express-links` to cable the modules' Xpress links), from `fixture --cpus 8` and `fixture
+--cpus 16`, each node with its own flash file. One host thread runs `boot16` in about 24
+minutes on tier 1 and more than 40 on the reference interpreter, so the reference gate at
+sixteen CPUs is `prom16` and `cpu16`; with `--parallel`, `boot16` takes about two minutes.
+
 Their rate counts every CPU's cycles; "x real" is virtual time per host second.
 
 `--parallel` runs the multi-CPU workloads with each CPU on its own host thread (SMP.adoc

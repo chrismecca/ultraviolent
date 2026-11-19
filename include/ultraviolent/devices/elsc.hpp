@@ -50,7 +50,8 @@ class Elsc final : public I2cTarget {
     // The command and answer buffers (ELSC_PACKET_MAX in the Linux 2.4.3 ksys/elsc.h).
     static constexpr std::size_t packet_max = 96;
 
-    Elsc(Scheduler& scheduler, Tracer& tracer, I2cBus& bus);
+    // `event_prefix` names its scheduler events apart from another module's controller's.
+    Elsc(Scheduler& scheduler, Tracer& tracer, I2cBus& bus, std::string_view event_prefix = {});
 
     void reset();
 

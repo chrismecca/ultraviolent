@@ -8,9 +8,11 @@ Update this file at the end of every significant development session.
 2026-11-18** after the speed phase's endpoint (the user, 2026-11-18: "that makes the most
 sense.. lets do that"). The plan is accepted (2026-11-18): routers past two nodes, from one
 rack module of four nodes and two Rack Routers (N1-N2) to two modules, 16 CPUs (N3, the
-milestone's end). N0, N1, and N2 are done: the PROM discovers and passes four nodes of two
-CPUs through two routers, and IRIX boots, runs, and reboots on all eight CPUs with identical
-results on all three engines. Next: see Next task.
+milestone's end). The milestone is complete (2026-11-19): N0-N2 brought one rack module of
+four nodes and two routers through the PROM and IRIX on eight CPUs; N3 adds the second
+module, with four routers in a square (and optional Xpress links), and IRIX boots, runs, and
+reboots on sixteen CPUs, with the PROM and a sixteen-CPU workload identical on all three
+engines. Open items wait on a capture from a real Onyx2 rack. Next: see Next task.
 
 Before it, SMP IP27 (below), Usable VM and releases 0.1.0-0.1.2, and tier-1 speed (Next task).
 
@@ -479,8 +481,19 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   (the master's MicroLAN probe cuts off n2's and n4's reads of their router's NIC; real
   timing presumably keeps them apart, e.g. console output at 9600 baud); a rack module's
   module NICs ("Inventory table ID value is 0"); `hinv` lists no router; POD `pcfg v` faults.
-  A capture from a real Onyx2 rack was requested through the user (2026-11-19). Next: N3,
-  two modules (16 CPUs).
+  A capture from a real Onyx2 rack was requested through the user (2026-11-19). **N3 is done
+  (2026-11-19, MULTINODE "Progress"), ending the milestone:** `--module rack --nodes 5-8`
+  makes two rack modules, each with its own system controller, controller NVRAM (module
+  numbers 1 and 2), I²C bus, Crossbows, and two routers; the four routers form a square
+  (`hypothesis`: r1-r1 and r2-r2 on port 1) and `--express-links` adds the diagonals
+  (`hypothesis`: port 2). The PROM finds "12 objects (8 hubs, 4 routers)" and passes all
+  diagnostics; IRIX boots on sixteen CPUs (`modnum` "1 2", `/hw/module/2`), runs sixteen
+  processes, and reboots; `prom16` and `cpu16` are identical on tier 1, tier 0, and the
+  reference interpreter; `--parallel` gives the same output (`boot16` in 113 s, 0.77x real time). The one- to eight-CPU digests are
+  unchanged. Still open, as in N2: the router and module NIC warnings and `hinv`, pending
+  the Onyx2 capture. Next: when the capture comes, file it under `local/` and revisit those
+  items (MULTINODE "Progress", N2 and N3); otherwise the next milestone is the user's choice
+  (N4 and N5, larger router configurations, are later work by decision 2).
 . **Usable VM (ROADMAP "Usable VM"; agreed with the user 2026-11-02: "do it").** Done so
   far (2026-11-02/03):
 .. **Real time.** `--realtime` (backends::RealTimePacer, `Ip27Machine::hold_host_until`;

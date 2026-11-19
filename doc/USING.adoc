@@ -257,7 +257,9 @@ are for experiments; the disk, NVRAM, and flash files are the machine's lasting 
   displaying on another machine over the network should work but have not been tried.)
 * One system disk and one CD-ROM drive.
 * Two CPUs on one node board. Two node boards (`--nodes 2`) boot, with an "Error in
-  ust_change" message from IRIX (`STATUS.adoc`).
+  ust_change" message from IRIX (`STATUS.adoc`). Rack modules (`--module rack --nodes 1-8`,
+  two modules past four nodes) boot IRIX on up to sixteen CPUs, but slowly on a typical host,
+  and IRIX warns that it cannot read the routers' and modules' NICs (`doc/MULTINODE.adoc`).
 * IRIX prints "Inventory table ID value is 0", "Some CPUs have old firmware", and, with one
   CPU, "update_klcfg_cpuinfo: Couldn't find my structure" at boot; all are harmless. With
   two CPUs, the keyswitch's power-off ends with "WARNING: llp_pfail_barrier: expired", also

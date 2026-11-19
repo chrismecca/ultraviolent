@@ -37,9 +37,12 @@ Workloads:
          (--module rack --nodes 4 --cpus 2, MULTINODE.adoc "N2")
   cpu8   from an eight-CPU root shell: eight cpu loops at once
   reboot8  from an eight-CPU root shell: init 6, through the eight PROMs, to a root shell again
+  prom16 power-on to the PROM menu with sixteen CPUs: two rack modules of four nodes of two
+         and four routers (--module rack --nodes 8 --cpus 2, MULTINODE.adoc "N3")
+  boot16, cpu16, reboot16  as boot8, cpu8, reboot8 with sixteen CPUs
 
 The default set is the one-CPU workloads; name the others to run them. They need the shell
-snapshot for their CPU count: scripts/bench.py fixture --cpus 2 (or 4, 8), after the one-CPU
+snapshot for their CPU count: scripts/bench.py fixture --cpus 2 (or 4, 8, 16), after the one-CPU
 fixture. With several nodes each node has its flash PROM; all start from the fixture's.
 
 Rates count only each workload's own cycles: a snapshot workload starts where the fixture's
@@ -110,6 +113,15 @@ WORKLOADS = {
     "reboot8": {"cpus": 8, "snapshot": True,
                 "console": ["init 6", "@expect login:", "root", "@expect TERM", "vt100"]
                 + SHELL + ["mpadmin -s"] + SHELL + ["@stop"]},
+    "prom16": {"cpus": 16, "disk": False, "console": ["@expect Option?", "@stop"]},
+    "boot16": {"cpus": 16, "disk": True, "console": LOGIN + ["@stop"]},
+    # Sixteen loops of the shell's for, as cpu8.
+    "cpu16": {"cpus": 16, "snapshot": True,
+              "console": [f'sh -c "for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do {AWK} & done; wait"']
+              + SHELL + ["@stop"]},
+    "reboot16": {"cpus": 16, "snapshot": True,
+                 "console": ["init 6", "@expect login:", "root", "@expect TERM", "vt100"]
+                 + SHELL + ["mpadmin -s"] + SHELL + ["@stop"]},
 }
 DEFAULT_WORKLOADS = [name for name, w in WORKLOADS.items() if w.get("cpus", 1) == 1]
 
@@ -157,8 +169,8 @@ def default_scratch():
 
 def nodes(cpus):
     # Four CPUs are two nodes of two (a deskside module), eight four nodes of two (a rack
-    # module with two routers).
-    return {4: 2, 8: 4}.get(cpus, 1)
+    # module with two routers), sixteen eight nodes of two (two rack modules, four routers).
+    return {4: 2, 8: 4, 16: 8}.get(cpus, 1)
 
 
 def flash_files(cpus):
@@ -169,9 +181,10 @@ def flash_files(cpus):
 def base_command(args, scratch, cpus=1):
     flashes = [arg for name in flash_files(cpus)
                for arg in ("--flash", os.path.join(scratch, name))]
-    topology = (["--module", "rack", "--nodes", "4", "--cpus", "2"] if cpus == 8 else
+    topology = (["--module", "rack", "--nodes", str(nodes(cpus)), "--cpus", "2"] if cpus >= 8 else
                 ["--nodes", "2", "--cpus", "2"] if cpus == 4 else
-                ["--cpus", str(cpus)] if cpus != 1 else [])
+                ["--cpus", str(cpus)] if cpus != 1 else []) + (
+                ["--express-links"] if cpus == 16 and args.express_links else [])
     return [args.binary, "--machine", "ip27", "--prom", args.prom, "--io6prom", args.io6prom,
             ] + flashes + [
             "--nvram", os.path.join(scratch, "nvram.bin"), "--engine", args.engine] + (
@@ -443,6 +456,8 @@ def main():
                         "not deterministic, so digests differ run to run")
     common.add_argument("--parallel-window", type=int,
                         help="with --parallel: cycles a CPU may run ahead of the slowest")
+    common.add_argument("--express-links", action="store_true",
+                        help="sixteen-CPU workloads: cable the two modules' Xpress links too")
     commands = parser.add_subparsers(dest="command", required=True)
     fixture = commands.add_parser("fixture", parents=[common],
                                   help="build the fixture from an installed system")
@@ -450,8 +465,8 @@ def main():
                          help="directory with disk.img, nvram.bin, flash.bin after a clean shutdown")
     fixture.add_argument("--nvram-only", action="store_true",
                          help="only settle the cold boots' NVRAM, keeping the snapshots")
-    fixture.add_argument("--cpus", type=int, choices=[1, 2, 4, 8], default=1,
-                         help="2, 4 or 8: only that shell snapshot, from the existing fixture")
+    fixture.add_argument("--cpus", type=int, choices=[1, 2, 4, 8, 16], default=1,
+                         help="2, 4, 8 or 16: only that shell snapshot, from the existing fixture")
     bench = commands.add_parser("run", parents=[common], help="run workloads")
     bench.add_argument("workloads", nargs="*", help=", ".join(WORKLOADS))
     bench.add_argument("--repeat", type=int, default=3)

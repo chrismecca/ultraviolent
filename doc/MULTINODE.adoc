@@ -283,6 +283,55 @@ tens of megabytes per node.
   - Next: N3, two modules (8 nodes, 16 CPUs). The captures requested of a real Onyx2 rack
     may settle the open items above (the router NIC, the module NICs, router port wiring,
     `hinv`, `pcfg`).
+* **N3 (2026-11-19).** `--module rack --nodes 5-8` makes two rack modules
+  (`Ip27Machine::Module`): each has its own system controller (ELSC), controller NVRAM (module
+  number `module_number` + index at `0x708`), I²C bus shared only by its own nodes, Crossbows,
+  and routers r1 and r2; BASEIO is in the first module. The four routers form a square, each
+  r1 cabled to the other module's r1 and r2 to r2 (port 1, `hypothesis`); `--express-links`
+  adds the diagonals, r1 to the other module's r2 (port 2, `hypothesis`; IP27.adoc "Router").
+  Node boards are n1-n4 of each module. Snapshots keep the first module under the old names
+  and put the second under `module2.`; trace names and the second controller's events carry
+  `m2.` and `module2.`.
+  - The refactor left all fourteen one- to eight-CPU benchmark digests unchanged
+    (`local/bench/n2/n3a-tier1.out`, against `reg-tier1.json` and `n2-tier1.json`).
+  - PROM (one and two CPUs per node, with and without Xpress links): "Found 12 objects (8
+    hubs, 4 routers)", "16 CPUs on 8 nodes found", "No. of NODEs enabled = 8", "No. of CPUs
+    enabled = 16", "No. of RTRs enabled = 4", "ALL DIAGS PASSED". With Xpress links every
+    router carries requests through port 2.
+  - IRIX (eight nodes of two CPUs, 128 MB each): the BASEIO PROM's `modnum` lists "1 2";
+    `hinv` "16 180 MHZ IP27 Processors", "Main memory size: 1024 Mbytes"; `mpadmin -s`
+    processors 0-15; `/hw/module/2/slot` holds n1-n4, r1, r2; `/hw/nodenum` covers both
+    modules.
+  - Sixteen-CPU workloads (`bench.py fixture --cpus 16`: two modules, eight nodes of two,
+    each node with its own flash; `prom16`, `boot16`, `cpu16` with sixteen awk loops,
+    `reboot16`): `prom16` `ac7fb94022f75418` and `cpu16` `9eb650dadd5fe1f3` are identical on
+    tier 1, tier 0, and the reference interpreter (`local/bench/n2/n3-*.json`); `boot16`
+    (`6c906f00ef6fda25`) reaches `login:` and `reboot16` (`8f43c3553bc7d7e1`) returns to it
+    with processors 0-15 on tier 1. `cpu16` prints 749961 sixteen times. Host time, one
+    thread: tier 1 771 s (`prom16`), 1422 s (`boot16`), 297 s (`cpu16`), 1428 s
+    (`reboot16`), 150-185 M cycles/s; the reference 1447 s and 631 s, tier 0 1403 s and 701 s
+    (66-82 M cycles/s), within the 60-minute cap only through the PROM and `cpu16`.
+  - With `--express-links` (`bench.py --express-links`): `boot16` reaches `login:`
+    (`02ef75a850075691`; the PROM's discovery takes 186290 instead of 154772 usec) and
+    `cpu16` from the square's snapshot gives the same digest (`local/bench/n2/n3x-tier1.json`).
+  - Tests: `ip27.rack.two_modules` (vector routes across the square, to the other module's
+    Hub and routers and back; the express diagonal only with `express_links`; the second
+    controller's module number; a snapshot of the second module) and the configuration rules
+    (5 and 8 nodes valid, 9 not; Xpress links only with two modules); each checked by
+    mutation (a missing inter-module cable, a wrong module number).
+  - Still open, now for every router and both modules: "Cannot read router nic in module N,
+    slot rM", "Invalid serial number for module N", "Inventory table ID value is 0", no
+    router in `hinv` (N2 above; the Onyx2 capture).
+  - Checks: dev, gcc, asan, and tsan suites.
+  - `--parallel` (`local/bench/n2/n3-parallel.json`): `prom16`, `cpu16`, and `boot16` print
+    the reference's (or, for `boot16`, tier 1's) output, the PROM's discovery time masked;
+    `prom16` ends one character later (the space after the menu's "Option?", printed before
+    the stop was seen). 64 s (`prom16`, 0.63x real time), 18 s (`cpu16`, 0.92x), 113 s
+    (`boot16`, 0.77x) on the six-core host, 12-17 times one thread's speed. (An earlier
+    by-hand IRIX boot on `--parallel`, run beside other jobs, took 24 minutes.)
+  - Gate met, with the N2 exceptions (`hinv`, the router and module NICs).
+  - The milestone (N0-N3) is complete. N4 (up to 32 nodes) and N5 (Cray Routers) are later
+    work (decision 2); the Onyx2 rack capture, when it comes, may settle the open items.
 
 == Decisions (the user, 2026-11-18)
 

@@ -98,6 +98,9 @@ struct Ip27Config {
     unsigned nodes{1};
     // CPUs on the node board, from slice A: 1 or 2 (SMP.adoc; slate's node boards hold two).
     unsigned cpus{1};
+    // With two rack modules, the Xpress links: the square's diagonals, each module's r1 cabled
+    // to the other's r2 (MULTINODE.adoc "N3").
+    bool express_links{false};
     // With two CPUs, how far (in processor cycles) the one running may get ahead of the other
     // before they swap (ADR-023): 1 alternates every cycle; the default is 1 µs at 180 MHz.
     std::uint64_t cpu_slice{180};
@@ -141,7 +144,9 @@ unsigned baseio_port(ModuleType module);
 unsigned hub_xbow_port(ModuleType module, unsigned slot);
 
 // The system controller NVRAM's contents at first power-on (IP27.adoc "System controller").
-std::array<std::byte, devices::I2cEeprom::size> initial_controller_nvram(const Ip27Config& config);
+// `module` is the module's index; its number is config.module_number + module.
+std::array<std::byte, devices::I2cEeprom::size> initial_controller_nvram(const Ip27Config& config,
+                                                                       unsigned module = 0);
 
 // MD_SLOTID_USTAT slot ID of node slot n`slot` (IP27.adoc "Machine type").
 unsigned node_slot_id(ModuleType module, unsigned slot);
@@ -161,6 +166,8 @@ std::expected<void, std::string> validate(const Ip27Config& config,
 
 // The most node boards a machine holds (MULTINODE.adoc: two modules of four).
 inline constexpr unsigned max_nodes = 8;
+// A rack module's node slots, n1-n4.
+inline constexpr unsigned nodes_per_module = 4;
 // The most CPUs: two per node board.
 inline constexpr unsigned max_cpus = 2 * max_nodes;
 
@@ -279,11 +286,11 @@ class Ip27Machine {
     // controller tells IRIX, which shuts down and has the controller remove power; the run
     // then ends (IP27.adoc "System controller"). Call it from an event.
     void turn_keyswitch_off() {
-        elsc_.turn_keyswitch_off();
+        modules_.front()->elsc.turn_keyswitch_off();
     }
     // Whether the system controller has removed power.
     [[nodiscard]] bool powered_off() const {
-        return elsc_.powered_off();
+        return modules_.front()->elsc.powered_off();
     }
 
     // Host pacing (for interactive use, main's --realtime): the run's host threads wait until
@@ -580,7 +587,8 @@ class Ip27Machine {
     // A node board: its Hub, memory, boot PROM, and CPUs, and the node's view of physical
     // addresses (SMP.adoc "S5: the second node").
     struct Node {
-        Node(Ip27Machine& machine, unsigned index, unsigned slot, std::span<const std::byte> prom);
+        Node(Ip27Machine& machine, unsigned index, unsigned module, unsigned slot,
+             std::span<const std::byte> prom);
         Node(const Node&) = delete;
         Node& operator=(const Node&) = delete;
 
@@ -598,7 +606,8 @@ class Ip27Machine {
 
         Ip27Machine& machine;
         unsigned index;
-        // The module slot, n1-n4.
+        // The module (an index into modules_) and the slot in it, n1-n4.
+        unsigned module;
         unsigned slot;
         AddressSpace bus{ByteOrder::big};
         MemoryBlock memory;
@@ -646,10 +655,34 @@ class Ip27Machine {
     MemoryBlock baseio_flash_{devices::Am29f080::size};
     devices::Am29f080 baseio_flash_device_{
         scheduler_, tracer_, baseio_flash_.bytes(), {}, "baseio.flash"};
-    // The module's I2C bus: each node's PCF8584, the system controller, and its NVRAM.
-    devices::I2cBus i2c_bus_;
-    devices::I2cEeprom controller_nvram_;
-    devices::Elsc elsc_{scheduler_, tracer_, i2c_bus_};
+    // A rack module's router boards (MULTINODE.adoc), r1 then r2: the Router ASIC and the
+    // board's MicroLAN with its NIC.
+    struct RouterBoard {
+        RouterBoard(Tracer& tracer, unsigned module, unsigned slot);
+        unsigned slot;
+        Router router;
+        devices::OneWireBus mlan;
+        devices::Nic nic;
+    };
+    // A module's own components besides its node boards (MULTINODE.adoc "N3"): the system
+    // controller and its NVRAM on the module's I2C bus, which each node's PCF8584 shares; its
+    // Crossbows; its router boards. Module 0 also holds the BaseIO (on its Crossbow 0).
+    struct Module {
+        Module(Ip27Machine& machine, unsigned index);
+        unsigned index;
+        devices::I2cBus i2c_bus;
+        devices::I2cEeprom controller_nvram;
+        devices::Elsc elsc;
+        // Crossbow 0, and a rack module's Crossbow 1 for node slots n2 and n4 when a node is
+        // there (IP27.adoc "Crossbow").
+        devices::Xbow xbow;
+        std::unique_ptr<devices::Xbow> xbow1;
+        std::vector<std::unique_ptr<RouterBoard>> routers;
+        // The module's own state, under the key names of a one-module machine.
+        void save_state(StateImage& image) const;
+        void load_state(const StateImage& image);
+    };
+    std::vector<std::unique_ptr<Module>> modules_;
     // LL/SC and host-page coherence between the CPUs (unused with one).
     mips::Coherence coherence_;
     std::vector<std::unique_ptr<Node>> nodes_;
@@ -665,20 +698,8 @@ class Ip27Machine {
     // Where the running CPU must yield to the other (cpu_slice ahead of it).
     std::uint64_t slice_end_cycle_{std::numeric_limits<std::uint64_t>::max()};
     mips::ExecutionEngine engine_{mips::ExecutionEngine::tier0};
-    // The module's crossbow and the Hub's crosstalk windows (IP27.adoc "Xtalk").
-    devices::Xbow xbow_{tracer_};
-    // A rack module's second Crossbow, for node slots n2 and n4, when a node is there.
-    std::unique_ptr<devices::Xbow> xbow1_;
-    // A rack module's router boards (MULTINODE.adoc), r1 then r2: the Router ASIC and the
-    // board's MicroLAN with its NIC.
-    struct RouterBoard {
-        RouterBoard(Tracer& tracer, unsigned slot);
-        unsigned slot;
-        Router router;
-        devices::OneWireBus mlan;
-        devices::Nic nic;
-    };
-    std::vector<std::unique_ptr<RouterBoard>> routers_;
+    // Cables the routers: each module's to its node boards and to each other, and between
+    // modules (MULTINODE.adoc "N3").
     void connect_routers();
     // The BaseIO board's Bridge, on Crossbow port `baseio_port`.
     devices::Bridge baseio_bridge_{tracer_, baseio_port(config_.module)};

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <string>
 
 namespace ultraviolent::devices {
 
@@ -19,11 +20,14 @@ constexpr std::string_view keyswitch_off_message = "pd off";
 
 } // namespace
 
-Elsc::Elsc(Scheduler& scheduler, Tracer& tracer, I2cBus& bus)
+Elsc::Elsc(Scheduler& scheduler, Tracer& tracer, I2cBus& bus, std::string_view event_prefix)
     : scheduler_{scheduler}, tracer_{tracer}, bus_{bus},
-      token_event_{scheduler.add_event("elsc.token", [this] { next_token(); })},
-      release_event_{scheduler.add_event("elsc.release", [this] { release_bus(); })},
-      power_event_{scheduler.add_event("elsc.power_off", [this] { remove_power(); })} {
+      token_event_{scheduler.add_event(std::string{event_prefix} + "elsc.token",
+                                       [this] { next_token(); })},
+      release_event_{scheduler.add_event(std::string{event_prefix} + "elsc.release",
+                                         [this] { release_bus(); })},
+      power_event_{scheduler.add_event(std::string{event_prefix} + "elsc.power_off",
+                                       [this] { remove_power(); })} {
     bus_.attach(static_cast<I2cTarget&>(*this));
     reset();
 }

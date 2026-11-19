@@ -71,7 +71,8 @@ void usage() {
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
         "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
         "                    [--parallel] [--parallel-window CYCLES]\n"
-        "                    [--module rack|deskside] [--nodes 1-4] [--cpu r10000|r12000]\n"
+        "                    [--module rack|deskside] [--nodes 1-8] [--express-links]\n"
+        "                    [--cpu r10000|r12000]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
         "from a snapshot. Snapshots are for exploration; checkpoints need a cold run.\n"
@@ -129,8 +130,9 @@ void usage() {
         "faster, not deterministic, and without --trace cpu, --probe, or --sample-pc.\n"
         "--module rack puts the node in a rack module (default deskside, as slate;\n"
         "doc/IP27.adoc \"Machine type\"). --nodes 2 adds a second node board in n2 (doc/SMP.adoc);\n"
-        "a rack module takes up to 4 (doc/MULTINODE.adoc); give --flash once per node to\n"
-        "keep each node's flash PROM.\n"
+        "a rack module takes up to 4, and 5 to 8 fill a second rack module (module 2;\n"
+        "doc/MULTINODE.adoc); give --flash once per node to keep each node's flash PROM.\n"
+        "--express-links adds the Xpress links between two rack modules' routers.\n"
         "--cpu r12000 fits R12000s of slate's revision (default r10000; the clock is the\n"
         "flash PROM's; doc/SMP.adoc \"S6\").\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
@@ -267,6 +269,7 @@ struct Options {
     unsigned cpus{1};
     ip27::ModuleType module{ip27::ModuleType::deskside};
     unsigned nodes{1};
+    bool express_links{};
     ip27::ProcessorType processor{ip27::ProcessorType::r10000};
     std::uint64_t cpu_slice{180};
     bool parallel{};
@@ -349,6 +352,10 @@ std::optional<Options> parse(std::span<char*> arguments) {
         }
         if (flag == "--parallel") {
             options.parallel = true;
+            continue;
+        }
+        if (flag == "--express-links") {
+            options.express_links = true;
             continue;
         }
         if (i + 1 >= arguments.size()) {
@@ -437,8 +444,8 @@ std::optional<Options> parse(std::span<char*> arguments) {
             options.processor =
                 value == "r12000" ? ip27::ProcessorType::r12000 : ip27::ProcessorType::r10000;
         } else if (flag == "--nodes") {
-            if (value.size() != 1 || value[0] < '1' || value[0] > '4') {
-                std::fprintf(stderr, "--nodes takes 1 to 4\n");
+            if (value.size() != 1 || value[0] < '1' || value[0] > '8') {
+                std::fprintf(stderr, "--nodes takes 1 to 8\n");
                 return std::nullopt;
             }
             options.nodes = static_cast<unsigned>(value[0] - '0');
@@ -537,6 +544,7 @@ int main(int argc, char** argv) {
     config.cpus = options->cpus;
     config.module = options->module;
     config.nodes = options->nodes;
+    config.express_links = options->express_links;
     if (options->processor == ip27::ProcessorType::r12000) {
         config.processor = ip27::ProcessorType::r12000;
         config.cpu.processor_id = ip27::r12000_identity;

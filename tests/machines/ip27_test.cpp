@@ -523,7 +523,12 @@ const test::Registration controller{
         config.nodes = 4;
         t.check(ip27::validate(config, program({nop()})).has_value(), "four nodes, rack");
         config.nodes = 5;
-        t.check(!ip27::validate(config, program({nop()})), "a rack module holds four");
+        t.check(ip27::validate(config, program({nop()})).has_value(),
+                "a fifth node fills a second rack module");
+        config.nodes = 8;
+        t.check(ip27::validate(config, program({nop()})).has_value(), "two rack modules of four");
+        config.nodes = 9;
+        t.check(!ip27::validate(config, program({nop()})), "two modules hold eight");
         config.nodes = 2;
         config.node_slot = 2;
         t.check(!ip27::validate(config, program({nop()})), "several nodes start at n1");
@@ -1344,6 +1349,85 @@ const test::Registration rack_snapshot{
         copy.cpu(6).mtc0(mips::cp0::status, mips::status::kx);
         t.check_equal(copy.cpu(6).load(ialias + ni_scratch_reg1, AccessWidth::bits64).value_or(0),
                       std::uint64_t{0x77});
+    }};
+
+// Two rack modules (MULTINODE.adoc "N3"): nodes 5-8 fill the second module's n1-n4, its routers
+// are cabled to the first module's (r1 to r1, r2 to r2, on port 1), and its system controller
+// holds the next module number.
+const test::Registration two_modules{
+    "ip27.rack.two_modules", [](test::Context& t) {
+        Ip27Machine machine{rack_config(8), program({nop()})};
+        mips::Cpu& a = machine.cpu(0);
+        a.mtc0(mips::cp0::status, mips::status::kx);
+        const auto reg = [&a](std::uint64_t offset) {
+            return a.load(ialias + offset, AccessWidth::bits64).value_or(0xbad);
+        };
+        const auto read = [&](std::uint64_t route, std::uint64_t address) {
+            (void)reg(ni_vector_clear);
+            t.check(a.store(ialias + ni_vector, AccessWidth::bits64, route).has_value());
+            t.check(a.store(ialias + ni_vector_parms, AccessWidth::bits64,
+                            vector_parms(1, 0, address, 0))
+                        .has_value());
+            t.check_equal(reg(ni_vector_status) & 7, std::uint64_t{0});
+            return reg(ni_vector_read_data);
+        };
+        // Module 2's r1, out of module 1's r1 port 1: slot r1, in through its port 1.
+        const std::uint64_t m2r1 = read(1, 0);
+        t.check_equal(m2r1 & 0xf, std::uint64_t{1});
+        t.check_equal((m2r1 >> 8) & 0xf, std::uint64_t{0xf});
+        t.check_equal((m2r1 >> 46) & 7, std::uint64_t{1});
+        // Its n1 (port 4) is a Hub; its r2 (port 6) is slot r2, and closes the square back to
+        // module 1's r2 (port 1), which answers with its own slot bits.
+        t.check_equal(read(0x41, 0) & 0xf, std::uint64_t{0});
+        t.check_equal((read(0x61, 0) >> 8) & 0xf, std::uint64_t{0xe});
+        const std::uint64_t m1r2 = read(0x161, 0);
+        t.check_equal((m1r2 >> 8) & 0xf, std::uint64_t{0xe});
+        t.check_equal((m1r2 >> 46) & 7, std::uint64_t{1});
+
+        t.check_equal(std::to_integer<unsigned>(ip27::initial_controller_nvram(rack_config(8), 1)[0x708]),
+                      2u);
+        // Without Xpress links port 2 is unconnected; with them it leads to the other module's
+        // router in the other slot (r1's to module 2's r2), in through its port 2.
+        (void)reg(ni_vector_clear);
+        t.check(a.store(ialias + ni_vector, AccessWidth::bits64, 2).has_value());
+        t.check(a.store(ialias + ni_vector_parms, AccessWidth::bits64, vector_parms(1, 0, 0, 0))
+                    .has_value());
+        t.check_equal(reg(ni_vector_status), std::uint64_t{0});
+        Ip27Config express_config = rack_config(8);
+        express_config.express_links = true;
+        t.check(ip27::validate(express_config, program({nop()})).has_value());
+        Ip27Machine express{express_config, program({nop()})};
+        mips::Cpu& e = express.cpu(0);
+        e.mtc0(mips::cp0::status, mips::status::kx);
+        t.check(e.store(ialias + ni_vector, AccessWidth::bits64, 2).has_value());
+        t.check(e.store(ialias + ni_vector_parms, AccessWidth::bits64, vector_parms(1, 0, 0, 0))
+                    .has_value());
+        const std::uint64_t diagonal = e.load(ialias + ni_vector_read_data, AccessWidth::bits64).value_or(0);
+        t.check_equal((diagonal >> 8) & 0xf, std::uint64_t{0xe});
+        t.check_equal((diagonal >> 46) & 7, std::uint64_t{2});
+        express_config.nodes = 4;
+        t.check(!ip27::validate(express_config, program({nop()})), "Xpress links join two modules");
+
+        // The second module's state is in a snapshot.
+        machine.cpu(8).mtc0(mips::cp0::status, mips::status::kx);
+        t.check(machine.cpu(8).store(ialias + ni_scratch_reg1, AccessWidth::bits64, 0x88).has_value());
+        t.check(a.store(ialias + ni_vector, AccessWidth::bits64, 0x61).has_value());
+        t.check(a.store(ialias + ni_vector_data, AccessWidth::bits64, 0x99).has_value());
+        t.check(a.store(ialias + ni_vector_parms, AccessWidth::bits64, vector_parms(1, 0, 0x20, 1))
+                    .has_value());
+        const StateImage image = machine.save_state();
+        Ip27Machine copy{rack_config(8), program({nop()})};
+        t.check(copy.load_state(image).has_value(), "loads");
+        copy.cpu(8).mtc0(mips::cp0::status, mips::status::kx);
+        t.check_equal(copy.cpu(8).load(ialias + ni_scratch_reg1, AccessWidth::bits64).value_or(0),
+                      std::uint64_t{0x88});
+        mips::Cpu& c = copy.cpu(0);
+        c.mtc0(mips::cp0::status, mips::status::kx);
+        t.check(c.store(ialias + ni_vector, AccessWidth::bits64, 0x61).has_value());
+        t.check(c.store(ialias + ni_vector_parms, AccessWidth::bits64, vector_parms(1, 0, 0x20, 0))
+                    .has_value());
+        t.check_equal(c.load(ialias + ni_vector_read_data, AccessWidth::bits64).value_or(0),
+                      std::uint64_t{0x99});
     }};
 
 // A warm reset sent down the link (NI_PORT_RESET PORTRESET) resets the Hub at the other end,
