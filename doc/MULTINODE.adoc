@@ -227,9 +227,9 @@ tens of megabytes per node.
     `klhwg_add_all_routers` warns when the record lacks "Part" (it then looks for
     "030-0841", by our reading the router board's part number; the model's synthetic record
     is "030-9999-002"). No PROM lock covers either access, so on a real machine the nodes'
-    timing keeps them apart. `hypothesis`: the master's console output takes time there
-    (9600 baud) and none here (the 16550 transmits at once, IP27.adoc "IOC3"). Not changed
-    on that guess, since console timing changes every benchmark digest; a capture of a real
+    timing keeps them apart. `hypothesis` (disproven 2026-11-20, below: with console output
+    at 9600 baud IRIX still warns): the master's console output takes time there and none
+    here (the 16550 transmits at once, IP27.adoc "IOC3"). A capture of a real
     Onyx2 rack (power-on log with timestamps, `hinv -mvv`, POD `vr`/`rnic`/`rtab`) has been
     requested through the user (2026-11-19).
   - Found by `reboot8`: IRIX's reboot (`init 6`) reset only the rebooting node. Its node ID
@@ -332,6 +332,47 @@ tens of megabytes per node.
   - Gate met, with the N2 exceptions (`hinv`, the router and module NICs).
   - The milestone (N0-N3) is complete. N4 (up to 32 nodes) and N5 (Cray Routers) are later
     work (decision 2); the Onyx2 rack capture, when it comes, may settle the open items.
+* **Open items after N3 (2026-11-20)**, worked without the Onyx2 capture (the user: "ill let
+  you order the priorities and plow through them"):
+  - POD `pcfg`: not a model fault. Entered from IO6, POD runs in Dex mode, with the PROM's
+    data mapped read-only (ASID 1), and `pcfg` stores to a global without checking the mode:
+    a TLB Modification exception, as on any R10000. After `go cac`, `pcfg v` lists every
+    Hub with its NASID, module, slot, and route (IP27.adoc "Diagnostics"). Closed.
+  - `hinv` and routers: IRIX lists them, in `hinv -v` as it lists Hubs (slate's `hinv -mvv`
+    has its "HUB in Module" lines): "ROUTER in Module 1/Slot 1: Revision 1: Active Ports
+    [4,5,6] (enabled)" and the same for r2, which IRIX numbers Slot 3 (whether a real rack
+    does is for the capture). Plain `hinv` prints neither Hubs nor routers. Closed.
+  - Module serial numbers: on an SN0 the PROM fills each node's midplane board serial from
+    the node's Hub NIC text after "MODULEID", and IRIX warns "Invalid serial number for
+    module N" when no node of a module has one (IP27.adoc "NICs"). Each rack module's n1 now
+    holds a MODULEID NIC (`hypothesis`, as the deskside); test `ip27.rack.module_nics`
+    (Search ROM over each node's MicroLAN). With the eight- and sixteen-CPU fixtures' NVRAM
+    settled again, `boot8` no longer prints "Inventory table ID value is 0", "Invalid serial
+    number for module 1", or "No serial number found"; only the router NIC warnings remain.
+    The deskside's NICs are as before: the one- to four-CPU digests are unchanged
+    (`local/bench/n2/nic-reg-tier1.json`, against `reg-tier1.json` and `n2-tier1.json`).
+    The rack workloads' change, from fixtures rebuilt for them (`fixture --cpus 8`, `--cpus
+    16`), and are identical on tier 1, tier 0, and the reference interpreter
+    (`local/bench/n2/nic-*.json`): `boot8` `74ef1eba2f27f541`, `cpu8` `1eea7c9cbac682a2`,
+    `reboot8` `2b2b5f2b6baa7132`, `prom16` `33ead37f7e70e76a`, `cpu16` `f88b807b6c62bc4d`.
+    On tier 1, `boot16` (`7a6e880c6f2f7b17`) reaches `login:` and `reboot16`
+    (`e4f9110eee298a68`) returns to it; both modules' boots print only the router NIC
+    warnings.
+  - Router NIC ("Cannot read router nic"), still open. Two experiments, not kept (a
+    scratch worktree): console output at 9600 baud (the 16550's transmitter busy 1.04 ms
+    per character; `boot8` 3 s longer in virtual time) and router MicroLAN operations that
+    take their encoded pulse + sample time; IRIX warned for both routers in each. Traced
+    with the second: in early discovery (12.6 s) each of n2 and n4 takes its router's lock
+    (SCR1, exchange `0xffff`), reads the NIC, caches it in SCR0, and releases; after
+    "Checking partitioning information" (34.38 s) n2 and n4 read their router's
+    manufacturing record (a transaction of more than 80 ms with the timing) holding no
+    lock, n1 takes and releases each router's lock twice (34.40-34.41 s, 1.4 ms each), and
+    then (34.45 s, outside the lock) issues two resets, Search ROM, and one bit pair to r1
+    and then r2, through the same control register, whose last writer wins. So in the
+    model the master's probe falls inside the other nodes' reads whatever the console or
+    MicroLAN timing; on hardware something else separates them (more work before the
+    master's probe, or a control register that refuses writes while busy, are guesses).
+    The capture's timestamps and `hinv -mvv` are the evidence to wait for.
 
 == Decisions (the user, 2026-11-18)
 

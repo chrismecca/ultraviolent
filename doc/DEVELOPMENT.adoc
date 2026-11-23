@@ -241,7 +241,7 @@ scripts/bench.py run --cpu-slice 1 --output local/runs/slice1 cpu2 mix2
 
 Cold boots start from NVRAM already settled in their own configuration: `fixture` boots each
 configuration once to the PROM menu, runs the Command Monitor's `update`, and keeps the NVRAM
-(`nvram.bin`, `nvram2.bin`, `nvram4.bin`), so the BASEIO PROM finds its hardware inventory
+(`nvram.bin`, `nvram2.bin`, ... `nvram16.bin`), so the BASEIO PROM finds its hardware inventory
 as on a long-installed system (IP27.adoc "Hardware inventory"). `fixture --nvram-only --cpus N` redoes only that step;
 without the settled file, a cold boot uses `nvram.bin`.
 
@@ -289,6 +289,17 @@ cache, so every run would read the guest disk cold: on the reference machine's X
 `fs` read 225 MB per run and measured 133 M cycles/s, against 275 in memory, with the same
 digest (2026-10-12). Before that date the fixture was copied to tmpfs by hand and passed
 with `--work`, which a host reboot silently undid.
+
+Runs at the same time need a `--scratch` each (every run removes the default directory
+first). The default binary is the PGO build (`build/pgo/ultraviolent`), rebuilt only by
+`scripts/build-pgo.sh`; when it is older than the sources, pass `--binary
+build/release/ultraviolent` (an old binary refuses newer options, and `fixture` then reports
+only "the inventory update failed"). Memory, measured 2026-11-20 on the reference host (15
+GB, no swap): an eight-CPU run fits in 5.5 GB including its tmpfs copies; `fixture --cpus
+16` peaks above 9 GB while it saves the sixteen-CPU snapshot. Run large jobs one or two at
+a time, each in a capped scope (`systemd-run --user --scope -p MemoryMax=14G -p
+MemorySwapMax=0 ...`), so that an out-of-memory kill takes only that job: three engines'
+rack workloads at once once took the whole terminal session with them.
 
 The reported time is the best of `--repeat` runs, including process start and, for the
 shell workloads, loading the 560 MB snapshot (under a second). Frequency scaling and other

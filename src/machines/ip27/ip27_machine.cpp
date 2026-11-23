@@ -408,15 +408,19 @@ Ip27Machine::Ip27Machine(const Ip27Config& config, std::span<const std::byte> pr
     baseio_nic_bus_.attach(mio_nic_);
     baseio_nic_bus_.attach(baseio_nic_);
     baseio_bridge_.connect_nic(baseio_nic_bus_);
-    if (config_.module == ModuleType::deskside) {
-        // slate's module NICs (OBS-SLATE-0004) on n1's MicroLAN, with synthetic serials:
-        // MODULEID (no part number) and the deskside midplane, 4P1G5_MPLN 030-1066-002 rev K.
-        module_nic_.memory() = board_nic_memory(
-            {.serial = "K0000001", .part = "", .revision = "", .name = "MODULEID"});
-        midplane_nic_.memory() = board_nic_memory(
-            {.serial = "UVX004", .part = "030-1066-002", .revision = "K", .name = "4P1G5_MPLN"});
-        nodes_.front()->mlan.attach(module_nic_);
-        nodes_.front()->mlan.attach(midplane_nic_);
+    // Each module's NICs on its first node board's MicroLAN: a deskside's on n1's, as slate's
+    // (OBS-SLATE-0004). hypothesis: a rack module's MODULEID NIC on its n1's too; on an SN0
+    // the PROM takes the module's serial number from a node's Hub NIC text after "MODULEID"
+    // (init_klcfg_midplane, 0x1fc50d6c), and IRIX warns "Invalid serial number for module
+    // N" without it (module_probe_snum). The rack midplane's NIC is left out: its name and
+    // part number are not known, and neither the PROM nor IRIX needs it with MODULEID.
+    for (auto& m : modules_) {
+        const auto first = std::ranges::find_if(
+            nodes_, [&m](const auto& n) { return n->module == m->index; });
+        (*first)->mlan.attach(m->moduleid_nic);
+        if (config_.module == ModuleType::deskside) {
+            (*first)->mlan.attach(m->midplane_nic);
+        }
     }
     baseio_bridge_.attach(0, scsi0_);
     baseio_bridge_.attach(1, scsi1_);
@@ -466,9 +470,19 @@ Ip27Machine::Module::Module(Ip27Machine& machine, unsigned module_index)
     : index{module_index},
       elsc{machine.scheduler_, machine.tracer_, i2c_bus,
            module_index == 0 ? std::string{} : std::format("module{}.", module_index + 1)},
-      xbow{machine.tracer_} {
+      xbow{machine.tracer_},
+      moduleid_nic{0x09, 0x3 + 0x10 * module_index},
+      midplane_nic{0x09, 0x4 + 0x10 * module_index} {
     std::ranges::copy(initial_controller_nvram(machine.config_, module_index),
                       controller_nvram.bytes().begin());
+    // slate's module NICs (OBS-SLATE-0004), with synthetic serials: MODULEID (no part number)
+    // and the deskside midplane, 4P1G5_MPLN 030-1066-002 rev K.
+    moduleid_nic.memory() = board_nic_memory({.serial = std::format("K{:07}", module_index + 1),
+                                              .part = "",
+                                              .revision = "",
+                                              .name = "MODULEID"});
+    midplane_nic.memory() = board_nic_memory(
+        {.serial = "UVX004", .part = "030-1066-002", .revision = "K", .name = "4P1G5_MPLN"});
 }
 
 void Ip27Machine::Module::save_state(StateImage& image) const {

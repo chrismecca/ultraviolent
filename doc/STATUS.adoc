@@ -12,7 +12,9 @@ milestone's end). The milestone is complete (2026-11-19): N0-N2 brought one rack
 four nodes and two routers through the PROM and IRIX on eight CPUs; N3 adds the second
 module, with four routers in a square (and optional Xpress links), and IRIX boots, runs, and
 reboots on sixteen CPUs, with the PROM and a sixteen-CPU workload identical on all three
-engines. Open items wait on a capture from a real Onyx2 rack. Next: see Next task.
+engines. Of the open items after N3, three are closed (2026-11-20: POD `pcfg`, routers in
+`hinv -v`, rack module serial numbers); IRIX's "Cannot read router nic" waits on a capture
+from a real Onyx2 rack. Next: see Next task.
 
 Before it, SMP IP27 (below), Usable VM and releases 0.1.0-0.1.2, and tier-1 speed (Next task).
 
@@ -490,10 +492,23 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   diagnostics; IRIX boots on sixteen CPUs (`modnum` "1 2", `/hw/module/2`), runs sixteen
   processes, and reboots; `prom16` and `cpu16` are identical on tier 1, tier 0, and the
   reference interpreter; `--parallel` gives the same output (`boot16` in 113 s, 0.77x real time). The one- to eight-CPU digests are
-  unchanged. Still open, as in N2: the router and module NIC warnings and `hinv`, pending
-  the Onyx2 capture. Next: when the capture comes, file it under `local/` and revisit those
-  items (MULTINODE "Progress", N2 and N3); otherwise the next milestone is the user's choice
-  (N4 and N5, larger router configurations, are later work by decision 2).
+  unchanged. **Open items after N3 (2026-11-20, MULTINODE "Progress"), ordered and worked
+  without the capture at the user's word:** POD `pcfg` is not a model fault (POD entered
+  from IO6 runs in Dex mode with the PROM's data mapped read-only; `pcfg` stores anyway and
+  takes a TLB Modification exception; after `go cac`, `pcfg v` lists every Hub; IP27.adoc
+  "Diagnostics"). Routers are in `hinv -v`, as Hubs are ("ROUTER in Module 1/Slot 1"; plain
+  `hinv` lists neither). Each rack module's n1 now holds a MODULEID NIC (`hypothesis`, as
+  the deskside; the PROM's `init_klcfg_midplane` takes the module serial number from it), so
+  "Invalid serial number for module N", "No serial number found", and "Inventory table ID
+  value is 0" are gone (test `ip27.rack.module_nics`); the rack digests changed and agree on
+  all three engines, the one- to four-CPU digests are unchanged. Still open: "Cannot read
+  router nic". Two timing experiments (console at 9600 baud; MicroLAN pulses taking their
+  time) did not remove it, which disproves the console-timing guess: in the model the
+  master's probe of each router's NIC falls inside n2's and n4's unlocked reads whatever
+  that timing. Next: when the capture comes, file it under `local/` and settle the router
+  NIC, router part number, port wiring, and r2's slot number from it; otherwise the next
+  milestone is the user's choice (N4 and N5, larger router configurations, are later work
+  by decision 2).
 . **Usable VM (ROADMAP "Usable VM"; agreed with the user 2026-11-02: "do it").** Done so
   far (2026-11-02/03):
 .. **Real time.** `--realtime` (backends::RealTimePacer, `Ip27Machine::hold_host_until`;
@@ -2481,4 +2496,32 @@ Next step: the slow paths left in `boot`, by measured cost.
   build: 31.50 s (translating 1.30 s against 1.43 s, but 1.5 million dispatch installs
   against 0.36 million). Translations repeat mostly because their TLB entry's generation
   changed (an entry refilled, often with the same mapping), which no such table can skip.
+----
+
+----
+Date: 2026-11-20 (finished 2026-11-23; a tmux OOM kill interrupted it)
+Milestone: Multi-node Origin 2000, open items after N3
+Hypothesis: the open N2/N3 items (POD `pcfg`, routers in `hinv`, module serial numbers,
+  router NIC) are model gaps that disassembly and runs can settle without the Onyx2 capture.
+Evidence: PROM disassembly (POD's TLB mapping by ASID, `init_klcfg_midplane` at
+  `0x1fc50d6c`), IRIX's `module_probe_snum` and `klhwg_add_all_routers` messages, traces of
+  router MicroLAN and lock traffic in `boot8`.
+Changed: each module's MODULEID NIC (and a deskside's midplane NIC) belongs to
+  `Ip27Machine::Module` and sits on the module's first node board's MicroLAN; IP27.adoc
+  "NICs" and "Diagnostics" (POD memory modes); MULTINODE "Progress"; DEVELOPMENT
+  "Benchmarks" (concurrent runs, memory, the PGO binary).
+Tests: `ip27.rack.module_nics` (Search ROM over every node's MicroLAN, deskside and rack);
+  dev green; benchmarks below.
+Newly proven: POD `pcfg`'s fault is the architecture (a store through a clean TLB entry in
+  Dex mode), not a model fault; IRIX lists routers in `hinv -v`; with a MODULEID NIC per rack
+  module the module serial warnings go away; one- to four-CPU digests unchanged
+  (`local/bench/n2/nic-reg-tier1.json`); `boot8`, `cpu8`, `reboot8`, `prom16`, `cpu16`
+  identical on tier 1, tier 0, and the reference interpreter (`local/bench/n2/nic-*.json`).
+Disproven: that console timing (9600 baud) keeps the master's router NIC probe apart from
+  the other nodes' reads; with it, and with MicroLAN pulses that take their time, IRIX still
+  warns for both routers.
+Unknowns: what separates those accesses on hardware; a rack midplane NIC's name and part
+  number; whether a real rack numbers r2 Slot 3 in `hinv`.
+Best checkpoint: IRIX to `login:` on sixteen CPUs (`boot16`, 24fb9cf and this change).
+Next step: the Onyx2 capture when it comes (router NIC); otherwise the user's next milestone.
 ----

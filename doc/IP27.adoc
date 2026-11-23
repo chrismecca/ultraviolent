@@ -1244,7 +1244,16 @@ read or write-1 slot, longer a write-0 slot, 0 a wait.
   (OBS-SLATE-0004): MODULEID (barcode K0000001, no part number, laser `0x3`) and the
   midplane 4P1G5_MPLN (030-1066-002 rev K, barcode UVX004, laser `0x4`); serials are
   synthetic. slate's IP31 boards also carry a processor-module NIC (IP31PIMMR12KS); an
-  IP27 board has no PIMM (`hypothesis`). `observed`: with the board NIC the PROM no longer
+  IP27 board has no PIMM (`hypothesis`). Each rack module's first node board (n1) holds
+  that module's MODULEID NIC (`hypothesis`, as the deskside; barcode K000000N for module N,
+  laser `0x3` + `0x10` × (N − 1); `Ip27Machine::Module`): `observed` (disassembly,
+  2026-11-20), on an SN0 the PROM's `init_klcfg_midplane` (`0x1fc50d6c`) adds a midplane
+  board (klconfig type `0x41`) for each node with a serial-number component it fills from
+  the node's Hub NIC text, after "MODULEID" and "Serial:" up to the ";" (10 characters), and
+  IRIX's `module_probe_snum` warns "Invalid serial number for module %d, possible missing or
+  invalid NIC" when no node of the module has one. A rack midplane NIC is left out: its name
+  and part number are not known, and neither PROM nor IRIX needs it once MODULEID is there.
+  `observed`: with the board NIC the PROM no longer
   prints "using BaseIO nic" (its fallback, "Hub NIC broken; using BaseIO nic", which gave
   both Hubs of a two-node machine the BaseIO's NIC as their identity), and two-node
   discovery still elects n2, as slate does.
@@ -1385,6 +1394,21 @@ build/release/ultraviolent --machine ip27 --prom assets/firmware/ip27prom.img \
 ----
 
 This observes only; the address is specific to that image and is never used by the model.
+
+POD (Power-On Diagnostics; from the IO6 Command Monitor, `pod`, which its help leaves out)
+has memory modes, `go dex|unc|cac` (POD help "Set memory mode"). `observed` (disassembly
+and runs, 2026-11-20): the PROM is linked at `0xc00000001fc00000`, in xkseg, and maps it
+with one TLB pair (1 MB pages) chosen by ASID: ASID 1, the PROM itself, uncached and not
+writable (EntryLo `0x7f0012`, `0x7f4012`); 2 and 3, its copy in memory at `0x1a00000`,
+writable, uncached or cached; 4, the copy on a given node (routines at `0x1fc05940`-
+`0x1fc05b2c`, each leaving EntryHi's ASID at its own). Entering POD from IO6 takes Dex mode
+(ASID 1, prompt `POD IOC3 Dex>`), so the PROM's data is read-only: `pcfg` stores to a
+global (`0x1fccbd00`, at `0x1fc46cc8`) without checking the mode and takes a TLB
+Modification exception, "General Exception" with that EPC. That is the architecture (a
+store through a valid TLB entry whose D bit is clear), not a model fault; after `go cac` ("Testing/
+Initializing memory", prompt `Cac>`) `pcfg v` prints each Hub's NASID, module, slot, and
+vector route (with two rack modules, all eight). Other commands refuse Dex mode ("Can't run
+this command in %s mode (see 'go' command)").
 
 === Snapshots
 

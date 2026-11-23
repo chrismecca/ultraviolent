@@ -1527,6 +1527,89 @@ const test::Registration node_nics{
                 "n1: a presence pulse");
     }};
 
+// The ROM IDs on a node board's MicroLAN, found by Search ROM ("Book of iButton Standards"
+// algorithm, as Linux ioc3-eth.c nic_find) through the node's MD_MLAN_CTL.
+std::vector<std::uint64_t> node_mlan_roms(mips::Cpu& cpu) {
+    cpu.mtc0(mips::cp0::status, mips::status::kx);
+    constexpr std::uint64_t md_mlan_ctl = 0x20'00a8;
+    const auto pulse = [&](std::uint64_t width, std::uint64_t sample) {
+        (void)cpu.store(ialias + md_mlan_ctl, AccessWidth::bits64, width << 10 | sample << 2);
+        return (cpu.load(ialias + md_mlan_ctl, AccessWidth::bits64).value_or(1) & 1) != 0;
+    };
+    const auto write_bit = [&](bool one) { (void)(one ? pulse(6, 110) : pulse(80, 30)); };
+    std::vector<std::uint64_t> roms;
+    std::uint64_t address = 0;
+    int last = -1;
+    do {
+        if (pulse(500, 65)) {
+            break; // no presence pulse
+        }
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            write_bit((0xf0u >> bit & 1) != 0); // Search ROM
+        }
+        int disc = -1;
+        for (int index = 0; index < 64; ++index) {
+            const bool a = pulse(6, 13);
+            const bool b = pulse(6, 13);
+            const std::uint64_t mask = std::uint64_t{1} << index;
+            if (a && b) {
+                return roms; // nothing answered
+            }
+            if (!a && !b) {
+                if (index == last) {
+                    address |= mask;
+                } else if (index > last) {
+                    address &= ~mask;
+                    disc = index;
+                } else if ((address & mask) == 0) {
+                    disc = index;
+                }
+            } else {
+                address = a ? address | mask : address & ~mask;
+            }
+            write_bit((address & mask) != 0);
+        }
+        roms.push_back(address);
+        last = disc;
+    } while (last >= 0 && roms.size() < 8);
+    return roms;
+}
+
+// A NIC's ROM ID: family code, then the 48-bit laser serial (the CRC byte left out).
+std::uint64_t rom_id(std::uint64_t serial) {
+    return 0x09 | serial << 8;
+}
+
+// The module NICs (IP27.adoc "NICs"): a deskside's MODULEID and midplane NICs are on n1's
+// MicroLAN, as slate's; each rack module's MODULEID NIC on its own n1's (hypothesis), where
+// the PROM's init_klcfg_midplane looks for the module's serial number.
+const test::Registration module_nics{
+    "ip27.rack.module_nics", [](test::Context& t) {
+        const auto ids = [](std::vector<std::uint64_t> roms) {
+            for (auto& rom : roms) {
+                rom &= 0x00ff'ffff'ffff'ffff;
+            }
+            std::ranges::sort(roms);
+            return roms;
+        };
+        Ip27Machine deskside{two_node_config(), program({nop()})};
+        t.check(ids(node_mlan_roms(deskside.cpu(0))) ==
+                    std::vector<std::uint64_t>{rom_id(0x3), rom_id(0x4), rom_id(0x5)},
+                "deskside n1: MODULEID, midplane, board");
+        t.check(ids(node_mlan_roms(deskside.cpu(2))) == std::vector<std::uint64_t>{rom_id(0x6)},
+                "deskside n2: board only");
+        Ip27Machine rack{rack_config(8), program({nop()})};
+        for (unsigned node = 0; node < 8; ++node) {
+            std::vector<std::uint64_t> expected{rom_id(0x5 + node)};
+            if (node % 4 == 0) {
+                expected.push_back(rom_id(0x3 + 0x10 * (node / 4)));
+                std::ranges::sort(expected);
+            }
+            t.check(ids(node_mlan_roms(rack.cpu(node * 2))) == expected,
+                    std::format("rack node {}: {} NICs", node, expected.size()));
+        }
+    }};
+
 // Over crosstalk, a Hub answers with its local registers at 0x1000000 + offset: n1 reads n2's
 // node ID through a big window aimed at n2's Crossbow port (9), as the PROM's xbow_update.
 const test::Registration hub_crosstalk_registers{

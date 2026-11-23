@@ -619,7 +619,7 @@ class Ip27Machine {
         devices::Pcf8584 i2c;
         DirectoryMemory directory;
         // The node board's MicroLAN (Hub MD_MLAN_CTL) and the NICs on it (IP27.adoc "NICs"):
-        // the node board's own, and in n1 of a deskside module the module's.
+        // the node board's own, and in a module's first node board the module's.
         devices::OneWireBus mlan;
         devices::Nic board_nic;
         Hub hub;
@@ -678,6 +678,10 @@ class Ip27Machine {
         devices::Xbow xbow;
         std::unique_ptr<devices::Xbow> xbow1;
         std::vector<std::unique_ptr<RouterBoard>> routers;
+        // The module's NICs, on its first node board's MicroLAN (IP27.adoc "NICs"): MODULEID,
+        // and a deskside's midplane (as slate's); a rack midplane's NIC is not known.
+        devices::Nic moduleid_nic;
+        devices::Nic midplane_nic;
         // The module's own state, under the key names of a one-module machine.
         void save_state(StateImage& image) const;
         void load_state(const StateImage& image);
@@ -709,9 +713,6 @@ class Ip27Machine {
     devices::OneWireBus baseio_nic_bus_;
     devices::Nic mio_nic_{0x09, 0x1};
     devices::Nic baseio_nic_{0x09, 0x2};
-    // A deskside module's MODULEID and midplane NICs, on n1's MicroLAN (as slate's).
-    devices::Nic module_nic_{0x09, 0x3};
-    devices::Nic midplane_nic_{0x09, 0x4};
     // BaseIO PCI devices, in slate's slots (OBS-SLATE-0001): SCSI controllers 0 and 1, IOC3.
     // The BaseIO's two SCSI buses and their QLogic controllers (slate: the CD-ROM is ID 6 on
     // bus 0, OBS-SLATE-0001).
