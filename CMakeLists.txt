@@ -118,6 +118,9 @@ ultraviolent_enable_sanitizers(ultraviolent_ip27)
 
 add_library(ultraviolent_backends
     src/backends/console.cpp
+    src/backends/console_socket.cpp
+    src/backends/cow_block_store.cpp
+    src/backends/ethernet_switch.cpp
     src/backends/file_block_store.cpp
     src/backends/stream_serial_sink.cpp
     src/backends/stream_trace_sink.cpp
@@ -132,6 +135,8 @@ ultraviolent_enable_sanitizers(ultraviolent_backends)
 
 add_executable(ultraviolent
     src/main.cpp
+    src/disk_command.cpp
+    src/switch_command.cpp
 )
 
 target_link_libraries(ultraviolent PRIVATE ultraviolent_ip27 ultraviolent_backends)
@@ -213,6 +218,9 @@ if(BUILD_TESTING)
         tests/devices/xbow_test.cpp
         tests/scsi/scsi_test.cpp
         tests/backends/console_test.cpp
+        tests/backends/console_socket_test.cpp
+        tests/backends/cow_block_store_test.cpp
+        tests/backends/ethernet_switch_test.cpp
         tests/backends/real_time_pacer_test.cpp
         tests/backends/terminal_input_test.cpp
     )

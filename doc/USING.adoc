@@ -194,7 +194,8 @@ sixteen.
 * **CDs:** IRIX mounts a disc at `/CDROM` by itself, and IRIX's `eject` ejects it; then
   insert the next with `cdrom FILE`.
 * **Copies:** the machine is its three files. Stop it, then copy the directory (`cp
-  --sparse=always`, or `cp --reflink` on XFS or Btrfs) to back it up or clone it.
+  --sparse=always`, or `cp --reflink` on XFS or Btrfs) to back it up or clone it, or give
+  the clone a copy-on-write overlay of the disk instead of a copy (Disks).
 
 === What the options mean
 
@@ -214,6 +215,31 @@ sixteen.
   power-on, behind IRIX's back: IRIX can then read it a day off once (IP27.adoc "IOC3").
   Setting the time with `date` in IRIX, as above, is better.
 * `ultraviolent --help` lists everything else.
+
+== Disks
+
+`--disk FILE` may be given more than once. The first disk is the system disk (SCSI
+controller 0, unit 1, IRIX's `dks0d1`); the next ones take units 2, 3, 4, 5, 7, ... of
+controller 0 (unit 6 is the CD-ROM). `--disk 1:1=FILE` puts one on the second controller
+(`dks1d1`). A new disk is any file of the size wanted (`truncate -s 4G data.img`); label and
+partition it in IRIX with `fx -x`, then `mkfs` and mount it as on a real machine.
+
+A copy-on-write overlay is a disk file that holds only what the guest wrote since it was
+made, and reads everything else from a base image, which it never changes:
+
+----
+mkdir local/vm2; cp local/vm/nvram.bin local/vm/flash.bin local/vm2/
+build/pgo/ultraviolent disk create local/vm2/disk.cow ../vm/disk.img
+scripts/boot.sh local/vm2        # boots disk.cow when there is no disk.img
+build/pgo/ultraviolent disk info local/vm2/disk.cow
+build/pgo/ultraviolent disk flatten local/vm2/disk.cow local/vm2/disk.img
+----
+
+A relative base path is taken from the overlay's directory. Many machines can share one
+installed base this way, each overlay starting at a few kilobytes. The base must not change
+while overlays use it: boot the base itself only after flattening or deleting them (a base
+whose size changed is refused; one whose contents changed is not detected). `flatten` makes
+an ordinary image from an overlay. `--disk` takes an overlay wherever it takes an image.
 
 == Network
 
@@ -251,6 +277,52 @@ There is no built-in NAT. A host masquerade rule for `192.168.77.0/24` and a def
 in IRIX (`route add default 192.168.77.1`) should give the guest the internet; that has not
 been tried.
 
+== Many machines
+
+`scripts/uvctl.py` runs several machines on one host from a fleet file, each in the
+background with its console on a socket, on virtual Ethernet switches that need no root
+(doc/ORCHESTRATION.adoc). A fleet file, `fleet.toml`:
+
+----
+[switch.lan]
+tap = "uv0"            # optional: the switch's machines reach the host through this TAP
+
+[machine.alpha]
+ethernet = "lan"
+
+[machine.beta]
+ethernet = "lan"
+cpus = 2
+parallel = true
+----
+
+----
+scripts/uvctl.py create alpha --from local/vm   # an overlay on local/vm's installed disk
+scripts/uvctl.py clone alpha beta               # beta shares alpha's disk as it is now
+scripts/uvctl.py up                             # both, and the switch
+scripts/uvctl.py console alpha                  # Ctrl-] then d detaches
+scripts/uvctl.py suspend beta                   # stop now; resume (or up) carries on
+scripts/uvctl.py snapshot beta before-upgrade   # of a stopped or suspended machine
+scripts/uvctl.py restore beta before-upgrade
+scripts/uvctl.py down                           # keyswitch off: IRIX shuts down
+scripts/uvctl.py status
+----
+
+Machine files are under `fleet/` beside the fleet file (`fleet/alpha/console.log` is the
+console's log). Each machine gets its own Ethernet address (from its name, or
+`ethernet_address`); in IRIX give each its own IP address as in Network. A machine's
+options are `cpus`, `nodes`, `module`, `memory`, `parallel`, `express_links`, `cpu`,
+`engine`, `disks` (a list of files in its directory, with `BUS:ID=` placements), and
+`options` (any other `ultraviolent` arguments). Snapshots and clones cost no copying: the
+disk is frozen into `fleet/layers` and the machine goes on on a new overlay, so layers are
+never deleted by uvctl. `local/vm` (the `--from` directory) must stay unchanged while
+machines use it.
+
+The pieces work alone too: `ultraviolent switch SOCKET [--tap IFNAME]` is the switch,
+`--ethernet switch:SOCKET` plugs a machine into it, `--ethernet-address` sets its MAC
+address, `--console-socket PATH` serves its console, and `--suspend FILE` suspends on
+SIGTERM and resumes from FILE.
+
 == Snapshots
 
 `--save-state FILE` writes the whole machine when it stops; `--load-state FILE` resumes it,
@@ -274,7 +346,7 @@ are for experiments; the disk, NVRAM, and flash files are the machine's lasting 
 
 * The console is a serial terminal. There is no keyboard, mouse, or graphics. (X clients
   displaying on another machine over the network should work but have not been tried.)
-* One system disk and one CD-ROM drive.
+* One CD-ROM drive. Disks: up to 14 on the first SCSI controller and 15 on the second.
 * Two CPUs on one node board. Two node boards (`--nodes 2`) boot, with an "Error in
   ust_change" message from IRIX (`STATUS.adoc`). Rack modules (`--module rack --nodes 1-8`,
   two modules past four nodes) boot IRIX on up to sixteen CPUs, slower than real time past

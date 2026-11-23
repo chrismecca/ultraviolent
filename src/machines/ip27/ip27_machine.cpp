@@ -109,10 +109,12 @@ std::expected<void, std::string> validate(const Ip27Config& config,
     }
     if (config.nodes < 1 || config.nodes > (config.module == ModuleType::deskside ? 2 : max_nodes)) {
         return std::unexpected("a deskside module holds one or two node boards; rack modules hold "
-                               "one to four each, in up to two modules (one to eight)");
+                               "one to four each, in up to eight modules (one to 32)");
     }
-    if (config.express_links && (config.module != ModuleType::rack || config.nodes <= nodes_per_module)) {
-        return std::unexpected("Xpress links join two rack modules");
+    const unsigned modules = (config.nodes + nodes_per_module - 1) / nodes_per_module;
+    if (config.express_links && (config.module != ModuleType::rack || (modules != 2 && modules != 4))) {
+        return std::unexpected("Xpress links join two or four rack modules (5 to 8, or 13 to 16 "
+                               "nodes)");
     }
     if (config.nodes > 1 && config.node_slot != 1) {
         return std::unexpected("several node boards fill the module's node slots from n1");
@@ -554,32 +556,47 @@ void Ip27Machine::connect_routers() {
         router.connect(port, n->hub, 0);
         n->hub.connect_link(router, port);
     }
-    if (modules_.size() == 2) {
-        // Two modules: four routers in a square (ToO "Router Board"; Owner's Guide: 8 node
-        // boards are two modules with four routers), each module's r1 cabled to the other's r1
-        // and r2 to r2. hypothesis: on port 1.
-        constexpr unsigned module_port = 1;
-        for (unsigned board = 0; board < 2; ++board) {
-            Router& a = modules_[0]->routers[board]->router;
-            Router& b = modules_[1]->routers[board]->router;
-            a.connect(module_port, b, module_port);
-            b.connect(module_port, a, module_port);
-        }
-        if (config_.express_links) {
-            // The Xpress links (Owner's Guide: extra cables between otherwise unused ports in
-            // 16- and 32-CPU systems; observed, the PROM: "express links must connect routers
-            // in different slots", at most one per router): r1 to the other module's r2.
-            // hypothesis: on port 2.
-            constexpr unsigned express_port = 2;
-            for (unsigned board = 0; board < 2; ++board) {
-                Router& a = modules_[0]->routers[board]->router;
-                Router& b = modules_[1]->routers[1 - board]->router;
-                a.connect(express_port, b, express_port);
+    // Several modules: the routers form a hypercube (ToO "Router Board"; Owner's Guide: 8
+    // node boards are two modules with four routers in a square, 16 four modules in a cube,
+    // 32 eight modules in a hypercube of 16 routers). A router's coordinates are its board
+    // (r1 or r2: the dimension inside the module, port 6) and its module's index, whose bit k
+    // is the dimension on external port 1 + k (hypothesis: the port numbers; the PROM assigns
+    // dimensions to linked ports itself, "assigned dimn %d to port %d"). Each module's rK is
+    // cabled to rK of the modules whose index differs in one bit; with a number of modules
+    // that is not a power of two, the cables to the missing modules are absent (routing
+    // tables allow such sizes, ToO "Router Board").
+    const auto module_count = static_cast<unsigned>(modules_.size());
+    for (unsigned m = 0; m < module_count; ++m) {
+        for (unsigned k = 0; (1u << k) < module_count; ++k) {
+            const unsigned other = m ^ (1u << k);
+            if (other >= module_count) {
+                continue;
             }
             for (unsigned board = 0; board < 2; ++board) {
-                Router& b = modules_[1]->routers[board]->router;
-                Router& a = modules_[0]->routers[1 - board]->router;
-                b.connect(express_port, a, express_port);
+                Router& a = modules_[m]->routers[board]->router;
+                Router& b = modules_[other]->routers[board]->router;
+                a.connect(1 + k, b, 1 + k);
+            }
+        }
+    }
+    if (config_.express_links) {
+        // The Xpress links (Owner's Guide: extra cables between otherwise unused ports in 16-
+        // and 32-CPU systems, that is two and four modules; observed, the PROM: "express links
+        // must connect routers in different slots", at most one per router): each router to
+        // the one farthest from it, in the other slot of the module whose index has every
+        // bit flipped, on the first port the hypercube leaves free (hypothesis: port 2 for
+        // two modules, 3 for four).
+        unsigned dimensions = 0;
+        while ((1u << dimensions) < module_count) {
+            ++dimensions;
+        }
+        const unsigned express_port = 1 + dimensions;
+        for (unsigned m = 0; m < module_count; ++m) {
+            const unsigned other = m ^ (module_count - 1);
+            for (unsigned board = 0; board < 2; ++board) {
+                Router& a = modules_[m]->routers[board]->router;
+                Router& b = modules_[other]->routers[1 - board]->router;
+                a.connect(express_port, b, express_port);
             }
         }
     }
@@ -857,8 +874,9 @@ StateImage Ip27Machine::save_state() {
     baseio_bridge_.save_state(image);
     scsi0_.save_state(image);
     cdrom_.save_state(image, "scsi0.target6");
-    if (system_disk_) {
-        system_disk_->save_state(image, "scsi0.target1");
+    for (const auto& attached : disks_) {
+        attached->disk.save_state(image,
+                                  std::format("scsi{}.target{}", attached->bus, attached->id));
     }
     scsi1_.save_state(image);
     ioc3_.save_state(image);
@@ -980,8 +998,9 @@ std::expected<void, std::string> Ip27Machine::load_state(const StateImage& image
     baseio_bridge_.load_state(image);
     scsi0_.load_state(image);
     cdrom_.load_state(image, "scsi0.target6");
-    if (system_disk_) {
-        system_disk_->load_state(image, "scsi0.target1");
+    for (const auto& attached : disks_) {
+        attached->disk.load_state(image,
+                                  std::format("scsi{}.target{}", attached->bus, attached->id));
     }
     scsi1_.load_state(image);
     ioc3_.load_state(image);
@@ -1050,8 +1069,31 @@ void Ip27Machine::Node::reset_cpus(ResetKind kind) {
 }
 
 void Ip27Machine::attach_disk(BlockStore& store) {
-    system_disk_.emplace(tracer_, "disk", store);
-    scsi_bus0_.attach(system_disk_id, *system_disk_);
+    const auto attached = attach_disk(0, system_disk_id, store);
+    invariant(attached.has_value(), "the system disk's place is free");
+}
+
+std::expected<void, std::string> Ip27Machine::attach_disk(unsigned bus, unsigned id,
+                                                          BlockStore& store) {
+    if (bus > 1) {
+        return std::unexpected{std::format("the BaseIO has SCSI buses 0 and 1, not {}", bus)};
+    }
+    if (id == 0 || id >= scsi::Bus::id_count) {
+        return std::unexpected{
+            std::format("SCSI IDs for disks are 1 to {}, not {}", scsi::Bus::id_count - 1, id)};
+    }
+    scsi::Bus& on = bus == 0 ? scsi_bus0_ : scsi_bus1_;
+    if (on.target(id) != nullptr) {
+        return std::unexpected{std::format("SCSI bus {} ID {} is taken{}", bus, id,
+                                           bus == 0 && id == cdrom_id ? " (the CD-ROM)" : "")};
+    }
+    // The system disk keeps its old trace name; the others are named as IRIX names them.
+    const std::string name =
+        bus == 0 && id == system_disk_id ? std::string{"disk"} : std::format("dks{}d{}", bus, id);
+    disks_.push_back(
+        std::make_unique<AttachedDisk>(AttachedDisk{bus, id, scsi::Disk{tracer_, name, store}}));
+    on.attach(id, disks_.back()->disk);
+    return {};
 }
 
 void Ip27Machine::step() {

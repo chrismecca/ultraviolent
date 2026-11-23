@@ -164,8 +164,9 @@ std::uint32_t reset_config_word(const Ip27Config& config, std::span<const std::b
 std::expected<void, std::string> validate(const Ip27Config& config,
                                           std::span<const std::byte> prom);
 
-// The most node boards a machine holds (MULTINODE.adoc: two modules of four).
-inline constexpr unsigned max_nodes = 8;
+// The most node boards a machine holds (MULTINODE.adoc "N4": eight rack modules of four,
+// the most the Rack Routers' hypercube joins without Cray Routers).
+inline constexpr unsigned max_nodes = 32;
 // A rack module's node slots, n1-n4.
 inline constexpr unsigned nodes_per_module = 4;
 // The most CPUs: two per node board.
@@ -360,6 +361,11 @@ class Ip27Machine {
     // The system disk (SCSI bus 0, ID 1) on `store`, which must outlive the machine. Call
     // before running.
     void attach_disk(BlockStore& store);
+    // A disk at SCSI `id` of the BaseIO's bus `bus` (0 or 1; ORCHESTRATION.adoc "O1"), on
+    // `store`, which must outlive the machine. Call before running. Fails, with the reason,
+    // for a bus or ID that does not exist, the controllers' own ID 0, or an ID already taken
+    // (the CD-ROM is bus 0 ID 6).
+    std::expected<void, std::string> attach_disk(unsigned bus, unsigned id, BlockStore& store);
 
     [[nodiscard]] Tracer& tracer() {
         return tracer_;
@@ -727,7 +733,13 @@ class Ip27Machine {
     scsi::Bus scsi_bus0_;
     scsi::Bus scsi_bus1_;
     scsi::CdRom cdrom_{tracer_, "cdrom"};
-    std::optional<scsi::Disk> system_disk_;
+    // Disks, in the order attached; each is on its bus as target `id`.
+    struct AttachedDisk {
+        unsigned bus;
+        unsigned id;
+        scsi::Disk disk;
+    };
+    std::vector<std::unique_ptr<AttachedDisk>> disks_;
     devices::Isp1020 scsi0_{scheduler_, tracer_, "scsi0"};
     devices::Isp1020 scsi1_{scheduler_, tracer_, "scsi1"};
     // The IP27's software counts the timekeeper's year from 1970 (Linux

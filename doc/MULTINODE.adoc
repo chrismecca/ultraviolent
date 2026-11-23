@@ -374,6 +374,26 @@ tens of megabytes per node.
     master's probe, or a control register that refuses writes while busy, are guesses).
     The capture's timestamps and `hinv -mvv` are the evidence to wait for.
 
+* **N4 (started 2026-11-23, the "can start now" push; STATUS "Current milestone").** The
+  machine takes up to 32 node boards (`max_nodes`), eight rack modules of four; the
+  coherence tracker up to 64 CPUs (`Coherence::max_cpus`, a 64-bit reservation mask; its
+  snapshot fields were already per pair, so snapshots of up to sixteen CPUs are unchanged).
+  `connect_routers` builds the hypercube from the configuration instead of the square's
+  special case: router (module m, board b) is cabled to (m with bit k flipped, b) on port
+  1 + k, for each k below the number of modules, when that module exists; the board
+  dimension is the internal port 6 as before. Two modules give exactly N3's square (port
+  1), four a cube (ports 1 and 2), eight the hypercube of 16 routers (ports 1-3).
+  `hypothesis` as in N3: the port numbers, which the PROM does not prescribe ("assigned dimn
+  %d to port %d"). A number of modules that is not a power of two (three, five to seven)
+  leaves out the cables to the missing modules, as routing tables allow (ToO "Router
+  Board"). Xpress links are allowed with two or four modules (Owner's Guide: 16- and 32-CPU
+  systems) and join each router to its antipode, the other slot of the module with every
+  index bit flipped, on the first port the hypercube leaves free: port 2 for two modules
+  (N3's diagonals, unchanged) and port 3 for four. Test `ip27.rack.hypercube` (routes across
+  the cube and the hypercube, the cube's Xpress link, the missing fourth module of three,
+  module 8's controller number); `ip27.system_controller_configuration` (9 and 32 nodes
+  valid, 33 not; Xpress links with 16 nodes but not 12).
+
 == Decisions (the user, 2026-11-18)
 
 . First target: one rack module with four nodes and two Rack Routers (not the deskside Star

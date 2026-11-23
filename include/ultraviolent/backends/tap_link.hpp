@@ -27,6 +27,10 @@ class TapLink final : public EthernetLink {
 
     void send(std::span<const std::byte> frame) override;
     std::optional<std::vector<std::byte>> receive() override;
+    // The TAP's file descriptor, for a caller that waits for frames (poll).
+    [[nodiscard]] int descriptor() const {
+        return fd_;
+    }
 
   private:
     explicit TapLink(int fd) : fd_{fd} {}

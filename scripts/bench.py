@@ -122,6 +122,15 @@ WORKLOADS = {
     "reboot16": {"cpus": 16, "snapshot": True,
                  "console": ["init 6", "@expect login:", "root", "@expect TERM", "vt100"]
                  + SHELL + ["mpadmin -s"] + SHELL + ["@stop"]},
+    # Four rack modules (a cube of eight routers) and eight (a hypercube of sixteen),
+    # MULTINODE.adoc "N4"; less memory per node (memory_mib).
+    "prom32": {"cpus": 32, "disk": False, "console": ["@expect Option?", "@stop"]},
+    "boot32": {"cpus": 32, "disk": True, "console": LOGIN + ["@stop"]},
+    "cpu32": {"cpus": 32, "snapshot": True,
+              "console": ['sh -c "for n in ' + " ".join(str(n) for n in range(1, 33)) + f'; do {AWK} & done; wait"']
+              + SHELL + ["@stop"]},
+    "prom64": {"cpus": 64, "disk": False, "console": ["@expect Option?", "@stop"]},
+    "boot64": {"cpus": 64, "disk": True, "console": LOGIN + ["@stop"]},
 }
 DEFAULT_WORKLOADS = [name for name, w in WORKLOADS.items() if w.get("cpus", 1) == 1]
 
@@ -170,7 +179,14 @@ def default_scratch():
 def nodes(cpus):
     # Four CPUs are two nodes of two (a deskside module), eight four nodes of two (a rack
     # module with two routers), sixteen eight nodes of two (two rack modules, four routers).
-    return {4: 2, 8: 4, 16: 8}.get(cpus, 1)
+    return {4: 2, 8: 4, 16: 8, 32: 16, 64: 32}.get(cpus, 1)
+
+
+def memory_mib(cpus):
+    # Each node's memory: the default, but less for four and eight modules, so that the guest
+    # fits the six-core, 15 GB reference host with room for the host's own (MULTINODE.adoc
+    # "Host limits").
+    return {32: 128, 64: 64}.get(cpus)
 
 
 def flash_files(cpus):
@@ -184,7 +200,8 @@ def base_command(args, scratch, cpus=1):
     topology = (["--module", "rack", "--nodes", str(nodes(cpus)), "--cpus", "2"] if cpus >= 8 else
                 ["--nodes", "2", "--cpus", "2"] if cpus == 4 else
                 ["--cpus", str(cpus)] if cpus != 1 else []) + (
-                ["--express-links"] if cpus == 16 and args.express_links else [])
+                ["--express-links"] if cpus in (16, 32) and args.express_links else []) + (
+                ["--memory", str(memory_mib(cpus))] if memory_mib(cpus) else [])
     return [args.binary, "--machine", "ip27", "--prom", args.prom, "--io6prom", args.io6prom,
             ] + flashes + [
             "--nvram", os.path.join(scratch, "nvram.bin"), "--engine", args.engine] + (
@@ -471,7 +488,7 @@ def main():
                          help="directory with disk.img, nvram.bin, flash.bin after a clean shutdown")
     fixture.add_argument("--nvram-only", action="store_true",
                          help="only settle the cold boots' NVRAM, keeping the snapshots")
-    fixture.add_argument("--cpus", type=int, choices=[1, 2, 4, 8, 16], default=1,
+    fixture.add_argument("--cpus", type=int, choices=[1, 2, 4, 8, 16, 32, 64], default=1,
                          help="2, 4, 8 or 16: only that shell snapshot, from the existing fixture")
     bench = commands.add_parser("run", parents=[common], help="run workloads")
     bench.add_argument("workloads", nargs="*", help=", ".join(WORKLOADS))

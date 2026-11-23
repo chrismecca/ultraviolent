@@ -42,6 +42,10 @@ class TerminalInput final : public devices::SerialSource {
     void on_command(std::function<void(std::string_view line)> command) {
         command_ = std::move(command);
     }
+    // Whether a descriptor that is not a terminal has reached its end (or failed).
+    [[nodiscard]] bool ended() const {
+        return end_of_file_;
+    }
     // Whether the descriptor is a terminal in raw mode.
     [[nodiscard]] bool terminal() const {
         return saved_.has_value();

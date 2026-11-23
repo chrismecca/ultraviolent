@@ -1,7 +1,12 @@
 // Command-line entry point. Host integration only: argument parsing, reading asset files, and
 // wiring a trace sink. Machine behavior lives in the machine personality.
 
+#include "disk_command.hpp"
+#include "switch_command.hpp"
+
 #include <ultraviolent/backends/console.hpp>
+#include <ultraviolent/backends/console_socket.hpp>
+#include <ultraviolent/backends/ethernet_switch.hpp>
 #include <ultraviolent/backends/file_block_store.hpp>
 #include <ultraviolent/backends/pcap_link.hpp>
 #include <ultraviolent/backends/real_time_pacer.hpp>
@@ -16,6 +21,7 @@
 #include <ultraviolent/machines/ip27/prom_image.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <charconv>
 #include <chrono>
@@ -61,18 +67,21 @@ void usage() {
     std::fputs(
         "usage: ultraviolent --machine ip27 --prom FILE [--memory MIB] [--cycles N]\n"
         "                    [--trace CATEGORY[,CATEGORY...]] [--probe PC]...\n"
-        "                    [--load-state FILE] [--save-state FILE] [--flash FILE]\n"
+        "                    [--load-state FILE] [--save-state FILE] [--suspend FILE]\n"
+        "                    [--flash FILE]\n"
         "                    [--nvram FILE] [--io6prom FILE]\n"
-        "                    [--console LINE]... [--cdrom FILE] [--disk FILE]\n"
+        "                    [--console LINE]... [--cdrom FILE] [--disk [BUS:ID=]FILE]...\n"
         "                    [--sample-pc NS] [--date DATE] [--stop-at-prompt]\n"
-        "                    [--interactive] [--realtime] [--realtime-catch-up SECONDS]\n"
-        "                    [--ethernet tap:IFNAME|pcap:FILE]\n"
+        "                    [--interactive | --console-socket PATH]\n"
+        "                    [--realtime] [--realtime-catch-up SECONDS]\n"
+        "                    [--ethernet tap:IFNAME|switch:SOCKET|pcap:FILE]\n"
+        "                    [--ethernet-address XX:XX:XX:XX:XX:XX]\n"
         "                    [--engine reference|tier0|tier1] [--engine-statistics]\n"
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
         "                    [--tier2-threshold N|off]\n"
         "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
         "                    [--parallel] [--parallel-window CYCLES]\n"
-        "                    [--module rack|deskside] [--nodes 1-8] [--express-links]\n"
+        "                    [--module rack|deskside] [--nodes 1-32] [--express-links]\n"
         "                    [--cpu r10000|r12000]\n"
         "\n"
         "Runs the machine for N processor cycles (default 1000000) from power-on, or\n"
@@ -86,19 +95,31 @@ void usage() {
         "--cdrom puts a disc image in the CD-ROM drive (SCSI bus 0, ID 6); a --console line\n"
         "\"@cdrom FILE\" changes the disc when its turn comes, \"@expect A|B\" waits for one of\n"
         "the strings in the output, \"@stop\" ends the run, \"@off\" turns the keyswitch\n"
-        "off. --disk attaches an existing image file as the system disk (bus 0, ID 1),\n"
-        "written in place.\n"
+        "off. --disk attaches an existing image file as a disk, written in place: the first\n"
+        "is the system disk (SCSI bus 0, ID 1), the next ones IDs 2, 3, 4, 5, 7, ... of bus\n"
+        "0, or BUS:ID=FILE places one (bus 0 or 1, ID 1-15; the CD-ROM is 0:6). FILE may be\n"
+        "a copy-on-write overlay (ultraviolent disk create OVERLAY BASE; doc/ORCHESTRATION.adoc).\n"
+        "\"ultraviolent disk\" without arguments describes the disk commands.\n"
         "--sample-pc NS prints the program counter every NS ns of virtual time.\n"
         "--io6prom FILE loads the BaseIO's own flash PROM (for example io6prom.img); without it\n"
         "the IP27 PROM uses its internal copy of the BASEIO PROM.\n"
         "--ethernet tap:IFNAME plugs the BaseIO Ethernet port into an existing Linux TAP\n"
         "interface you own (sudo ip tuntap add dev IFNAME mode tap user $USER); without it\n"
-        "the port is unplugged. --ethernet pcap:FILE records the frames the guest sends in FILE\n"
+        "the port is unplugged. --ethernet switch:SOCKET plugs it into a virtual switch\n"
+        "(ultraviolent switch SOCKET; doc/ORCHESTRATION.adoc) that other machines on this host\n"
+        "join too. --ethernet-address gives the port's MAC address (default\n"
+        "08:00:69:0e:17:01); machines on one network need different ones.\n"
+        "--ethernet pcap:FILE records the frames the guest sends in FILE\n"
         "(libpcap format, virtual time) and delivers none; runs stay deterministic.\n"
         "--interactive passes what you type to the console once the --console lines are\n"
         "used up (Ctrl-C and the like go to the guest). Ctrl-] starts a monitor command: q\n"
         "ends the run, cdrom FILE changes the disc, eject empties the drive. Such runs are\n"
         "not deterministic.\n"
+        "--console-socket PATH serves the console on a Unix socket once the --console lines\n"
+        "are used up, for a machine run in the background: a client that connects (uvctl\n"
+        "console, or socat - UNIX-CONNECT:PATH) sees the last 4 KB of output, then types to\n"
+        "the guest, with the same Ctrl-] monitor commands; output still goes to standard\n"
+        "output. Not deterministic.\n"
         "--realtime paces the run to the host's clock: it waits while virtual time is ahead of\n"
         "the host time since the start, so the guest's clock keeps real time and an idle guest\n"
         "leaves the host idle. A slower stretch runs unpaced and catches up by at most a\n"
@@ -113,6 +134,10 @@ void usage() {
         "ends a run early; the snapshot, flash, NVRAM, and disk are still written. SIGPWR\n"
         "turns the module's keyswitch off: IRIX shuts down, the system controller removes\n"
         "power, and the run ends.\n"
+        "--suspend FILE suspends and resumes: a run ended by one of those signals (not by\n"
+        "power-off, the monitor, or --cycles) writes the machine to FILE, and a run that finds\n"
+        "FILE resumes from it and deletes it, since the disks move on from there\n"
+        "(doc/ORCHESTRATION.adoc \"O4\").\n"
         "--date YYYY-MM-DD[THH:MM:SS] sets the time-of-day clock at power-on (UTC; default\n"
         "2026-01-01): virtual time runs it from there. --date now takes the host's time.\n"
         "--engine reference|tier0|tier1 selects the execution engine (default tier1, native\n"
@@ -132,10 +157,12 @@ void usage() {
         "--parallel-window cycles ahead of the slowest (default 10000; doc/SMP.adoc \"S4\"):\n"
         "faster, not deterministic, and without --trace cpu, --probe, or --sample-pc.\n"
         "--module rack puts the node in a rack module (default deskside, as slate;\n"
-        "doc/IP27.adoc \"Machine type\"). --nodes 2 adds a second node board in n2 (doc/SMP.adoc);\n"
-        "a rack module takes up to 4, and 5 to 8 fill a second rack module (module 2;\n"
-        "doc/MULTINODE.adoc); give --flash once per node to keep each node's flash PROM.\n"
-        "--express-links adds the Xpress links between two rack modules' routers.\n"
+        "doc/IP27.adoc \"Machine type\"). --nodes 2 adds a second node board in n2 "
+        "(doc/SMP.adoc);\n"
+        "a rack module takes up to 4, and each further 4 fill another rack module, up to\n"
+        "eight modules whose routers form a hypercube (doc/MULTINODE.adoc); give --flash\n"
+        "once per node to keep each node's flash PROM. --memory is each node's memory.\n"
+        "--express-links adds the Xpress links of two or four rack modules' routers.\n"
         "--cpu r12000 fits R12000s of slate's revision (default r10000; the clock is the\n"
         "flash PROM's; doc/SMP.adoc \"S6\").\n"
         "Trace categories: cpu exception tlb memory hub xtalk xbow bridge pci ioc3\n"
@@ -282,18 +309,26 @@ struct Options {
     std::vector<std::uint64_t> probes;
     std::string load_state;
     std::string save_state;
+    std::string suspend;
     std::vector<std::string> console_lines;
     // One per node, in node order.
     std::vector<std::string> flash;
     std::string nvram;
     std::string io6prom;
     std::string ethernet;
+    std::optional<std::array<std::uint8_t, 6>> ethernet_address;
     std::string cdrom;
-    std::string disk;
+    // --disk, in order; bus and ID when placed (BUS:ID=FILE).
+    struct DiskOption {
+        std::optional<std::pair<unsigned, unsigned>> place;
+        std::string path;
+    };
+    std::vector<DiskOption> disks;
     std::uint64_t sample_pc_ns{};
     std::optional<std::int64_t> date;
     bool stop_at_prompt{};
     bool interactive{};
+    std::string console_socket;
     bool realtime{};
     std::chrono::nanoseconds realtime_catch_up{backends::RealTimePacer::default_max_lag};
     // Unset: the machine's default (tier 1 where the host has a backend, else tier 0).
@@ -376,6 +411,8 @@ std::optional<Options> parse(std::span<char*> arguments) {
             options.load_state = value;
         } else if (flag == "--save-state") {
             options.save_state = value;
+        } else if (flag == "--suspend") {
+            options.suspend = value;
         } else if (flag == "--flash") {
             options.flash.emplace_back(value);
         } else if (flag == "--nvram") {
@@ -383,11 +420,30 @@ std::optional<Options> parse(std::span<char*> arguments) {
         } else if (flag == "--io6prom") {
             options.io6prom = value;
         } else if (flag == "--ethernet") {
-            if (!value.starts_with("tap:") && !value.starts_with("pcap:")) {
-                std::fprintf(stderr, "--ethernet takes tap:IFNAME or pcap:FILE\n");
+            if (!value.starts_with("tap:") && !value.starts_with("switch:") &&
+                !value.starts_with("pcap:")) {
+                std::fprintf(stderr, "--ethernet takes tap:IFNAME, switch:SOCKET, or pcap:FILE\n");
                 return std::nullopt;
             }
             options.ethernet = value;
+        } else if (flag == "--console-socket") {
+            options.console_socket = value;
+        } else if (flag == "--ethernet-address") {
+            std::array<unsigned, 6> octets{};
+            char end{};
+            if (std::sscanf(std::string{value}.c_str(), "%x:%x:%x:%x:%x:%x%c", &octets[0],
+                            &octets[1], &octets[2], &octets[3], &octets[4], &octets[5],
+                            &end) != 6 ||
+                std::ranges::any_of(octets, [](unsigned o) { return o > 0xff; }) ||
+                (octets[0] & 1) != 0) {
+                std::fprintf(stderr, "--ethernet-address takes a station (unicast) address, "
+                                     "XX:XX:XX:XX:XX:XX\n");
+                return std::nullopt;
+            }
+            std::array<std::uint8_t, 6> address{};
+            std::ranges::transform(octets, address.begin(),
+                                   [](unsigned o) { return static_cast<std::uint8_t>(o); });
+            options.ethernet_address = address;
         } else if (flag == "--engine") {
             if (value == "reference") {
                 options.engine = mips::ExecutionEngine::reference;
@@ -402,7 +458,16 @@ std::optional<Options> parse(std::span<char*> arguments) {
         } else if (flag == "--cdrom") {
             options.cdrom = value;
         } else if (flag == "--disk") {
-            options.disk = value;
+            Options::DiskOption disk{std::nullopt, std::string{value}};
+            // BUS:ID=FILE; a path that only contains '=' elsewhere is a path.
+            unsigned bus{};
+            unsigned id{};
+            int used{};
+            if (std::sscanf(disk.path.c_str(), "%u:%u=%n", &bus, &id, &used) == 2 && used > 0) {
+                disk.place = std::pair{bus, id};
+                disk.path.erase(0, static_cast<std::size_t>(used));
+            }
+            options.disks.push_back(std::move(disk));
         } else if (flag == "--console") {
             options.console_lines.emplace_back(value);
         } else if (flag == "--date") {
@@ -448,11 +513,14 @@ std::optional<Options> parse(std::span<char*> arguments) {
             options.processor =
                 value == "r12000" ? ip27::ProcessorType::r12000 : ip27::ProcessorType::r10000;
         } else if (flag == "--nodes") {
-            if (value.size() != 1 || value[0] < '1' || value[0] > '8') {
-                std::fprintf(stderr, "--nodes takes 1 to 8\n");
+            unsigned nodes{};
+            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), nodes);
+            if (error != std::errc{} || end != value.data() + value.size() || nodes < 1 ||
+                nodes > ip27::max_nodes) {
+                std::fprintf(stderr, "--nodes takes 1 to %u\n", ip27::max_nodes);
                 return std::nullopt;
             }
-            options.nodes = static_cast<unsigned>(value[0] - '0');
+            options.nodes = nodes;
         } else if (flag == "--cpus") {
             if (value != "1" && value != "2") {
                 std::fprintf(stderr, "--cpus takes 1 or 2\n");
@@ -537,6 +605,10 @@ std::optional<Options> parse(std::span<char*> arguments) {
     if (options.machine != "ip27" || options.prom.empty()) {
         return std::nullopt;
     }
+    if (options.interactive && !options.console_socket.empty()) {
+        std::fprintf(stderr, "--interactive and --console-socket do not combine\n");
+        return std::nullopt;
+    }
     if (options.interactive && options.stop_at_prompt) {
         std::fprintf(stderr, "--interactive and --stop-at-prompt do not combine\n");
         return std::nullopt;
@@ -547,10 +619,27 @@ std::optional<Options> parse(std::span<char*> arguments) {
 } // namespace
 
 int main(int argc, char** argv) {
-    const auto options = parse(std::span{argv + 1, static_cast<std::size_t>(argc - 1)});
+    if (argc >= 2 && std::string_view{argv[1]} == "disk") {
+        return disk_command(std::span{argv + 2, static_cast<std::size_t>(argc - 2)});
+    }
+    if (argc >= 2 && std::string_view{argv[1]} == "switch") {
+        return switch_command(std::span{argv + 2, static_cast<std::size_t>(argc - 2)});
+    }
+    auto options = parse(std::span{argv + 1, static_cast<std::size_t>(argc - 1)});
     if (!options) {
         usage();
         return exit_usage;
+    }
+    // A suspended machine resumes from its suspend file (consumed once loaded, below).
+    const bool resuming = !options->suspend.empty() && std::filesystem::exists(options->suspend);
+    if (resuming) {
+        if (!options->load_state.empty()) {
+            std::fprintf(stderr, "--load-state and a suspended machine's %s do not combine\n",
+                         options->suspend.c_str());
+            return exit_usage;
+        }
+        options->load_state = options->suspend;
+        std::fprintf(stderr, "resuming from %s\n", options->suspend.c_str());
     }
 
     ip27::Ip27Config config;
@@ -569,6 +658,9 @@ int main(int argc, char** argv) {
         return exit_usage;
     }
     config.cpu_slice = options->cpu_slice;
+    if (options->ethernet_address) {
+        config.ethernet_address = *options->ethernet_address;
+    }
     if (options->date) {
         config.clock_epoch = *options->date;
     }
@@ -628,6 +720,18 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "interactive console: Ctrl-] then q ends the run (Ctrl-] then ? for help)\n");
     }
+    // Or, after the script, a client of the console socket (ORCHESTRATION.adoc "O3").
+    std::unique_ptr<backends::ConsoleSocket> console_socket;
+    if (!options->console_socket.empty()) {
+        auto opened = backends::ConsoleSocket::open(options->console_socket, console);
+        if (!opened) {
+            std::fprintf(stderr, "%s\n", opened.error().c_str());
+            return exit_asset;
+        }
+        console_socket = std::move(*opened);
+        machine.connect_console(*console_socket);
+        console.then_read(*console_socket);
+    }
     for (const TraceCategory category : options->trace) {
         machine.tracer().enable(category);
     }
@@ -665,35 +769,76 @@ int main(int argc, char** argv) {
     };
     console.on_disc_change(change_disc);
     machine.on_cdrom_eject([] { std::fprintf(stderr, "the guest ejected the disc\n"); });
-    // Monitor commands after Ctrl-] in an interactive run.
+    // Monitor commands after Ctrl-] in an interactive run or on the console socket.
+    const auto monitor = [&](std::string_view line) {
+        if (line == "q" || line == "quit") {
+            machine.request_stop();
+        } else if (line.starts_with("cdrom ")) {
+            change_disc(std::string{line.substr(6)});
+        } else if (line == "eject") {
+            change_disc("");
+        } else if (line == "off") {
+            std::fprintf(stderr, "keyswitch off: IRIX shuts down, then the power goes off\n");
+            machine.turn_keyswitch_off();
+        } else {
+            std::fprintf(stderr, "monitor commands: q (end the run; the snapshot, flash, "
+                                 "NVRAM, and disk are still written), off (turn the "
+                                 "keyswitch off: IRIX shuts down and the run ends), cdrom "
+                                 "FILE, eject\n");
+        }
+    };
     if (terminal) {
-        terminal->on_command([&](std::string_view line) {
-            if (line == "q" || line == "quit") {
-                machine.request_stop();
-            } else if (line.starts_with("cdrom ")) {
-                change_disc(std::string{line.substr(6)});
-            } else if (line == "eject") {
-                change_disc("");
-            } else if (line == "off") {
-                std::fprintf(stderr, "keyswitch off: IRIX shuts down, then the power goes off\n");
-                machine.turn_keyswitch_off();
-            } else {
-                std::fprintf(stderr, "monitor commands: q (end the run; the snapshot, flash, "
-                                     "NVRAM, and disk are still written), off (turn the "
-                                     "keyswitch off: IRIX shuts down and the run ends), cdrom "
-                                     "FILE, eject\n");
-            }
-        });
+        terminal->on_command(monitor);
+    }
+    if (console_socket) {
+        console_socket->on_command(monitor);
     }
 
-    std::unique_ptr<backends::FileBlockStore> disk;
-    if (!options->disk.empty()) {
-        disk = backends::FileBlockStore::open(options->disk, true);
-        if (!disk) {
-            std::fprintf(stderr, "cannot open disk image %s\n", options->disk.c_str());
-            return exit_asset;
+    // Disks: placed ones first, then the others in order at the free IDs of bus 0, the
+    // system disk's ID 1 first (ORCHESTRATION.adoc "O1").
+    std::vector<std::unique_ptr<BlockStore>> disks;
+    const auto attach = [&](const Options::DiskOption& option, unsigned bus, unsigned id) -> bool {
+        auto store = backends::open_disk_image(option.path, true);
+        if (!store) {
+            std::fprintf(stderr, "cannot open disk image: %s\n", store.error().c_str());
+            return false;
         }
-        machine.attach_disk(*disk);
+        if (auto attached = machine.attach_disk(bus, id, **store); !attached) {
+            std::fprintf(stderr, "--disk %s: %s\n", option.path.c_str(), attached.error().c_str());
+            return false;
+        }
+        disks.push_back(std::move(*store));
+        return true;
+    };
+    for (const auto& option : options->disks) {
+        if (option.place && !attach(option, option.place->first, option.place->second)) {
+            return exit_usage;
+        }
+    }
+    // Bus 0's IDs in use: the CD-ROM's and the placed disks'.
+    std::array<bool, 16> taken{};
+    taken[6] = true;
+    for (const auto& option : options->disks) {
+        if (option.place && option.place->first == 0) {
+            taken[option.place->second % 16] = true;
+        }
+    }
+    unsigned next_id = 1;
+    for (const auto& option : options->disks) {
+        if (option.place) {
+            continue;
+        }
+        while (next_id < 16 && taken[next_id]) {
+            ++next_id;
+        }
+        if (next_id >= 16) {
+            std::fprintf(stderr, "--disk %s: bus 0 has no free ID; place it on bus 1 (1:ID=FILE)\n",
+                         option.path.c_str());
+            return exit_usage;
+        }
+        if (!attach(option, 0, next_id++)) {
+            return exit_usage;
+        }
     }
 
     // The flash persists in a host file: its PROM log survives runs (IP27.adoc "Boot PROM").
@@ -759,6 +904,10 @@ int main(int argc, char** argv) {
                          loaded.error().c_str());
             return exit_asset;
         }
+        if (resuming) {
+            std::error_code ignored;
+            std::filesystem::remove(options->suspend, ignored);
+        }
     }
 
     // The Ethernet cable, after any snapshot: this run's configuration decides whether the
@@ -767,6 +916,13 @@ int main(int argc, char** argv) {
     if (options->ethernet.starts_with("tap:")) {
         std::string error;
         cable = backends::TapLink::open(options->ethernet.substr(4), error);
+        if (!cable) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return exit_asset;
+        }
+    } else if (options->ethernet.starts_with("switch:")) {
+        std::string error;
+        cable = backends::SwitchLink::open(options->ethernet.substr(7), error);
         if (!cable) {
             std::fprintf(stderr, "%s\n", error.c_str());
             return exit_asset;
@@ -859,6 +1015,16 @@ int main(int argc, char** argv) {
         !write_file(options->save_state, machine.save_state().serialize())) {
         std::fprintf(stderr, "cannot write snapshot %s\n", options->save_state.c_str());
         return exit_asset;
+    }
+    if (!options->suspend.empty() && stop_requested != 0 && !machine.powered_off()) {
+        // Written beside, then renamed: a partial file is never taken for a suspended machine.
+        const std::string partial = options->suspend + ".partial";
+        if (!write_file(partial, machine.save_state().serialize()) ||
+            std::rename(partial.c_str(), options->suspend.c_str()) != 0) {
+            std::fprintf(stderr, "cannot write suspend file %s\n", options->suspend.c_str());
+            return exit_asset;
+        }
+        std::fprintf(stderr, "suspended to %s\n", options->suspend.c_str());
     }
 
     machine.insert_cdrom(nullptr);

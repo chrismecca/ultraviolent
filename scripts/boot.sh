@@ -1,7 +1,7 @@
 #!/bin/sh
 # Boots an installed machine (doc/USING.adoc "Boot and use it"): the PROM images from
-# assets/firmware (or $ULTRAVIOLENT_IP27_PROM and the io6prom.img beside it), the disk, NVRAM,
-# and flash files from DIR, in real time, with the console on this terminal. Any further
+# assets/firmware (or $ULTRAVIOLENT_IP27_PROM and the io6prom.img beside it), the disk
+# (disk.img or disk.cow), NVRAM, and flash files from DIR, in real time, with the console on this terminal. Any further
 # options go to ultraviolent.
 #
 #   scripts/boot.sh local/vm
@@ -23,8 +23,12 @@ io6prom=$(dirname "$prom")/io6prom.img
 binary=$root/build/pgo/ultraviolent
 [ -x "$binary" ] || binary=$root/build/release/ultraviolent
 
+# The disk: disk.img, or a copy-on-write overlay disk.cow (USING.adoc "Disks").
+disk=$dir/disk.img
+[ ! -e "$disk" ] && [ -e "$dir/disk.cow" ] && disk=$dir/disk.cow
+
 missing=
-for file in "$binary" "$prom" "$io6prom" "$dir/disk.img" "$dir/nvram.bin" "$dir/flash.bin"; do
+for file in "$binary" "$prom" "$io6prom" "$disk" "$dir/nvram.bin" "$dir/flash.bin"; do
     [ -e "$file" ] || missing="$missing
   $file"
 done
@@ -34,5 +38,5 @@ if [ -n "$missing" ]; then
 fi
 
 exec "$binary" --machine ip27 --prom "$prom" --io6prom "$io6prom" \
-    --disk "$dir/disk.img" --nvram "$dir/nvram.bin" --flash "$dir/flash.bin" \
+    --disk "$disk" --nvram "$dir/nvram.bin" --flash "$dir/flash.bin" \
     --realtime --interactive --cycles 100000000000000 "$@"

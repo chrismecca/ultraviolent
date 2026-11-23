@@ -4,6 +4,20 @@ Update this file at the end of every significant development session.
 
 == Current milestone
 
+**The "can start now" push (the user, 2026-11-23, after a review of the gap between where the
+project is and VISION.adoc's end state: "scrap arm64.. lets plow the rest of 'can start now'
+without stopping ... after thats all tested and complete.. we're going to cut another
+release").** Four parts, then release 0.1.4: multi-machine orchestration
+(ORCHESTRATION.adoc, stages O1-O4), speed for large machines (SMP.adoc "S4"), N4 (up to 32
+nodes and 64 CPUs, MULTINODE.adoc), and storage (O1). arm64 hosts are dropped (ROADMAP
+"JIT"). O1-O4 are done (2026-11-23): disks on both SCSI buses, copy-on-write overlays
+(`ultraviolent disk`), positioned I/O (a faster backend measured as not worth it: disk copies
+are about 2% of `fs`), a virtual Ethernet switch (`ultraviolent switch`, `--ethernet
+switch:`), `--ethernet-address`, `--console-socket`, `--suspend`, and `scripts/uvctl.py`;
+the two-machine acceptance (`scripts/fleet-demo.py`) passes 9 of 9. Next: see Next task.
+
+Before it, tier 2:
+
 **Tier 2, optimizing translation of hot regions (ROADMAP "JIT": "optional optimizing tier
 later"; doc/TIER2.adoc), 2026-11-23, complete at its stop rule** (the user: "start tier2 ...
 dont present the plan and wait for approval.. execute ... think about your code from an
@@ -481,6 +495,14 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
+. **The "can start now" push (the user, 2026-11-23; STATUS "Current milestone").** Order:
+  O1-O4 (done, ORCHESTRATION.adoc "Progress"), then speed for large machines (measure
+  `--parallel` at 8 and 16 CPUs on the six-core host first; stop rule as in TIER2.adoc), then
+  N4 (MULTINODE.adoc: the hypercube wiring and 32-node limits are in, tested by
+  `ip27.rack.hypercube`; next the PROM's discovery at 16 and 32 nodes on tier 1 with
+  `--parallel` and small `--memory`, then IRIX on 16 nodes if the host allows), then
+  release 0.1.4 (release notes, the four presets, a fresh install from blank, the fleet
+  demonstration, the benchmark digests).
 . **Tier 2 (doc/TIER2.adoc; the user, 2026-11-23): complete.** T0 measurement and
   `tools/jit_profile.py`; T1 tiering; T2 registers across regions (measured, removed); T3
   edge checks; T4 shared host page tests; LEA. Ended at its stop rule; what remains is

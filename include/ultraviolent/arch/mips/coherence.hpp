@@ -24,8 +24,8 @@ class Cpu;
 // is parked: waiting where it stores nothing before it checks the generation again.
 class Coherence {
   public:
-    // Eight nodes of two CPUs (MULTINODE.adoc).
-    static constexpr unsigned max_cpus = 16;
+    // 32 nodes of two CPUs (MULTINODE.adoc "N4").
+    static constexpr unsigned max_cpus = 64;
     // hypothesis: a reservation covers one secondary-cache block, 128 bytes (SCBlkSize 32
     // words in the IP27's R10000 mode bits, IP27.adoc "Reset mode bits"); a store by another
     // CPU anywhere in it breaks the reservation.
@@ -36,14 +36,14 @@ class Coherence {
     // into its frame through their host pages, so they are told to drop them.
     void reserve(unsigned cpu, PhysicalAddress address) {
         reservations_[cpu] = {.line = address.value / line_size, .held = 1};
-        held_mask_ |= 1u << cpu;
+        held_mask_ |= std::uint64_t{1} << cpu;
         // Reservations exist only in reference mode, on one thread.
         advance_generation();
     }
     // ERET clears LLbit (UM 14.30); the reservation goes with it.
     void release(unsigned cpu) {
         reservations_[cpu].held = 0;
-        held_mask_ &= ~(1u << cpu);
+        held_mask_ &= ~(std::uint64_t{1} << cpu);
     }
     [[nodiscard]] bool held(unsigned cpu) const {
         return reservations_[cpu].held != 0;
@@ -53,7 +53,7 @@ class Coherence {
     // the lines it touches.
     void store(unsigned cpu, PhysicalAddress address, std::uint64_t size) {
         // On every store with several CPUs: usually no other CPU holds a reservation.
-        if ((held_mask_ & ~(1u << cpu)) == 0) [[likely]] {
+        if ((held_mask_ & ~(std::uint64_t{1} << cpu)) == 0) [[likely]] {
             return;
         }
         const std::uint64_t first = address.value / line_size;
@@ -62,7 +62,7 @@ class Coherence {
             Reservation& r = reservations_[other];
             if (other != cpu && r.held != 0 && r.line >= first && r.line <= last) {
                 r.held = 0;
-                held_mask_ &= ~(1u << other);
+                held_mask_ &= ~(std::uint64_t{1} << other);
             }
         }
     }
@@ -70,7 +70,7 @@ class Coherence {
     // Whether another CPU holds a reservation in the 4 KiB frame at `frame`: `cpu`'s stores
     // there must go through the bus (store) rather than a cached writable host page.
     [[nodiscard]] bool watched(unsigned cpu, PhysicalAddress frame) const {
-        if ((held_mask_ & ~(1u << cpu)) == 0) [[likely]] {
+        if ((held_mask_ & ~(std::uint64_t{1} << cpu)) == 0) [[likely]] {
             return false;
         }
         for (unsigned other = 0; other < max_cpus; ++other) {
@@ -147,7 +147,7 @@ class Coherence {
         }
         held_mask_ = 0;
         for (unsigned cpu = 0; cpu < max_cpus; ++cpu) {
-            held_mask_ |= reservations_[cpu].held != 0 ? 1u << cpu : 0;
+            held_mask_ |= reservations_[cpu].held != 0 ? std::uint64_t{1} << cpu : 0;
         }
         advance_generation();
     }
@@ -172,7 +172,7 @@ class Coherence {
     }
     std::array<Reservation, max_cpus> reservations_{};
     // Bit n: CPU n holds a reservation (reservations_[n].held).
-    unsigned held_mask_{};
+    std::uint64_t held_mask_{};
     std::atomic<std::uint64_t> generation_{};
     // Host threads only.
     std::array<Cpu*, max_cpus> cpus_{};

@@ -189,7 +189,8 @@ Only after RC-IP27:
 * profile interpreter;
 * establish benchmark corpus;
 * remove accidental bottlenecks;
-* design Ultraviolent IR.
+* design Ultraviolent IR (done as tier 0's decoded blocks, IR.adoc; the optimizing tier then
+  went without a further IR, TIER2.adoc "Decided 2026-11-23").
 
 === JIT
 
@@ -199,8 +200,10 @@ through J6 (block linking, only if profiling asks for it).
 
 * differential execution against interpreter;
 * tier-1 native code from the one source of semantics;
-* optional optimizing tier later;
+* optional optimizing tier later (tier 2, TIER2.adoc, 2026-11-23);
 * keep interpreter permanently.
+* x86-64 is the only JIT host. An arm64 backend (VISION's "x86-64/arm64") was dropped by the
+  user on 2026-11-23; arm64 hosts would run tier 0 and the interpreter.
 
 === Usable VM
 
@@ -264,3 +267,5 @@ required for the faithful machine path.
 
 Support many independent Ultraviolent instances on Linux/Proxmox, shared virtual
 networking, snapshots, and eventually specialized virtual interconnect services.
+Started 2026-11-23 (ORCHESTRATION.adoc): more disks and copy-on-write overlays, a virtual
+Ethernet switch, the console on a socket, suspend and resume, and `uvctl`.

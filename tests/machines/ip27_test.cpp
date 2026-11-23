@@ -528,7 +528,11 @@ const test::Registration controller{
         config.nodes = 8;
         t.check(ip27::validate(config, program({nop()})).has_value(), "two rack modules of four");
         config.nodes = 9;
-        t.check(!ip27::validate(config, program({nop()})), "two modules hold eight");
+        t.check(ip27::validate(config, program({nop()})).has_value(), "a third module");
+        config.nodes = 32;
+        t.check(ip27::validate(config, program({nop()})).has_value(), "eight rack modules");
+        config.nodes = 33;
+        t.check(!ip27::validate(config, program({nop()})), "eight modules hold 32");
         config.nodes = 2;
         config.node_slot = 2;
         t.check(!ip27::validate(config, program({nop()})), "several nodes start at n1");
@@ -1407,6 +1411,10 @@ const test::Registration two_modules{
         t.check_equal((diagonal >> 46) & 7, std::uint64_t{2});
         express_config.nodes = 4;
         t.check(!ip27::validate(express_config, program({nop()})), "Xpress links join two modules");
+        express_config.nodes = 12;
+        t.check(!ip27::validate(express_config, program({nop()})), "or four");
+        express_config.nodes = 16;
+        t.check(ip27::validate(express_config, program({nop()})).has_value(), "four modules");
 
         // The second module's state is in a snapshot.
         machine.cpu(8).mtc0(mips::cp0::status, mips::status::kx);
@@ -1774,6 +1782,117 @@ const test::Registration two_node_snapshot{
         t.check_equal(node_word(straight, 2, 0x200), node_word(resumed, 2, 0x200));
         Ip27Machine one_node{two_cpu_config(5), counter_prom};
         t.check(!one_node.load_state(image).has_value(), "a one-node machine refuses it");
+    }};
+
+} // namespace
+
+namespace {
+
+// A disk of eight blocks in memory.
+class EightBlocks final : public BlockStore {
+  public:
+    [[nodiscard]] std::uint64_t size() const override {
+        return bytes.size();
+    }
+    [[nodiscard]] bool writable() const override {
+        return true;
+    }
+    bool read(std::uint64_t offset, std::span<std::byte> out) override {
+        std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(offset), out.size(), out.begin());
+        return true;
+    }
+    bool write(std::uint64_t offset, std::span<const std::byte> in) override {
+        std::ranges::copy(in, bytes.begin() + static_cast<std::ptrdiff_t>(offset));
+        return true;
+    }
+    std::vector<std::byte> bytes = std::vector<std::byte>(8 * 512);
+};
+
+const test::Registration disk_places{
+    "ip27.disks_on_both_scsi_buses", [](test::Context& t) {
+        Ip27Machine machine{small_config(), program({nop()})};
+        EightBlocks system;
+        EightBlocks second;
+        EightBlocks other_bus;
+        EightBlocks spare;
+        machine.attach_disk(system);
+        t.check(machine.attach_disk(0, 2, second).has_value(), "bus 0 ID 2");
+        t.check(machine.attach_disk(1, 1, other_bus).has_value(), "bus 1 ID 1");
+        t.check(!machine.attach_disk(0, 1, spare).has_value(), "the system disk's ID is taken");
+        t.check(!machine.attach_disk(0, 6, spare).has_value(), "the CD-ROM's ID");
+        t.check(!machine.attach_disk(1, 0, spare).has_value(), "the controller's ID");
+        t.check(!machine.attach_disk(0, 16, spare).has_value(), "no ID 16");
+        t.check(!machine.attach_disk(2, 1, spare).has_value(), "no bus 2");
+        // Each disk's state is saved under its own place and comes back.
+        const StateImage image = machine.save_state();
+        std::uint32_t sense[3]{};
+        t.check(image.get("scsi0.target1.disk", sense) && image.get("scsi0.target2.disk", sense) &&
+                    image.get("scsi1.target1.disk", sense),
+                "state keys");
+    }};
+
+} // namespace
+
+namespace {
+
+// Four and eight rack modules (MULTINODE.adoc "N4"): the routers form a cube and a hypercube,
+// module index bit k on external port 1 + k; the cube's Xpress links join antipodes on port 3;
+// with three modules the cables to the missing fourth are absent.
+const test::Registration hypercube{
+    "ip27.rack.hypercube", [](test::Context& t) {
+        // The router or Hub a route from node 0 (module 1's r1) reaches: chip ID, slot bits,
+        // and the port it came in on; 0 when nothing answers.
+        const auto probe = [&t](Ip27Machine& machine, std::uint64_t route) {
+            mips::Cpu& a = machine.cpu(0);
+            a.mtc0(mips::cp0::status, mips::status::kx);
+            (void)a.load(ialias + ni_vector_clear, AccessWidth::bits64);
+            t.check(a.store(ialias + ni_vector, AccessWidth::bits64, route).has_value());
+            t.check(a.store(ialias + ni_vector_parms, AccessWidth::bits64, vector_parms(1, 0, 0, 0))
+                        .has_value());
+            const std::uint64_t response = a.load(ialias + ni_vector_status, AccessWidth::bits64).value_or(0);
+            if ((response & nvs_valid) == 0 || (response & 7) != 0) {
+                return std::uint64_t{0};
+            }
+            const std::uint64_t status = a.load(ialias + ni_vector_read_data, AccessWidth::bits64).value_or(0);
+            return std::uint64_t{1} << 63 | (status & 0xf) | ((status >> 8) & 0xf) << 4 |
+                   ((status >> 46) & 7) << 8;
+        };
+        // A router in slot r1 (0xf) or r2 (0xe), in through `port`.
+        const auto router = [](std::uint64_t slot, std::uint64_t port) {
+            return std::uint64_t{1} << 63 | 1 | slot << 4 | port << 8;
+        };
+        {
+            Ip27Machine cube{rack_config(16), program({nop()})};
+            t.check_equal(probe(cube, 0x2), router(0xf, 2));   // module 3's r1
+            t.check_equal(probe(cube, 0x21), router(0xf, 2));  // module 2, then module 4
+            t.check_equal(probe(cube, 0x621), router(0xe, 6)); // module 4's r2
+            t.check_equal(probe(cube, 0x421) & 0xf, std::uint64_t{0}); // its n1's Hub
+            t.check_equal(probe(cube, 0x3), std::uint64_t{0}); // port 3 is free
+        }
+        {
+            Ip27Config config = rack_config(16);
+            config.express_links = true;
+            Ip27Machine express{config, program({nop()})};
+            // r1 of module 1 to r2 of module 4, the cube's far corner.
+            t.check_equal(probe(express, 0x3), router(0xe, 3));
+            t.check_equal(probe(express, 0x63), router(0xf, 6)); // module 4's r1
+        }
+        {
+            Ip27Machine three{rack_config(9), program({nop()})};
+            t.check_equal(probe(three, 0x2), router(0xf, 2));  // module 3 exists
+            t.check_equal(probe(three, 0x21), std::uint64_t{0}); // module 2 has no fourth
+        }
+        {
+            Ip27Machine hyper{rack_config(32), program({nop()})};
+            t.check_equal(probe(hyper, 0x3), router(0xf, 3));    // module 5's r1
+            t.check_equal(probe(hyper, 0x321), router(0xf, 3));  // module 8's r1
+            t.check_equal(probe(hyper, 0x4321) & 0xf, std::uint64_t{0}); // module 8's n1 Hub
+            t.check_equal(std::to_integer<unsigned>(
+                              ip27::initial_controller_nvram(rack_config(32), 7)[0x708]),
+                          8u);
+            t.check_equal(hyper.node_count(), 32u);
+            t.check(hyper.cpu(62).cycles() == 0, "the 32nd node's CPU");
+        }
     }};
 
 } // namespace
