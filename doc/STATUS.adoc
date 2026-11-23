@@ -18,7 +18,7 @@ from a real Onyx2 rack. **Release 0.1.3** (the user, 2026-11-23: "lets do 1 and 
 its still on the list though"; `doc/RELEASE-NOTES-0.1.3.adoc`): rack modules and the speed
 since 0.1.2, checked by the four test presets, a fresh install from blank (0.28 h, every
 check true), the installed disk booted as an eight-CPU rack, and snapshots from 0.1.2. The
-user pushes and tags `v0.1.3`. IP35 / Origin 3000 (ROADMAP) is tabled, not dropped: it needs
+user pushed `main` and tag `v0.1.3` and published the release (2026-11-23). IP35 / Origin 3000 (ROADMAP) is tabled, not dropped: it needs
 evidence first (an IP35 PROM image or a machine to observe). Next: see Next task.
 
 Before it, SMP IP27 (below), Usable VM and releases 0.1.0-0.1.2, and tier-1 speed (Next task).
