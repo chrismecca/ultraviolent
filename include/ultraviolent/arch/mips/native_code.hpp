@@ -60,6 +60,15 @@ struct RegionEntry {
     const void* code;
 };
 
+// How a region is translated (TIER2.adoc "What tier 2 is").
+struct TranslationPolicy {
+    // Tier 2: the region translated again as a whole, from blocks proven hot.
+    bool optimize{};
+    // Tier 1: the region's first block leaves with BlockExit::tier_up, before it runs, on its
+    // `tier_up_after`th entry; 0 never.
+    std::uint64_t tier_up_after{};
+};
+
 struct NativeStatistics {
     std::uint64_t blocks_translated{};
     // Translations, and the blocks they joined after their first.
@@ -72,6 +81,10 @@ struct NativeStatistics {
     // Operations emitted natively, and through call_semantics.
     std::uint64_t native_operations{};
     std::uint64_t helper_operations{};
+    // Tier 2's translations, the blocks they hold, and their bytes (also in the totals above).
+    std::uint64_t optimized_regions{};
+    std::uint64_t optimized_blocks{};
+    std::uint64_t optimized_bytes{};
 };
 
 class NativeCode {
@@ -84,7 +97,8 @@ class NativeCode {
     // valid. May discard every earlier translation (advancing epoch()): called only between
     // blocks, when no native code is running.
     virtual const void* translate(const Block& block, BlockSource& more,
-                                  std::vector<RegionEntry>& entries) = 0;
+                                  std::vector<RegionEntry>& entries,
+                                  const TranslationPolicy& policy) = 0;
     // Runs `code`, the block at the CPU's pc, and the blocks it continues into through
     // `dispatch` (dispatch_entries long), until one of them leaves. The CPU is at a boundary
     // with no pending exception and not in a delay slot. `limit` is the run limit; native

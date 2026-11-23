@@ -69,6 +69,7 @@ void usage() {
         "                    [--ethernet tap:IFNAME|pcap:FILE]\n"
         "                    [--engine reference|tier0|tier1] [--engine-statistics]\n"
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
+        "                    [--tier2-threshold N|off]\n"
         "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
         "                    [--parallel] [--parallel-window CYCLES]\n"
         "                    [--module rack|deskside] [--nodes 1-8] [--express-links]\n"
@@ -121,7 +122,9 @@ void usage() {
         "--trace cpu and --probe always use the reference. --engine-statistics prints tier\n"
         "0's block statistics at the end of the run. --tier0-cache-entries N sizes its\n"
         "block cache (a power of two; default 32768). --tier1-threshold N translates a block\n"
-        "to native code after N cache hits (0: on first execution).\n"
+        "to native code after N cache hits (0: on first execution). --tier2-threshold N|off\n"
+        "translates a tier-1 region again, optimized, after its first block's Nth entry (0:\n"
+        "every region at once; doc/TIER2.adoc).\n"
         "--cpus 2 puts a second CPU in the node's slice B (default 1, doc/SMP.adoc); the\n"
         "CPUs take turns, the one behind running until it is --cpu-slice cycles ahead\n"
         "(default 180, 1 us at 180 MHz; 1 alternates every cycle). --cycles counts each\n"
@@ -185,8 +188,8 @@ void print_block_statistics(const mips::BlockStatistics& s, std::size_t marked_f
     constexpr const char* ends[] = {"control flow", "state change",  "unsupported",
                                     "delay slot",   "page boundary", "length limit"};
     rows("block end:", s.built_ends, ends, s.blocks_built);
-    constexpr const char* exits[] = {"completed", "run limit", "pending exception",
-                                     "exception", "host path", "left block"};
+    constexpr const char* exits[] = {"completed", "run limit",  "pending exception", "exception",
+                                     "host path", "left block", "tier up"};
     rows("block exit:", s.exits, exits, s.entries);
     constexpr const char* barriers[] = {"memory fill", "device", "uncached memory", "code store",
                                         "other"};
@@ -298,6 +301,7 @@ struct Options {
     bool engine_statistics{};
     std::uint64_t block_cache_entries{mips::BlockInterpreter::default_cache_entries};
     std::uint64_t native_threshold{mips::BlockInterpreter::default_native_threshold};
+    std::uint64_t tier2_threshold{mips::BlockInterpreter::default_tier2_threshold};
 };
 
 // "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" (UTC) as Unix seconds.
@@ -476,6 +480,16 @@ std::optional<Options> parse(std::span<char*> arguments) {
                 return std::nullopt;
             }
             options.native_threshold = *number;
+        } else if (flag == "--tier2-threshold") {
+            if (value == "off") {
+                options.tier2_threshold = mips::BlockInterpreter::tier2_off;
+            } else if (const auto number = parse_number(value);
+                       number && *number != mips::BlockInterpreter::tier2_off) {
+                options.tier2_threshold = *number;
+            } else {
+                std::fprintf(stderr, "--tier2-threshold takes a number or off\n");
+                return std::nullopt;
+            }
         } else if (flag == "--memory" || flag == "--cycles") {
             const auto number = parse_number(value);
             if (!number) {
@@ -584,6 +598,7 @@ int main(int argc, char** argv) {
     }
     machine.set_block_cache_entries(options->block_cache_entries);
     machine.set_native_threshold(options->native_threshold);
+    machine.set_tier2_threshold(options->tier2_threshold);
     if (options->parallel) {
         // Observation needs one thread (doc/SMP.adoc "S4").
         if (std::ranges::contains(options->trace, TraceCategory::cpu) || !options->probes.empty() ||
@@ -887,6 +902,11 @@ int main(int argc, char** argv) {
                          static_cast<unsigned long long>(n.discards),
                          static_cast<unsigned long long>(n.native_operations),
                          static_cast<unsigned long long>(n.helper_operations));
+            std::fprintf(stderr,
+                         "tier2: %llu regions (%llu blocks), %llu native bytes\n",
+                         static_cast<unsigned long long>(n.optimized_regions),
+                         static_cast<unsigned long long>(n.optimized_blocks),
+                         static_cast<unsigned long long>(n.optimized_bytes));
         }
     }
     const auto& state = machine.cpu().state();

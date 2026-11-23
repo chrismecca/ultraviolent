@@ -71,6 +71,8 @@ const test::Registration arithmetic_tier0_tiny{"mips.differential.tier0_tiny_cac
                                                arithmetic<Tier0TinyCacheEngine>};
 const test::Registration arithmetic_tier1{"mips.differential.tier1.arithmetic",
                                       arithmetic<Tier1Engine>};
+const test::Registration arithmetic_tier1_t2{"mips.differential.tier2.arithmetic", arithmetic<Tier2Engine>};
+const test::Registration arithmetic_tier1_t2up{"mips.differential.tier2_up.arithmetic", arithmetic<Tier2UpEngine>};
 const test::Registration arithmetic_tier1_tiny{"mips.differential.tier1_tiny_cache.arithmetic",
                                            arithmetic<Tier1TinyCacheEngine>};
 
@@ -105,6 +107,8 @@ const test::Registration sixty_four_bit_tier0_tiny{
     sixty_four_bit<Tier0TinyCacheEngine>};
 const test::Registration sixty_four_bit_tier1{"mips.differential.tier1.sixty_four_bit_gating",
                                       sixty_four_bit<Tier1Engine>};
+const test::Registration sixty_four_bit_tier1_t2{"mips.differential.tier2.sixty_four_bit_gating", sixty_four_bit<Tier2Engine>};
+const test::Registration sixty_four_bit_tier1_t2up{"mips.differential.tier2_up.sixty_four_bit_gating", sixty_four_bit<Tier2UpEngine>};
 const test::Registration sixty_four_bit_tier1_tiny{"mips.differential.tier1_tiny_cache.sixty_four_bit_gating",
                                            sixty_four_bit<Tier1TinyCacheEngine>};
 
@@ -136,6 +140,8 @@ const test::Registration branches_tier0_tiny{
     "mips.differential.tier0_tiny_cache.branches_and_delay_slots", branches<Tier0TinyCacheEngine>};
 const test::Registration branches_tier1{"mips.differential.tier1.branches_and_delay_slots",
                                       branches<Tier1Engine>};
+const test::Registration branches_tier1_t2{"mips.differential.tier2.branches_and_delay_slots", branches<Tier2Engine>};
+const test::Registration branches_tier1_t2up{"mips.differential.tier2_up.branches_and_delay_slots", branches<Tier2UpEngine>};
 const test::Registration branches_tier1_tiny{"mips.differential.tier1_tiny_cache.branches_and_delay_slots",
                                            branches<Tier1TinyCacheEngine>};
 
@@ -182,6 +188,8 @@ const test::Registration likely_tier0_tiny{"mips.differential.tier0_tiny_cache.b
                                            likely<Tier0TinyCacheEngine>};
 const test::Registration likely_tier1{"mips.differential.tier1.branch_likely",
                                       likely<Tier1Engine>};
+const test::Registration likely_tier1_t2{"mips.differential.tier2.branch_likely", likely<Tier2Engine>};
+const test::Registration likely_tier1_t2up{"mips.differential.tier2_up.branch_likely", likely<Tier2UpEngine>};
 const test::Registration likely_tier1_tiny{"mips.differential.tier1_tiny_cache.branch_likely",
                                            likely<Tier1TinyCacheEngine>};
 
@@ -214,6 +222,8 @@ const test::Registration exceptions_tier0_tiny{"mips.differential.tier0_tiny_cac
                                                exceptions<Tier0TinyCacheEngine>};
 const test::Registration exceptions_tier1{"mips.differential.tier1.exceptions",
                                       exceptions<Tier1Engine>};
+const test::Registration exceptions_tier1_t2{"mips.differential.tier2.exceptions", exceptions<Tier2Engine>};
+const test::Registration exceptions_tier1_t2up{"mips.differential.tier2_up.exceptions", exceptions<Tier2UpEngine>};
 const test::Registration exceptions_tier1_tiny{"mips.differential.tier1_tiny_cache.exceptions",
                                            exceptions<Tier1TinyCacheEngine>};
 
@@ -243,6 +253,8 @@ const test::Registration coprocessor_unusable_tier0_tiny{
     coprocessor_unusable<Tier0TinyCacheEngine>};
 const test::Registration coprocessor_unusable_tier1{"mips.differential.tier1.coprocessor_unusable",
                                       coprocessor_unusable<Tier1Engine>};
+const test::Registration coprocessor_unusable_tier1_t2{"mips.differential.tier2.coprocessor_unusable", coprocessor_unusable<Tier2Engine>};
+const test::Registration coprocessor_unusable_tier1_t2up{"mips.differential.tier2_up.coprocessor_unusable", coprocessor_unusable<Tier2UpEngine>};
 const test::Registration coprocessor_unusable_tier1_tiny{"mips.differential.tier1_tiny_cache.coprocessor_unusable",
                                            coprocessor_unusable<Tier1TinyCacheEngine>};
 
@@ -281,6 +293,8 @@ const test::Registration prefetch_gating_tier0{"mips.differential.tier0.prefetch
                                                prefetch_gating<Tier0Engine>};
 const test::Registration prefetch_gating_tier1{"mips.differential.tier1.prefetch_gating",
                                                prefetch_gating<Tier1Engine>};
+const test::Registration prefetch_gating_tier1_t2{"mips.differential.tier2.prefetch_gating", prefetch_gating<Tier2Engine>};
+const test::Registration prefetch_gating_tier1_t2up{"mips.differential.tier2_up.prefetch_gating", prefetch_gating<Tier2UpEngine>};
 
 template <class Engine> void fpu(test::Context& t) {
     DifferentialWith<Engine> d;
@@ -302,6 +316,8 @@ const test::Registration fpu_tier0_tiny{"mips.differential.tier0_tiny_cache.fpu"
                                         fpu<Tier0TinyCacheEngine>};
 const test::Registration fpu_tier1{"mips.differential.tier1.fpu",
                                       fpu<Tier1Engine>};
+const test::Registration fpu_tier1_t2{"mips.differential.tier2.fpu", fpu<Tier2Engine>};
+const test::Registration fpu_tier1_t2up{"mips.differential.tier2_up.fpu", fpu<Tier2UpEngine>};
 const test::Registration fpu_tier1_tiny{"mips.differential.tier1_tiny_cache.fpu",
                                            fpu<Tier1TinyCacheEngine>};
 
@@ -358,6 +374,8 @@ const test::Registration loads_stores_tier0_tiny{
     "mips.differential.tier0_tiny_cache.loads_and_stores", loads_stores<Tier0TinyCacheEngine>};
 const test::Registration loads_stores_tier1{"mips.differential.tier1.loads_and_stores",
                                       loads_stores<Tier1Engine>};
+const test::Registration loads_stores_tier1_t2{"mips.differential.tier2.loads_and_stores", loads_stores<Tier2Engine>};
+const test::Registration loads_stores_tier1_t2up{"mips.differential.tier2_up.loads_and_stores", loads_stores<Tier2UpEngine>};
 const test::Registration loads_stores_tier1_tiny{"mips.differential.tier1_tiny_cache.loads_and_stores",
                                            loads_stores<Tier1TinyCacheEngine>};
 
@@ -389,6 +407,8 @@ const test::Registration count_compare_tier0_tiny{
     count_compare<Tier0TinyCacheEngine>};
 const test::Registration count_compare_tier1{"mips.differential.tier1.count_compare_boundaries",
                                       count_compare<Tier1Engine>};
+const test::Registration count_compare_tier1_t2{"mips.differential.tier2.count_compare_boundaries", count_compare<Tier2Engine>};
+const test::Registration count_compare_tier1_t2up{"mips.differential.tier2_up.count_compare_boundaries", count_compare<Tier2UpEngine>};
 const test::Registration count_compare_tier1_tiny{"mips.differential.tier1_tiny_cache.count_compare_boundaries",
                                            count_compare<Tier1TinyCacheEngine>};
 
@@ -420,6 +440,8 @@ const test::Registration random_and_tlb_tier0_tiny{
     random_and_tlb<Tier0TinyCacheEngine>};
 const test::Registration random_and_tlb_tier1{"mips.differential.tier1.random_and_tlb_writes",
                                       random_and_tlb<Tier1Engine>};
+const test::Registration random_and_tlb_tier1_t2{"mips.differential.tier2.random_and_tlb_writes", random_and_tlb<Tier2Engine>};
+const test::Registration random_and_tlb_tier1_t2up{"mips.differential.tier2_up.random_and_tlb_writes", random_and_tlb<Tier2UpEngine>};
 const test::Registration random_and_tlb_tier1_tiny{"mips.differential.tier1_tiny_cache.random_and_tlb_writes",
                                            random_and_tlb<Tier1TinyCacheEngine>};
 
@@ -459,6 +481,8 @@ const test::Registration interrupt_lines_tier0_tiny{
     "mips.differential.tier0_tiny_cache.interrupt_lines", interrupt_lines<Tier0TinyCacheEngine>};
 const test::Registration interrupt_lines_tier1{"mips.differential.tier1.interrupt_lines",
                                       interrupt_lines<Tier1Engine>};
+const test::Registration interrupt_lines_tier1_t2{"mips.differential.tier2.interrupt_lines", interrupt_lines<Tier2Engine>};
+const test::Registration interrupt_lines_tier1_t2up{"mips.differential.tier2_up.interrupt_lines", interrupt_lines<Tier2UpEngine>};
 const test::Registration interrupt_lines_tier1_tiny{"mips.differential.tier1_tiny_cache.interrupt_lines",
                                            interrupt_lines<Tier1TinyCacheEngine>};
 
@@ -495,6 +519,8 @@ const test::Registration fetch_faults_tier0_tiny{"mips.differential.tier0_tiny_c
                                                  fetch_faults<Tier0TinyCacheEngine>};
 const test::Registration fetch_faults_tier1{"mips.differential.tier1.fetch_faults",
                                       fetch_faults<Tier1Engine>};
+const test::Registration fetch_faults_tier1_t2{"mips.differential.tier2.fetch_faults", fetch_faults<Tier2Engine>};
+const test::Registration fetch_faults_tier1_t2up{"mips.differential.tier2_up.fetch_faults", fetch_faults<Tier2UpEngine>};
 const test::Registration fetch_faults_tier1_tiny{"mips.differential.tier1_tiny_cache.fetch_faults",
                                            fetch_faults<Tier1TinyCacheEngine>};
 
@@ -525,6 +551,8 @@ const test::Registration self_modifying_tier0_tiny{
     "mips.differential.tier0_tiny_cache.self_modifying_code", self_modifying<Tier0TinyCacheEngine>};
 const test::Registration self_modifying_tier1{"mips.differential.tier1.self_modifying_code",
                                       self_modifying<Tier1Engine>};
+const test::Registration self_modifying_tier1_t2{"mips.differential.tier2.self_modifying_code", self_modifying<Tier2Engine>};
+const test::Registration self_modifying_tier1_t2up{"mips.differential.tier2_up.self_modifying_code", self_modifying<Tier2UpEngine>};
 const test::Registration self_modifying_tier1_tiny{"mips.differential.tier1_tiny_cache.self_modifying_code",
                                            self_modifying<Tier1TinyCacheEngine>};
 
@@ -665,6 +693,8 @@ const test::Registration random_programs_tier0_tiny{
     "mips.differential.tier0_tiny_cache.random_programs", random_programs<Tier0TinyCacheEngine>};
 const test::Registration random_programs_tier1{"mips.differential.tier1.random_programs",
                                       random_programs<Tier1Engine>};
+const test::Registration random_programs_tier1_t2{"mips.differential.tier2.random_programs", random_programs<Tier2Engine>};
+const test::Registration random_programs_tier1_t2up{"mips.differential.tier2_up.random_programs", random_programs<Tier2UpEngine>};
 const test::Registration random_programs_tier1_tiny{"mips.differential.tier1_tiny_cache.random_programs",
                                            random_programs<Tier1TinyCacheEngine>};
 

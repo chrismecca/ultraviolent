@@ -290,9 +290,12 @@ template <class Engine> struct DifferentialWith {
 
 // The engine under test from tier 1 (JIT.adoc): tier 0's executor with native code for its
 // blocks. On hosts without a tier-1 backend it is tier 0.
+// Tier2Threshold (TIER2.adoc): off for tier 1 alone, 0 for every region at tier 2 at once,
+// otherwise tier 1 first and tier 2 after that many entries of a region's first block.
 template <std::size_t Entries = BlockInterpreter::default_cache_entries,
           std::size_t CodeBytes = default_native_code_bytes,
-          BlockInterpreter::RegionJoins Joins = BlockInterpreter::RegionJoins::ran>
+          BlockInterpreter::RegionJoins Joins = BlockInterpreter::RegionJoins::ran,
+          std::uint64_t Tier2Threshold = BlockInterpreter::tier2_off>
 class Tier1EngineSized {
   public:
     static constexpr bool decodes_unsupported = false;
@@ -302,6 +305,7 @@ class Tier1EngineSized {
         interpreter_.set_native_code(native_.get());
         interpreter_.set_native_threshold(0); // every block native
         interpreter_.set_region_joins(Joins);
+        interpreter_.set_tier2_threshold(Tier2Threshold);
     }
 
     void add(std::uint64_t /*virtual_address*/, std::uint32_t /*word*/) {}
@@ -344,5 +348,14 @@ using Tier1TinyCacheEngine = Tier1EngineSized<2>;
 using Tier1RegionEngine = Tier1EngineSized<BlockInterpreter::default_cache_entries,
                                            default_native_code_bytes,
                                            BlockInterpreter::RegionJoins::reachable>;
+// Tier 2 (TIER2.adoc): every region translated optimized on first execution, joining every
+// reachable block; and tier 1 first, tier 2 at a region's second entry (the tier-up exit and
+// the switch between translations of the same pcs).
+using Tier2Engine = Tier1EngineSized<BlockInterpreter::default_cache_entries,
+                                     default_native_code_bytes,
+                                     BlockInterpreter::RegionJoins::reachable, 0>;
+using Tier2UpEngine = Tier1EngineSized<BlockInterpreter::default_cache_entries,
+                                       default_native_code_bytes,
+                                       BlockInterpreter::RegionJoins::reachable, 2>;
 
 } // namespace ultraviolent::mips::testing

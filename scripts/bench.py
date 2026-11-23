@@ -195,7 +195,9 @@ def base_command(args, scratch, cpus=1):
                 if cpus != 1 and args.parallel and args.parallel_window else []) + (
                 ["--tier0-cache-entries", str(args.cache_entries)] if args.cache_entries else []) + (
                 ["--tier1-threshold", str(args.tier1_threshold)]
-                if args.tier1_threshold is not None else [])
+                if args.tier1_threshold is not None else []) + (
+                ["--tier2-threshold", args.tier2_threshold]
+                if args.tier2_threshold is not None else [])
 
 
 def settle_nvram(args, paths):
@@ -412,6 +414,7 @@ def run(args):
     if args.save:
         host = {"binary": args.binary, "engine": args.engine, "cpu_slice": args.cpu_slice,
                 "cache_entries": args.cache_entries, "tier1_threshold": args.tier1_threshold,
+                "tier2_threshold": args.tier2_threshold,
                 "cpu": cpu_model(),
                 "kernel": os.uname().release,
                 "repeat": args.repeat, "date": time.strftime("%Y-%m-%d %H:%M")}
@@ -451,6 +454,9 @@ def main():
                         help="multi-CPU workloads: cycles a CPU may run ahead (default 180)")
     common.add_argument("--tier1-threshold", type=int,
                         help="cache hits before tier 1 translates a block")
+    common.add_argument("--tier2-threshold",
+                        help="entries of a tier-1 region before tier 2 translates it again, or "
+                             "off (doc/TIER2.adoc)")
     common.add_argument("--parallel", action="store_true",
                         help="multi-CPU workloads: each CPU on a host thread (SMP.adoc \"S4\"); "
                         "not deterministic, so digests differ run to run")

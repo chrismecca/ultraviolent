@@ -53,49 +53,44 @@ difference this tier exploits.
 
 == What tier 2 is
 
-Tier 2 translates a hot region again, as a whole, with optimizations that need to see the
-whole region before emitting code. It is part of the native engine, not a fourth engine:
-the same code memory, dispatch table, validity rules, helpers, exits, and lifetime as tier 1
-(JIT.adoc "Native code", "Dispatch"); a tier-2 region replaces the tier-1 code for the same
-pcs in the dispatch table and is valid exactly when that code was.
+Tier 2 translates a hot region again, as a whole, with what one-pass emission cannot know
+before it emits: which blocks the region holds, which guest registers it uses most, where it
+can be entered, where its loops close, and which accesses share a base. It is part of the
+native engine, not a fourth engine: the same code memory, dispatch table, validity rules,
+helpers, exits, and lifetime as tier 1 (JIT.adoc "Native code", "Dispatch"); a tier-2 region
+replaces the tier-1 code for the same pcs in the dispatch table and is valid exactly when that
+code was.
 
 ----
 decoded blocks (tier 0)
    |  128 hits
-tier 1: one pass, block by block           EmitBuilder -> x86-64
-   |  hot (the region's entry count)
-tier 2: region -> IR -> passes -> x86-64   IrBuilder -> ir::Region -> lowering
+tier 1: the region emitted block by block (EmitBuilder, operations.hpp)
+   |  its first block's entries reach the tier-2 threshold: BlockExit::tier_up
+tier 2: plan the region (the same emitter, run once to look), then emit it with the plan
 ----
 
-* **One source of semantics.** `IrBuilder` is a third builder for `operations.hpp`: the
-  operation templates that the interpreters execute (DirectBuilder) and tier 1 emits
-  (EmitBuilder) record IR through it. No operation is written again for tier 2. Operations
-  not in builder form are an IR `call_semantics`, as in tier 1.
-* **The IR** (`src/arch/mips/ir/`) is small and architectural, not a general compiler IR:
-  a region is a list of blocks, each a list of instructions over 64-bit values numbered in
-  definition order (SSA within a block), reads and writes of guest registers as
-  instructions, and a terminator. Each guest operation starts with a marker that names it,
-  so exits know the pc, delay slot, and completed operations. It is host-independent; the
-  x86-64 lowering is the first consumer (ARCHITECTURE "Future JIT architecture").
-* **Passes** use what one-pass emission cannot see:
-  - *Guest registers in host registers across the region*: the most used guest registers
-    get a host register for the whole region, loaded where the region is entered and written
-    back only where the CPU must be exact (a helper, a side exit, leaving the region).
-  - *Boundary checks where they are needed*: the interrupt and deadline checks at the
-    region's entries and at loop back-edges only, each checking the longest stretch of
-    operations to the next check (JIT.adoc "Commit regions", made concrete); cycles counted
-    statically along each path.
-  - *Shared host page tests*: accesses through the same base value with no helper between
-    them use one page test for the whole range of their offsets.
-  - Loads of CPU fields that only helpers change (the translation context's tag) kept in
-    registers.
-* **Lowering** emits x86-64 through the existing assembler, reusing tier 1's sequences
-  (helpers, exits, dispatch, the host page path's second way and held reads) rather than
-  copies of them.
-* **Tiering.** A tier-1 region counts its first block's entries; at the tier-2 threshold
-  it leaves with a tier-up exit, the engine translates the region with tier 2 and installs
-  it, and execution continues in it. `--tier2-threshold N` (0: every region at tier 2 at
-  once, as the tests run it; `off`: none).
+* **One source of semantics, one emitter.** Tier 2 emits through tier 1's EmitBuilder from
+  the operations in `operations.hpp`, with the same host page path, held reads, second way,
+  FPU sequences, side exits, and slow paths. What differs is policy: which guest values stay
+  in host registers, which boundary checks are emitted, which page tests are shared.
+* **Planning.** The planning pass runs the emitter over the region into a scratch assembler
+  and records what tier 2 decides from: the blocks the region joins and the edges between
+  them, each block's guest register reads and writes, and the base and offset of each
+  access. The plan is therefore exactly what emission will see, with no second model of the
+  semantics to keep in step.
+* **Decided 2026-11-23, and why: no IR yet.** The first design (above this revision) recorded
+  an IR through a third builder and lowered it with a new x86-64 emitter. That emitter would
+  have repeated every builder primitive's emission (arithmetic, compares, overflow, multiply
+  and divide, the memory fast and slow paths, held reads, the FPU), two emitters of one
+  semantics that drift apart, which JIT.adoc "Semantics" was written to prevent. Nothing tier 2
+  plans transforms the operations themselves; an IR becomes worth having when a pass must
+  (ARCHITECTURE "Future JIT architecture" keeps that path).
+* **Tiering.** A tier-1 region counts its first block's entries (a counter the backend owns,
+  at an address the code holds); the entry that reaches the threshold leaves before the block
+  runs, with BlockExit::tier_up, and the engine translates the region with tier 2, installs
+  it, and continues in it. If tier 2 cannot translate it, the tier-1 code stays and does not
+  ask again. `--tier2-threshold N|off` (0: every region at tier 2 at once, as the tests run
+  it).
 
 Invariants kept from tier 1: exact boundaries for every exit (an exception, an interrupt, the
 run limit, a barrier) as tier 0 would stop; every benchmark digest and same-cycle snapshot
@@ -108,12 +103,11 @@ Each stage is one or more commits, with its gates; speed is a gate where stated.
 
 T0. Measurement (above) and the profiling tool, `tools/jit_profile.py`.
 
-T1. The IR, `IrBuilder`, and a direct lowering with no optimization: guest registers
-    through the CPU, tier 1's boundary protocol, every operation tier 1 emits natively also
-    native (the FPU excepted: a region with native FPU operations stays tier 1 until T5).
-    The engine translates with tier 2 at a threshold. Gates: the differential suites on tier
-    2 (every region at tier 2 on first execution), mutation checks, all presets, all digests
-    at thresholds 0 and default. Speed not a gate.
+T1. Tiering: the tier-up exit, the engine's retranslation, `--tier2-threshold`, tier 2's
+    regions (larger, emitted with tier 1's policy until T2), and the tests on tier 2. Gates:
+    the differential and tier-1 suites on tier 2 (every region at tier 2 on first execution,
+    and tier 1 first with tier 2 at a region's second entry), all presets, all digests at
+    tier-2 thresholds 0 and 1,000. Speed not a gate.
 
 T2. Guest registers across the region. Gate: speed (`cpu`, `boot`, `fs`, `prom`) and all T1
     gates.
@@ -123,11 +117,19 @@ T3. Boundary checks at entries and back-edges only. Gates as T2, plus exact stop
 
 T4. Shared host page tests and CPU fields in registers. Gates as T2.
 
-T5. The FPU in tier 2, if the profile still asks for it.
-
 Stop rule: a stage that gains less than 3% on every workload, after its gates, ends the
 milestone after it; what remains is written down as measured.
 
 == Progress
 
 * **T0 (2026-11-23).** Measurements above.
+* **T1 (2026-11-23).** `BlockExit::tier_up`; `TranslationPolicy` (`NativeCode::translate`);
+  tier-1 regions with an entry counter (`heat_`, 131,072 counters reused after a discard);
+  `BlockInterpreter::tier_up`, `translate`, `install`; tier-2 regions of up to 32 blocks;
+  `--tier2-threshold` (main, Ip27Machine, bench.py); `tier2:` in the engine statistics. Tests:
+  every `mips.differential.tier1.*` and `mips.tier1.*.regions` suite also as `tier2` (every
+  region optimized at once) and `tier2_up` (tier 1, then tier 2 at a region's second entry),
+  64 in all, and `mips.tier2.tier_up` (one tier-up exit, one tier-2 region of the four blocks,
+  the run identical to the reference across the switch). All presets; digests of `prom`,
+  `boot`, `cpu`, `fs` identical at tier-2 thresholds 0 and 1,000, speed unchanged
+  (0.98-1.05x, noise), as expected before T2.

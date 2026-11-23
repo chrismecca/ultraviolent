@@ -100,6 +100,9 @@ BlockInterpreter::NativeRun BlockInterpreter::run_native(const std::uint64_t& li
     if (exit.reason == BlockExit::host_path) {
         ++statistics_.barriers[static_cast<std::size_t>(cpu_.last_bus_access())];
     }
+    if (exit.reason == BlockExit::tier_up) {
+        tier_up();
+    }
     // Every operation native code ran took one cycle (an exception's too).
     const std::uint64_t operations = cpu_.cycles() - cycles;
     ++statistics_.native_runs;
@@ -189,14 +192,29 @@ bool BlockInterpreter::install_native(Entry& entry) {
         if (entry.uses < native_threshold_) {
             return false;
         }
-        RegionBlocks more{*this, cpu_, entry.block, region_storage_};
-        region_entries_.clear();
-        entry.native = native_->translate(entry.block, more, region_entries_);
-        entry.native_epoch = native_->epoch();
-        if (entry.native == nullptr) {
+        // Tier 1, counting toward tier 2; or tier 2 at once.
+        const TranslationPolicy policy =
+            tier2_threshold_ == 0
+                ? TranslationPolicy{.optimize = true}
+                : TranslationPolicy{.tier_up_after =
+                                        tier2_threshold_ == tier2_off ? 0 : tier2_threshold_};
+        if (!translate(entry, policy)) {
             return false;
         }
     }
+    install(entry);
+    return true;
+}
+
+bool BlockInterpreter::translate(Entry& entry, const TranslationPolicy& policy) {
+    RegionBlocks more{*this, cpu_, entry.block, region_storage_};
+    region_entries_.clear();
+    entry.native = native_->translate(entry.block, more, region_entries_, policy);
+    entry.native_epoch = native_->epoch();
+    return entry.native != nullptr;
+}
+
+void BlockInterpreter::install(Entry& entry) {
     if (dispatch_epoch_ != native_->epoch()) {
         // The code region was discarded: no other entry's code exists any more.
         clear_dispatch();
@@ -226,7 +244,26 @@ bool BlockInterpreter::install_native(Entry& entry) {
         ++statistics_.dispatch_installs;
     }
     region_entries_.clear();
-    return true;
+}
+
+// The tier-1 region whose first block is at the CPU's pc has been entered as often as the
+// threshold (it left before running anything): the region again, with tier 2, replacing the
+// tier-1 code for its pcs in the dispatch table. When tier 2 cannot translate it, the tier-1
+// code stays (its counter has passed zero and does not ask again).
+void BlockInterpreter::tier_up() {
+    Entry* entry = lookup(cpu_.state().pc);
+    if (entry == nullptr) {
+        return;
+    }
+    const void* tier1 = entry->native;
+    const std::uint64_t tier1_epoch = entry->native_epoch;
+    if (translate(*entry, TranslationPolicy{.optimize = true})) {
+        install(*entry);
+        return;
+    }
+    if (tier1_epoch == native_->epoch()) {
+        entry->native = tier1;
+    }
 }
 
 const Block* BlockInterpreter::RegionBlocks::block_at(std::uint64_t pc) {

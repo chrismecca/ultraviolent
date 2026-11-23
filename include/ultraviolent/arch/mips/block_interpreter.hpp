@@ -39,8 +39,12 @@ enum class BlockExit : std::uint8_t {
     // pc is not the next operation's (a nullified delay slot, or a block entered in a delay
     // slot).
     left_block,
+    // Native code only: a tier-1 region's first block was entered as often as the tier-2
+    // threshold, before it ran (TIER2.adoc "What tier 2 is"); the engine translates the region
+    // again with tier 2.
+    tier_up,
 };
-inline constexpr std::size_t block_exit_count = 6;
+inline constexpr std::size_t block_exit_count = 7;
 
 // Why a lookup did not find a valid block (IR.adoc "Keeping blocks valid").
 enum class CacheMiss : std::uint8_t {
@@ -138,6 +142,14 @@ class BlockInterpreter {
     void set_native_threshold(std::uint64_t hits) {
         native_threshold_ = hits;
     }
+    // Tier 2 (TIER2.adoc): a tier-1 region whose first block has been entered `entries` times
+    // is translated again as a whole, optimized. 0 translates every region with tier 2 at once
+    // (tests); tier2_off never.
+    static constexpr std::uint64_t tier2_off = ~std::uint64_t{0};
+    static constexpr std::uint64_t default_tier2_threshold = tier2_off;
+    void set_tier2_threshold(std::uint64_t entries) {
+        tier2_threshold_ = entries;
+    }
     [[nodiscard]] std::size_t cache_entries() const {
         return cache_.size();
     }
@@ -197,6 +209,13 @@ class BlockInterpreter {
     // Puts the entry's block into the dispatch table, translating it first when it has no
     // native code and has been hit often enough. Returns whether it did.
     bool install_native(Entry& entry);
+    // Translates the region at `entry` with `policy` into entry.native; false when it could not.
+    bool translate(Entry& entry, const TranslationPolicy& policy);
+    // Puts the entry's native code, and its region's other blocks (region_entries_), into the
+    // dispatch table.
+    void install(Entry& entry);
+    // The tier-1 region at the CPU's pc asked for tier 2 (BlockExit::tier_up).
+    void tier_up();
     // What validates a dispatch entry, besides its pc and context (as for Entry).
     struct DispatchValidity {
         std::uint64_t epoch{};
@@ -231,6 +250,7 @@ class BlockInterpreter {
     BlockStatistics statistics_;
     NativeCode* native_{};
     std::uint64_t native_threshold_{default_native_threshold};
+    std::uint64_t tier2_threshold_{default_tier2_threshold};
     std::vector<DispatchEntry> dispatch_;
     std::vector<DispatchValidity> dispatch_validity_;
     // The backend epoch the dispatch table's code belongs to.

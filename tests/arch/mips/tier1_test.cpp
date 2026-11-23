@@ -7,6 +7,8 @@
 #include <ultraviolent/arch/mips/fpu.hpp>
 #include <ultraviolent/arch/mips/native_code.hpp>
 
+#include <ultraviolent/arch/mips/block_interpreter.hpp>
+
 #include <atomic>
 #include <cstdint>
 #include <format>
@@ -1107,6 +1109,8 @@ const test::Registration fpu_arithmetic_tier1{"mips.tier1.fpu_arithmetic.tier1",
                                               fpu_arithmetic<Tier1Engine>};
 const test::Registration fpu_arithmetic_regions{"mips.tier1.fpu_arithmetic.regions",
                                                 fpu_arithmetic<Tier1RegionEngine>};
+const test::Registration fpu_arithmetic_regions_t2{"mips.tier2.fpu_arithmetic.regions", fpu_arithmetic<Tier2Engine>};
+const test::Registration fpu_arithmetic_regions_t2up{"mips.tier2_up.fpu_arithmetic.regions", fpu_arithmetic<Tier2UpEngine>};
 
 const test::Registration fpu_tier0{"mips.tier1.fpu_moves.tier0", fpu_moves<Tier0Engine>};
 const test::Registration fpu_tier1{"mips.tier1.fpu_moves.tier1", fpu_moves<Tier1Engine>};
@@ -1121,28 +1125,40 @@ const test::Registration host_page_aliases_tier1{"mips.tier1.host_page_aliases.t
                                                  host_page_aliases<Tier1Engine>};
 const test::Registration host_page_aliases_regions{"mips.tier1.host_page_aliases.regions",
                                                    host_page_aliases<Tier1RegionEngine>};
+const test::Registration host_page_aliases_regions_t2{"mips.tier2.host_page_aliases.regions", host_page_aliases<Tier2Engine>};
+const test::Registration host_page_aliases_regions_t2up{"mips.tier2_up.host_page_aliases.regions", host_page_aliases<Tier2UpEngine>};
 const test::Registration second_way_store_tier1{"mips.tier1.second_way_store_to_code.tier1",
                                                 second_way_store_to_code<Tier1Engine>};
 const test::Registration second_way_store_regions{"mips.tier1.second_way_store_to_code.regions",
                                                   second_way_store_to_code<Tier1RegionEngine>};
+const test::Registration second_way_store_regions_t2{"mips.tier2.second_way_store_to_code.regions", second_way_store_to_code<Tier2Engine>};
+const test::Registration second_way_store_regions_t2up{"mips.tier2_up.second_way_store_to_code.regions", second_way_store_to_code<Tier2UpEngine>};
 const test::Registration code_no_asid_tier1{"mips.tier1.code_no_asid_selects.tier1",
                                             code_no_asid_selects<Tier1Engine>};
 const test::Registration code_no_asid_regions{"mips.tier1.code_no_asid_selects.regions",
                                               code_no_asid_selects<Tier1RegionEngine>};
+const test::Registration code_no_asid_regions_t2{"mips.tier2.code_no_asid_selects.regions", code_no_asid_selects<Tier2Engine>};
+const test::Registration code_no_asid_regions_t2up{"mips.tier2_up.code_no_asid_selects.regions", code_no_asid_selects<Tier2UpEngine>};
 const test::Registration remap_own_tier0{"mips.tier1.remap_own_page.tier0",
                                          remap_own_page<Tier0Engine>};
 const test::Registration remap_own_tier1{"mips.tier1.remap_own_page.tier1",
                                          remap_own_page<Tier1Engine>};
 const test::Registration remap_own_regions{"mips.tier1.remap_own_page.regions",
                                            remap_own_page<Tier1RegionEngine>};
+const test::Registration remap_own_regions_t2{"mips.tier2.remap_own_page.regions", remap_own_page<Tier2Engine>};
+const test::Registration remap_own_regions_t2up{"mips.tier2_up.remap_own_page.regions", remap_own_page<Tier2UpEngine>};
 const test::Registration remap_called_tier1{"mips.tier1.remap_called_page.tier1",
                                             remap_called_page<Tier1Engine>};
 const test::Registration remap_called_regions{"mips.tier1.remap_called_page.regions",
                                               remap_called_page<Tier1RegionEngine>};
+const test::Registration remap_called_regions_t2{"mips.tier2.remap_called_page.regions", remap_called_page<Tier2Engine>};
+const test::Registration remap_called_regions_t2up{"mips.tier2_up.remap_called_page.regions", remap_called_page<Tier2UpEngine>};
 const test::Registration unrelated_tier1{"mips.tier1.unrelated_tlb_writes.tier1",
                                          unrelated_tlb_writes<Tier1Engine>};
 const test::Registration unrelated_regions{"mips.tier1.unrelated_tlb_writes.regions",
                                            unrelated_tlb_writes<Tier1RegionEngine>};
+const test::Registration unrelated_regions_t2{"mips.tier2.unrelated_tlb_writes.regions", unrelated_tlb_writes<Tier2Engine>};
+const test::Registration unrelated_regions_t2up{"mips.tier2_up.unrelated_tlb_writes.regions", unrelated_tlb_writes<Tier2UpEngine>};
 
 const test::Registration device_loads_tier0{"mips.tier1.device_loads.tier0",
                                             device_loads<Tier0Engine>};
@@ -1150,6 +1166,8 @@ const test::Registration device_loads_tier1{"mips.tier1.device_loads.tier1",
                                             device_loads<Tier1Engine>};
 const test::Registration device_loads_regions{"mips.tier1.device_loads.regions",
                                               device_loads<Tier1RegionEngine>};
+const test::Registration device_loads_regions_t2{"mips.tier2.device_loads.regions", device_loads<Tier2Engine>};
+const test::Registration device_loads_regions_t2up{"mips.tier2_up.device_loads.regions", device_loads<Tier2UpEngine>};
 
 const test::Registration held_reads_tier0{"mips.tier1.held_device_reads.tier0",
                                           held_device_reads<Tier0Engine>};
@@ -1157,17 +1175,23 @@ const test::Registration held_reads_tier1{"mips.tier1.held_device_reads.tier1",
                                           held_device_reads<Tier1Engine>};
 const test::Registration held_reads_regions{"mips.tier1.held_device_reads.regions",
                                             held_device_reads<Tier1RegionEngine>};
+const test::Registration held_reads_regions_t2{"mips.tier2.held_device_reads.regions", held_device_reads<Tier2Engine>};
+const test::Registration held_reads_regions_t2up{"mips.tier2_up.held_device_reads.regions", held_device_reads<Tier2UpEngine>};
 
 const test::Registration fast_forward_tier1{"mips.tier1.fast_forward_loops.tier1",
                                             fast_forward_loops<Tier1Engine>};
 const test::Registration fast_forward_regions{"mips.tier1.fast_forward_loops.regions",
                                               fast_forward_loops<Tier1RegionEngine>};
+const test::Registration fast_forward_regions_t2{"mips.tier2.fast_forward_loops.regions", fast_forward_loops<Tier2Engine>};
+const test::Registration fast_forward_regions_t2up{"mips.tier2_up.fast_forward_loops.regions", fast_forward_loops<Tier2UpEngine>};
 const test::Registration paired_reads_tier0{"mips.tier1.paired_device_reads.tier0",
                                             paired_device_reads<Tier0Engine>};
 const test::Registration paired_reads_tier1{"mips.tier1.paired_device_reads.tier1",
                                             paired_device_reads<Tier1Engine>};
 const test::Registration paired_reads_regions{"mips.tier1.paired_device_reads.regions",
                                               paired_device_reads<Tier1RegionEngine>};
+const test::Registration paired_reads_regions_t2{"mips.tier2.paired_device_reads.regions", paired_device_reads<Tier2Engine>};
+const test::Registration paired_reads_regions_t2up{"mips.tier2_up.paired_device_reads.regions", paired_device_reads<Tier2UpEngine>};
 
 const test::Registration stepped_reads_tier0{"mips.tier1.stepped_device_reads.tier0",
                                              stepped_device_reads<Tier0Engine>};
@@ -1175,10 +1199,14 @@ const test::Registration stepped_reads_tier1{"mips.tier1.stepped_device_reads.ti
                                              stepped_device_reads<Tier1Engine>};
 const test::Registration stepped_reads_regions{"mips.tier1.stepped_device_reads.regions",
                                                stepped_device_reads<Tier1RegionEngine>};
+const test::Registration stepped_reads_regions_t2{"mips.tier2.stepped_device_reads.regions", stepped_device_reads<Tier2Engine>};
+const test::Registration stepped_reads_regions_t2up{"mips.tier2_up.stepped_device_reads.regions", stepped_device_reads<Tier2UpEngine>};
 const test::Registration held_pressure_tier1{"mips.tier1.held_reads_under_pressure.tier1",
                                              held_reads_under_pressure<Tier1Engine>};
 const test::Registration held_pressure_regions{"mips.tier1.held_reads_under_pressure.regions",
                                                held_reads_under_pressure<Tier1RegionEngine>};
+const test::Registration held_pressure_regions_t2{"mips.tier2.held_reads_under_pressure.regions", held_reads_under_pressure<Tier2Engine>};
+const test::Registration held_pressure_regions_t2up{"mips.tier2_up.held_reads_under_pressure.regions", held_reads_under_pressure<Tier2UpEngine>};
 
 const test::Registration memory_tier0{"mips.tier1.memory_operations.tier0",
                                       memory_operations<Tier0Engine>};
@@ -1196,11 +1224,19 @@ const test::Registration builder_tier1_tiny{"mips.tier1.builder_operations.tier1
 
 const test::Registration builder_regions{"mips.tier1.builder_operations.regions",
                                          builder_operations<Tier1RegionEngine>};
+const test::Registration builder_regions_t2{"mips.tier2.builder_operations.regions", builder_operations<Tier2Engine>};
+const test::Registration builder_regions_t2up{"mips.tier2_up.builder_operations.regions", builder_operations<Tier2UpEngine>};
 const test::Registration memory_regions{"mips.tier1.memory_operations.regions",
                                         memory_operations<Tier1RegionEngine>};
+const test::Registration memory_regions_t2{"mips.tier2.memory_operations.regions", memory_operations<Tier2Engine>};
+const test::Registration memory_regions_t2up{"mips.tier2_up.memory_operations.regions", memory_operations<Tier2UpEngine>};
 const test::Registration fpu_regions{"mips.tier1.fpu_moves.regions", fpu_moves<Tier1RegionEngine>};
+const test::Registration fpu_regions_t2{"mips.tier2.fpu_moves.regions", fpu_moves<Tier2Engine>};
+const test::Registration fpu_regions_t2up{"mips.tier2_up.fpu_moves.regions", fpu_moves<Tier2UpEngine>};
 const test::Registration division_edges_regions{"mips.tier1.division_edges.regions",
                                                 division_edges<Tier1RegionEngine>};
+const test::Registration division_edges_regions_t2{"mips.tier2.division_edges.regions", division_edges<Tier2Engine>};
+const test::Registration division_edges_regions_t2up{"mips.tier2_up.division_edges.regions", division_edges<Tier2UpEngine>};
 const test::Registration native_runs_regions{
     "mips.tier1.native_code_runs.regions", [](test::Context& t) {
         DifferentialWith<Tier1RegionEngine> d;
@@ -1213,5 +1249,25 @@ const test::Registration native_runs_regions{
         t.check_equal(n.region_blocks, std::uint64_t{3});
 #endif
     }};
+
+// Tier 2 (TIER2.adoc): a tier-1 region counts its first block's entries and, at the
+// threshold, leaves before running it (BlockExit::tier_up); the engine translates the region
+// again with tier 2 and continues in it. The loop runs on, against the reference, through the
+// switch.
+const test::Registration tier_up{"mips.tier2.tier_up", [](test::Context& t) {
+    DifferentialWith<Tier2UpEngine> d;
+    // One chunk: a chunk's end stops a block midway, and re-entering there makes another region.
+    d.max_chunk = 4000;
+    load_block_chain(d, 4);
+    t.check(d.run(t, 4000), "matches the reference");
+#ifdef ULTRAVIOLENT_TIER1
+    const NativeStatistics& n = d.engine.native()->statistics();
+    const BlockStatistics& b = d.engine.statistics();
+    t.check_equal(b.exits[static_cast<std::size_t>(BlockExit::tier_up)], std::uint64_t{1});
+    t.check_equal(n.regions, std::uint64_t{2});
+    t.check_equal(n.optimized_regions, std::uint64_t{1});
+    t.check_equal(n.optimized_blocks, std::uint64_t{4});
+#endif
+}};
 
 } // namespace

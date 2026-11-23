@@ -1246,19 +1246,26 @@ class X86_64NativeCode final : public NativeCode {
     }
 
     const void* translate(const Block& block, BlockSource& more,
-                          std::vector<RegionEntry>& entries) override {
+                          std::vector<RegionEntry>& entries,
+                          const TranslationPolicy& policy) override {
         const auto start = std::chrono::steady_clock::now();
-        const void* code = emit_region(block, more, entries, max_region_blocks);
+        const Shape shape{.max_blocks = policy.optimize ? max_optimized_blocks : max_region_blocks,
+                          .optimize = policy.optimize,
+                          .tier_up_after = policy.optimize ? 0 : policy.tier_up_after};
+        const void* code = emit_region(block, more, entries, shape);
         if (code == nullptr) {
             // The code region is full: discard every block and start again (between blocks,
             // so nothing discarded is running), with the block alone if the region still does
             // not fit.
             memory_.discard();
+            heat_used_ = 0;
             ++epoch_;
             ++statistics_.discards;
-            code = emit_region(block, more, entries, max_region_blocks);
+            code = emit_region(block, more, entries, shape);
             if (code == nullptr) {
-                code = emit_region(block, more, entries, 1);
+                Shape alone = shape;
+                alone.max_blocks = 1;
+                code = emit_region(block, more, entries, alone);
             }
         }
         statistics_.translation_nanoseconds += static_cast<std::uint64_t>(
@@ -1487,6 +1494,14 @@ class X86_64NativeCode final : public NativeCode {
     // Regions (JIT.adoc "Regions"): a translation joins blocks of its first block's code page
     // that a block's end reaches at a known pc, and jumps to them without dispatch.
     static constexpr std::size_t max_region_blocks = 16;
+    // Tier 2's regions (TIER2.adoc): code proven hot, so larger.
+    static constexpr std::size_t max_optimized_blocks = 32;
+    // How a region is translated (TranslationPolicy, with the block limit).
+    struct Shape {
+        std::size_t max_blocks;
+        bool optimize{};
+        std::uint64_t tier_up_after{};
+    };
     struct RegionBlock {
         const Block* block;
         Label label;
@@ -1776,12 +1791,19 @@ class X86_64NativeCode final : public NativeCode {
 
     // The region starting with `first` in the code region, or null when it does not fit.
     const void* emit_region(const Block& first, BlockSource& more,
-                            std::vector<RegionEntry>& entries, std::size_t max_blocks) {
+                            std::vector<RegionEntry>& entries, const Shape& shape) {
         entries.clear();
         Assembler a{next_address()};
+        // Tier 1 toward tier 2: a counter of the first block's entries (TIER2.adoc), while the
+        // counters last; they are reused only after a discard, with the code that used them.
+        std::uint64_t heat = 0;
+        if (shape.tier_up_after != 0 && heat_used_ < heat_capacity) {
+            heat_[heat_used_] = shape.tier_up_after;
+            heat = reinterpret_cast<std::uint64_t>(&heat_[heat_used_++]);
+        }
         Region region{.a = a,
                       .more = more,
-                      .max_blocks = max_blocks,
+                      .max_blocks = shape.max_blocks,
                       .blocks = {{&first, a.label()}},
                       .refused = {}};
         std::vector<std::uint64_t> starts;
@@ -1797,7 +1819,7 @@ class X86_64NativeCode final : public NativeCode {
             check_tlb_generation(a, *b.block, BlockExit::completed);
             a.bind(b.label);
             mark(a, mark_entry);
-            native_count += emit_block(a, region, *b.block);
+            native_count += emit_block(a, region, *b.block, k == 0 ? heat : 0);
             operations += b.block->operations.size();
         }
         const std::uint64_t at = place(a);
@@ -1811,7 +1833,7 @@ class X86_64NativeCode final : public NativeCode {
         }
         if (perf_map_ != nullptr) {
             char name[40];
-            std::snprintf(name, sizeof name, "block_%llx",
+            std::snprintf(name, sizeof name, shape.optimize ? "block_%llx_t2" : "block_%llx",
                           static_cast<unsigned long long>(first.start_pc));
             name_code(at, a.size(), name);
         }
@@ -1848,12 +1870,18 @@ class X86_64NativeCode final : public NativeCode {
         statistics_.native_bytes += a.size();
         statistics_.native_operations += native_count;
         statistics_.helper_operations += operations - native_count;
+        if (shape.optimize) {
+            ++statistics_.optimized_regions;
+            statistics_.optimized_blocks += region.blocks.size();
+            statistics_.optimized_bytes += a.size();
+        }
         return reinterpret_cast<const void*>(at);
     }
 
     // Emits `block` at the current position (its label bound there), with its out-of-line
     // exits after it. Returns how many of its operations are native.
-    std::uint64_t emit_block(Assembler& a, Region& region, const Block& block) {
+    // `heat`, when not 0, is the address of the region's entry counter (the first block's).
+    std::uint64_t emit_block(Assembler& a, Region& region, const Block& block, std::uint64_t heat) {
         GuestRegisters registers{a, layout_};
         const auto& operations = block.operations;
         const std::size_t count = operations.size();
@@ -1913,6 +1941,14 @@ class X86_64NativeCode final : public NativeCode {
         a.lea(Reg::rax, Mem{Reg::r15, static_cast<std::int32_t>(count)});
         a.cmp(Reg::rax, Mem{Reg::r12, context_deadline});
         a.jcc(Cond::a, limit);
+        // Counting toward tier 2: the entry that brings the counter to zero leaves, before the
+        // block runs, for the engine to translate the region again (BlockExit::tier_up).
+        const Label hot = a.label();
+        if (heat != 0) {
+            a.mov(Reg::rcx, heat);
+            a.add(Mem{Reg::rcx, 0}, -1);
+            a.jcc(Cond::e, hot);
+        }
 
         Boundary boundary{.exact = false};
         Final final = Final::constant;
@@ -2053,7 +2089,11 @@ class X86_64NativeCode final : public NativeCode {
                       delay_written, helpers);
         }
         for (const auto& [label, reason] :
-             {std::pair{pending, BlockExit::pending_exception}, std::pair{limit, BlockExit::run_limit}}) {
+             {std::pair{pending, BlockExit::pending_exception}, std::pair{limit, BlockExit::run_limit},
+              std::pair{hot, BlockExit::tier_up}}) {
+            if (reason == BlockExit::tier_up && heat == 0) {
+                continue;
+            }
             a.bind(label);
             store_constant(a, layout_.pc, start);
             store_constant(a, layout_.next_pc, start + 4);
@@ -2120,6 +2160,11 @@ class X86_64NativeCode final : public NativeCode {
     std::uint64_t table_{};
     Entry entry_{};
     std::array<std::uint64_t, block_exit_count> exits_{};
+    // Tier 1's entry counters toward tier 2 (emit_region), at fixed addresses generated code
+    // holds; the first heat_used_ belong to code in the region.
+    static constexpr std::size_t heat_capacity = std::size_t{1} << 17;
+    std::unique_ptr<std::uint64_t[]> heat_{std::make_unique<std::uint64_t[]>(heat_capacity)};
+    std::size_t heat_used_{};
     std::uint64_t deadline_{};
     std::uint64_t dispatch_{};
     // By the register holding the entry's offset (emit_second_way).

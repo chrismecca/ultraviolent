@@ -262,6 +262,14 @@ class Ip27Machine {
             }
         }
     }
+    // Tier 2's threshold (BlockInterpreter::set_tier2_threshold).
+    void set_tier2_threshold(std::uint64_t entries) {
+        for (Processor* p : processors_) {
+            if (p != nullptr) {
+                p->blocks.set_tier2_threshold(entries);
+            }
+        }
+    }
     // 4 KiB frames of memory and flash now marked as holding decoded code.
     [[nodiscard]] std::size_t marked_code_frames() const {
         std::size_t frames = 0;
