@@ -1,0 +1,90 @@
+= Ultraviolent 0.1.3 Release Notes
+
+Ultraviolent 0.1.3 builds larger Origin 2000s: a rack module of four node boards joined by
+two routers (eight CPUs), or two rack modules with four routers (sixteen CPUs). The PROM
+discovers them and passes its diagnostics, and IRIX boots, runs, and reboots on them. One
+CPU also boots IRIX faster than with 0.1.2. `USING.adoc` is the guide.
+
+Ultraviolent ships no SGI firmware, media, or disk images. You supply your own PROM images
+and IRIX discs (`assets/README.adoc`).
+
+== What changed
+
+* **Rack modules** (`doc/MULTINODE.adoc`; `USING.adoc` "A rack module"). `--module rack
+  --nodes 1-4` puts node boards n1-n4 of a rack module behind two Rack Routers (r1 and r2);
+  `--nodes 5-8` adds a second module with its own system controller, Crossbows, and routers,
+  and the four routers form a square (`--express-links` adds the diagonals, the Xpress
+  links). Each module has its own module number and MODULEID NIC. The router itself, the SN0
+  router chip, is modeled from SGI's public manuals and from what the PROM and IRIX do with
+  it: its registers, vector routes, routing tables, link resets, and NIC. No observable
+  machine here has a router chip, so some details are hypotheses, written down as such: how
+  the routers are cabled (which port goes where), the router board's NIC contents, and the
+  slot number IRIX gives r2. A capture from a real Onyx2 rack has been requested to settle
+  them.
+* **Two node boards: IRIX's reboot resets both.** A reboot (`init 6`) on two or more nodes
+  sends a warm reset over each NUMAlink link (observed in the PROM and IRIX; `IP27.adoc`
+  "NI_PORT_RESET"), which now resets the node at the other end, as on hardware. Before, only
+  the rebooting node was reset; with routers the others then lost their memory. A two-node
+  (`--nodes 2`) reboot's console output differs from 0.1.2's only in a reported time.
+* **Speed.** Tier 1, against 0.1.2 on the reference host (Ryzen 5 3600, PGO builds of both,
+  measured side by side; best of three, of two with `--parallel`; host seconds):
++
+[cols="2,1,1,1",options="header"]
+|===
+| Workload | 0.1.2 | 0.1.3 | Faster
+| IRIX from power-on to `login:` (`boot`) | 25.7 | 23.4 | 1.10x
+| PROM, awk loop, find and sum (`prom`, `cpu`, `fs`) | 8.2, 3.7, 3.1 | 8.2, 3.7, 3.0 | 1.00x
+| Two CPUs, `--parallel`: boot to `login:` (`boot2`) | 71.4 | 35.4 | 2.01x
+| Two CPUs, `--parallel`: `init 6` to a shell (`reboot2`) | 67.6 | 37.0 | 1.92x
+| Four CPUs, `--parallel`: boot to `login:` (`boot4`) | 79.6 | 39.0 | 2.04x
+| Four CPUs, `--parallel`: `init 6` to a shell (`reboot4`) | 88.6 | 42.1 | 2.07x
+|===
++
+(With `--parallel` runs are not reproducible, so "Faster" there is virtual time per host
+second.) The two- and four-CPU awk and mixed workloads are unchanged. New with 0.1.3, with
+`--parallel`: eight CPUs boot to `login:` in 65 s (1.32 times real time) and sixteen in
+102 s (0.86) (`local/bench/r3600/r013-*.json` on the reference host).
++
+Where it came from (`JIT.adoc` "Fast-forward"): the engine notices a loop that repeats
+exactly, such as IRIX's idle loop, and skips whole passes of it up to the next event, with
+the same result; host-parallel CPUs (`--parallel`) answer more device reads without
+synchronizing; and blocks are translated after 128 uses instead of 64.
+* **Benchmarks** (`DEVELOPMENT.adoc` "Benchmarks"): eight- and sixteen-CPU workloads
+  (`boot8`, `cpu8`, `reboot8`, `prom16`, `boot16`, `cpu16`, `reboot16`), and notes on
+  running several at once.
+
+Systems installed with 0.1 to 0.1.2 keep working unchanged, and snapshots taken with 0.1.2
+load (checked with one CPU, two CPUs, and two nodes of two).
+
+== Build
+
+As 0.1 (`RELEASE-NOTES-0.1.adoc` "Build"): tag `v0.1.3`, Debian 13 on the reference host,
+Clang 19.1.7 (`scripts/build-pgo.sh`) and GCC 14.2, CMake 3.31, no third-party dependencies.
+
+== How it was checked
+
+* `ctest` on the `dev`, `gcc`, `asan`, and `tsan` presets: all suites pass, with new tests
+  for routers, vector routes, two modules, link resets, and the module NICs, each also
+  checked by breaking what it tests and seeing it fail (`MULTINODE.adoc` "Progress").
+* Benchmark workloads: the one-, two-, and four-CPU digests are 0.1.2's, except the two-node
+  `boot4` and `reboot4`, changed by the link reset (above). The eight- and sixteen-CPU
+  workloads give identical digests and same-cycle state on tier 1, tier 0, and the reference
+  interpreter (`boot16` and `reboot16`, which take more than an hour there, on tier 1 only).
+* Installation from blank with the release's code (`scripts/rc-ip27-demo.py --tap uv0`): PROM
+  log set up, five discs installed with the ssh server, cold boot, console and telnet
+  logins, the keyswitch shutdown and power-off, a file kept across it, `sshd` running after
+  the next cold boot, and `shutdown -i0`, in 0.28 hours of host time; no core dumps.
+* The same freshly installed disk booted as a rack module (`USING.adoc` "A rack module",
+  `--parallel`): "8 CPUs on 4 nodes found", the PROM's new-board notices, IRIX to `login:`
+  with eight processors, both routers and four Hubs in `hinv -v`, and `shutdown -i0`.
+
+== Known limits
+
+As 0.1.2 (`USING.adoc` "Known limits"), and for rack modules:
+
+* IRIX warns "Cannot read router nic in module N, slot rM" for every router at boot: in the
+  model one node's read of a router's NIC is cut off by another's. It is harmless; what keeps
+  them apart on hardware is not known yet (`MULTINODE.adoc` "Progress").
+* Router cabling, the router board's NIC, and r2's slot number are hypotheses (above).
+* Sixteen CPUs run slower than real time on the reference host, even with `--parallel`.
+* Larger configurations (more than two modules, Cray Routers, meta-routers) are not built.

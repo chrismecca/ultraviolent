@@ -14,7 +14,12 @@ module, with four routers in a square (and optional Xpress links), and IRIX boot
 reboots on sixteen CPUs, with the PROM and a sixteen-CPU workload identical on all three
 engines. Of the open items after N3, three are closed (2026-11-20: POD `pcfg`, routers in
 `hinv -v`, rack module serial numbers); IRIX's "Cannot read router nic" waits on a capture
-from a real Onyx2 rack. Next: see Next task.
+from a real Onyx2 rack. **Release 0.1.3** (the user, 2026-11-23: "lets do 1 and table 2 ...
+its still on the list though"; `doc/RELEASE-NOTES-0.1.3.adoc`): rack modules and the speed
+since 0.1.2, checked by the four test presets, a fresh install from blank (0.28 h, every
+check true), the installed disk booted as an eight-CPU rack, and snapshots from 0.1.2. The
+user pushes and tags `v0.1.3`. IP35 / Origin 3000 (ROADMAP) is tabled, not dropped: it needs
+evidence first (an IP35 PROM image or a machine to observe). Next: see Next task.
 
 Before it, SMP IP27 (below), Usable VM and releases 0.1.0-0.1.2, and tier-1 speed (Next task).
 
@@ -2524,4 +2529,29 @@ Unknowns: what separates those accesses on hardware; a rack midplane NIC's name 
   number; whether a real rack numbers r2 Slot 3 in `hinv`.
 Best checkpoint: IRIX to `login:` on sixteen CPUs (`boot16`, 24fb9cf and this change).
 Next step: the Onyx2 capture when it comes (router NIC); otherwise the user's next milestone.
+----
+
+----
+Date: 2026-11-23
+Milestone: release 0.1.3 (multi-node done; the user chose a release, IP35 tabled)
+Hypothesis: the rack work and the speed since 0.1.2 are ready to release as they stand.
+Evidence: PGO builds of 0.1.2 (4603dd6) and HEAD measured side by side
+  (`local/bench/r3600/r013-*.json`); `local/release-check-013` (install from blank) and
+  `local/release-check-013-rack` (the same disk as an eight-CPU rack).
+Changed: RELEASE-NOTES-0.1.3.adoc; USING.adoc "A rack module" (per-node flash copies, the
+  PROM's `update`, host memory) and known limits; README.
+Tests: dev, gcc, asan, tsan green; `ip27.rack.module_nics` fails with the rack MODULEID NIC
+  removed (mutation) and passes without.
+Newly proven: one CPU `boot` 1.10x 0.1.2 (others 1.00x, digests equal); `--parallel`
+  `boot2`/`reboot2`/`boot4`/`reboot4` 1.92-2.07x; eight CPUs boot in 65 s (1.32x real
+  time), sixteen in 102 s (0.86x); snapshots saved by 0.1.2 (one CPU, two CPUs, two nodes
+  of two) load and run.
+Disproven: that a deskside-installed machine boots as a rack as it stands: with only n1's
+  flash, the other nodes' blank PROM logs give "Boards in same module show different
+  moduleids" (the PROM log holds the module ID); with a copy of flash.bin per node it boots,
+  after the PROM's new-board notices (`update`).
+Unknowns: as before (the router NIC, pending the Onyx2 capture).
+Best checkpoint: local/release-check-013 (install from blank with the 0.1.3 code).
+Next step: the user pushes `main` and tags `v0.1.3`; then the Onyx2 capture when it comes,
+  or the user's next milestone (IP35 tabled until there is evidence).
 ----

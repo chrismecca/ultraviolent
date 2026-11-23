@@ -169,6 +169,25 @@ when a key was pressed on the console; if a stop takes long, `tmux attach -t iri
 Enter.
 * **Two CPUs:** `scripts/boot.sh local/vm --cpus 2 --parallel`, each CPU on its own host
   thread. Changing the count between boots is like adding or removing a CPU.
+* **A rack module** (`doc/MULTINODE.adoc`): the same disk boots on four node boards of two
+  CPUs joined by two routers, or on two modules of four (sixteen CPUs, `--nodes 8`). Each
+  node board has its own flash PROM, whose log holds its module number, so first give every
+  node a copy of the machine's (otherwise the PROM stops with "Boards in same module show
+  different moduleids"):
++
+----
+for n in 1 2 3; do cp local/vm/flash.bin local/vm/flash$n.bin; done
+scripts/boot.sh local/vm --module rack --nodes 4 --cpus 2 --parallel \
+    --flash local/vm/flash1.bin --flash local/vm/flash2.bin --flash local/vm/flash3.bin
+----
++
+The first boot in a new configuration lists the boards as new ("Please use the 'update'
+command"): choose 5 (Command Monitor), type `update`, then `exit` and 1, as a real
+machine's operator would after moving boards; moving back to the deskside needs the same.
+IRIX warns "Cannot read router nic" for each router (harmless; `doc/MULTINODE.adoc`). On
+the reference host (six cores) eight CPUs boot to `login:` in about a minute and sixteen in
+under two; give the machine about 5 GB of host memory for eight CPUs and 9 GB for
+sixteen.
 * **Ctrl-] commands:** `off` turns the keyswitch off (above), `q` stops the machine at
   once, `cdrom FILE` inserts a disc image, `eject` empties the drive, `?` lists them. Every
   other key, Ctrl-C included, goes to the guest.
@@ -258,8 +277,8 @@ are for experiments; the disk, NVRAM, and flash files are the machine's lasting 
 * One system disk and one CD-ROM drive.
 * Two CPUs on one node board. Two node boards (`--nodes 2`) boot, with an "Error in
   ust_change" message from IRIX (`STATUS.adoc`). Rack modules (`--module rack --nodes 1-8`,
-  two modules past four nodes) boot IRIX on up to sixteen CPUs, but slowly on a typical host,
-  and IRIX warns that it cannot read the routers' and modules' NICs (`doc/MULTINODE.adoc`).
+  two modules past four nodes) boot IRIX on up to sixteen CPUs, slower than real time past
+  eight, and IRIX warns that it cannot read the routers' NICs (`doc/MULTINODE.adoc`).
 * IRIX prints "Inventory table ID value is 0", "Some CPUs have old firmware", and, with one
   CPU, "update_klcfg_cpuinfo: Couldn't find my structure" at boot; all are harmless. With
   two CPUs, the keyswitch's power-off ends with "WARNING: llp_pfail_barrier: expired", also
