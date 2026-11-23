@@ -123,8 +123,8 @@ void usage() {
         "0's block statistics at the end of the run. --tier0-cache-entries N sizes its\n"
         "block cache (a power of two; default 32768). --tier1-threshold N translates a block\n"
         "to native code after N cache hits (0: on first execution). --tier2-threshold N|off\n"
-        "translates a tier-1 region again, optimized, after its first block's Nth entry (0:\n"
-        "every region at once; doc/TIER2.adoc).\n"
+        "translates a tier-1 region again, optimized, after its first block's Nth entry\n"
+        "(default 10000; 0: every region at once; doc/TIER2.adoc).\n"
         "--cpus 2 puts a second CPU in the node's slice B (default 1, doc/SMP.adoc); the\n"
         "CPUs take turns, the one behind running until it is --cpu-slice cycles ahead\n"
         "(default 180, 1 us at 180 MHz; 1 alternates every cycle). --cycles counts each\n"
@@ -903,10 +903,12 @@ int main(int argc, char** argv) {
                          static_cast<unsigned long long>(n.native_operations),
                          static_cast<unsigned long long>(n.helper_operations));
             std::fprintf(stderr,
-                         "tier2: %llu regions (%llu blocks, %llu homes), %llu native bytes\n",
+                         "tier2: %llu regions (%llu blocks, %llu access groups of "
+                         "%llu accesses), %llu native bytes\n",
                          static_cast<unsigned long long>(n.optimized_regions),
                          static_cast<unsigned long long>(n.optimized_blocks),
-                         static_cast<unsigned long long>(n.optimized_homes),
+                         static_cast<unsigned long long>(n.optimized_groups),
+                         static_cast<unsigned long long>(n.optimized_grouped),
                          static_cast<unsigned long long>(n.optimized_bytes));
         }
     }

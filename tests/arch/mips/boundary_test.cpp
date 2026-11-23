@@ -258,4 +258,34 @@ const test::Registration tier1_interrupt_from_access{
         t.check_equal(s.cpu.cycles(), std::uint64_t{3});
     }};
 
+// Tier 2 (TIER2.adoc "T3"): a block entered from its region skips its own pending-exception
+// check where only a helper could have raised one, and the helper is then checked after.
+// Here the helper is the last operation of its block, a load in a branch's delay slot that
+// reaches a device which raises an interrupt; the branch target is the next block of the
+// region. The interrupt is taken before it, with EPC the target.
+const test::Registration tier2_interrupt_from_last_access{
+    "mips.tier2.interrupt_raised_by_a_block's_last_access", [](test::Context& t) {
+        System s;
+        Device device;
+        attach(s, device);
+        device.on_access = [&] { s.cpu.set_interrupt_level(0, true); };
+        s.set(t0, kseg1(device_base));
+        s.load(System::code, {nop(), beq(zero, zero, 8), lw(t1, 0, t0), nop(),
+                              addiu(t2, zero, 1), nop(), beq(zero, zero, -4), nop()});
+        s.start_kernel(kseg0(System::code), status::kx | status::ie | (0x04u << status::im_shift));
+        const std::unique_ptr<NativeCode> native = make_native_code(s.cpu);
+        BlockInterpreter engine{s.cpu};
+        engine.set_native_code(native.get());
+        engine.set_native_threshold(0);
+        engine.set_tier2_threshold(0);
+        engine.set_region_joins(BlockInterpreter::RegionJoins::reachable);
+        engine.run_until(20);
+        t.check_equal(s.exception_code(), code_of(ExceptionCode::interrupt));
+        t.check_equal(s.cpu.dmfc0(cp0::epc), kseg0(System::code) + 0x10);
+        t.check_equal(s.gpr(t2), std::uint64_t{0});
+#ifdef ULTRAVIOLENT_TIER1
+        t.check(native->statistics().optimized_regions > 0, "tier 2 ran");
+#endif
+    }};
+
 } // namespace

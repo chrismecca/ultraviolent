@@ -64,7 +64,8 @@ R1x000 architectural state
     |
     +-- reference interpreter
     +-- tier-0 decoded blocks
-    +-- tier-1 native code     [designed: JIT.adoc]
+    +-- tier-1 native code     [JIT.adoc]
+    +-- tier-2 hot regions     [TIER2.adoc: tier 1's emitter, region-wide policies]
     +-- optimizing JIT         [future]
 ----
 

@@ -1,8 +1,9 @@
 = Tier 2: Optimizing Translation of Hot Regions
 
-Status: started 2026-11-23 (the user: "start tier2 ... execute ... think about your code from
-an architecture perspective as well"). ROADMAP "JIT": "optional optimizing tier later";
-JIT.adoc's tier 1 is the base. Plan and progress in this document; STATUS points here.
+Status: started and ended 2026-11-23 (the user: "start tier2 ... execute ... think about
+your code from an architecture perspective as well"), at its stop rule after T4 ("Progress").
+ROADMAP "JIT": "optional optimizing tier later"; JIT.adoc's tier 1 is the base. Tier 2 is on
+by default (`--tier2-threshold 10000`).
 
 == Why: what tier 1's code spends its time on
 
@@ -71,13 +72,13 @@ tier 2: plan the region (the same emitter, run once to look), then emit it with 
 
 * **One source of semantics, one emitter.** Tier 2 emits through tier 1's EmitBuilder from
   the operations in `operations.hpp`, with the same host page path, held reads, second way,
-  FPU sequences, side exits, and slow paths. What differs is policy: which guest values stay
-  in host registers, which boundary checks are emitted, which page tests are shared.
+  FPU sequences, side exits, and slow paths. What differs is policy: which boundary checks
+  are emitted (T3) and which host page tests are shared (T4).
 * **Planning.** The planning pass runs the emitter over the region into a scratch assembler
-  and records what tier 2 decides from: the blocks the region joins and the edges between
-  them, each block's guest register reads and writes, and the base and offset of each
-  access. The plan is therefore exactly what emission will see, with no second model of the
-  semantics to keep in step.
+  and records what tier 2 decides from (`PlanRecord`): the blocks the region joins, each
+  access through a guest register plus a constant, each guest register write, each helper,
+  and the most pool registers one operation holds. The plan is therefore exactly what
+  emission will see, with no second model of the semantics to keep in step.
 * **Decided 2026-11-23, and why: no IR yet.** The first design (above this revision) recorded
   an IR through a third builder and lowered it with a new x86-64 emitter. That emitter would
   have repeated every builder primitive's emission (arithmetic, compares, overflow, multiply
@@ -110,12 +111,12 @@ T1. Tiering: the tier-up exit, the engine's retranslation, `--tier2-threshold`, 
     tier-2 thresholds 0 and 1,000. Speed not a gate.
 
 T2. Guest registers across the region. Gate: speed (`cpu`, `boot`, `fs`, `prom`) and all T1
-    gates.
+    gates. (Measured, then removed: "Progress".)
 
 T3. Boundary checks at entries and back-edges only. Gates as T2, plus exact stop cycles
-    under every run limit (the boundary tests with limits one cycle apart).
+    under every run limit (the differential suites stop at random points).
 
-T4. Shared host page tests and CPU fields in registers. Gates as T2.
+T4. Shared host page tests. Gates as T2, and mutation checks.
 
 Stop rule: a stage that gains less than 3% on every workload, after its gates, ends the
 milestone after it unless a lever still open has a measured upper bound above that; what
@@ -135,11 +136,11 @@ remains is written down as measured. (T2 and T3 each gained less; T4's upper bou
   the run identical to the reference across the switch). All presets; digests of `prom`,
   `boot`, `cpu`, `fs` identical at tier-2 thresholds 0 and 1,000, speed unchanged
   (0.98-1.05x, noise), as expected before T2.
-* **T2 and T3 (2026-11-23): correct, and nearly no faster.** T2: a planning pass (the
-  region emitted as tier 1 would emit it, into a scratch assembler, counting each guest
-  value's reads and writes and the most pool registers one operation holds); the most used
-  guest values (up to four, as many as that peak leaves free) live in home registers for the
-  whole region (`Pinning`, `GuestRegisters` homes: loaded where dispatch enters a block,
+* **T2 and T3 (2026-11-23): correct, and nearly no faster.** T2 (removed after T4, below):
+  a planning pass (the region emitted as tier 1 would emit it, into a scratch assembler,
+  counting each guest value's reads and writes and the most pool registers one operation
+  holds); the most used guest values (up to four, as many as that peak leaves free) lived in
+  home registers for the whole region (`GuestRegisters` homes: loaded where dispatch enters a block,
   kept across the region's edges, written back before a helper, a side exit, or leaving; a
   write within an operation goes to a temporary and moves home when it ends, so that a value
   the operation read stays intact, as JALR with rd = rs needs). T3: each tier-2 block has two
@@ -161,8 +162,80 @@ remains is written down as measured. (T2 and T3 each gained less; T4's upper bou
   into a temporary instead of a copy and an ADD (every address, ADDIU). Release, best of 3,
   tier 2 off: `prom` 1.01x, `boot` 1.01x, `cpu` 1.03x, `fs` 1.01x; every digest equal; LEA
   with an index added to the encoding check against GNU as.
-* **Next: T4**, the lever that removes instructions where they are: shared host page tests.
-  Upper bound from the profile (the share of memory-operation samples whose access shares
-  its base register, unchanged, with an earlier access of its block, times the two thirds of
-  a dozen instructions a shared test saves): `cpu` about 15% of host time, `fs` and `boot`
-  2-3%.
+* **T4 (2026-11-23): shared host page tests.** Upper bound first, from the profile (the
+  share of memory-operation samples whose access shares its base register, unchanged, with
+  an earlier access of its block, times the two thirds of a dozen instructions a shared test
+  saves): `cpu` about 15% of host time, `fs` and `boot` 2-3%.
+  - *Groups* (`form_groups`, from the planning pass's events): per block, consecutive
+    accesses through one base (a guest register plus a constant, `EmitBuilder::Value`'s
+    `base` and `offset`, which `add` keeps for an address), with no write to the base and no
+    helper between them; accesses through other bases in between are left alone. Members
+    whose distance from the widest access is not a multiple of their size are left out; two
+    or more members, within 4 KiB. A group's register (`group_register`, r14, callee-saved so
+    that a member's slow path keeps it) leaves the pool only where the planning pass's peak
+    plus a margin of two (a written guest value's old register, at most HI and LO, depends on
+    what the cache holds) leaves it free: measured necessary (`random_programs` ran the pool
+    dry without it).
+  - *The group's test* (`EmitBuilder::group_check`), at its first member: base + [low, high)
+    in one page; the widest member's address aligned to its size, and its page in the host
+    page cache in this context (the store tag when any member stores), with the second way
+    swapped in as tier 1 does (`emit_group_second_way`). The page's addend goes to r14, or 0.
+  - *A member*: TEST r14 and a branch, then the memory instruction through r14 and its own
+    address. With 0 (the group's test failed: a straddled page, a page not cached, a
+    misaligned base) each member takes tier 1's own test out of line
+    (`emit_grouped_alternative`) with the temporaries, second way, held read, and slow path it
+    would have inline; a straddling group is slower, never wrong. Why the addend stays right
+    between members: only a helper (no group spans one) or a TLB write, a state change that
+    ends the block, changes what a host page holds for a virtual page; another access's slow
+    path fills the host page cache but leaves every mapping as it was.
+  - Tests: `mips.tier2.access_groups` (a frame of six stores and four loads walking across a
+    page boundary in kseg0), `.mapped` (the same in kseg2, its two pages mapped to frames that
+    are not adjacent, where an access across the boundary through the first page's addend
+    would reach the wrong memory: in kseg0 host memory happens to follow), `.base_written`
+    (the base moved to the next, non-adjacent page between accesses, in a loop so that the
+    pages are cached and the group's test passes); and the 65 tier-2 suites (random memory
+    programs on several bases, a code page whose store tag refuses, uncached space).
+    Mutation checks: no page-span test (fails `.mapped`), members that ignore a failed group
+    (crashes the suite), writes to the base kept in a group (fails `.base_written`), a second
+    way that never misses (crashes the suite).
+  - Ablation (release, best of 2, tier 2 at 10,000 entries): without T2's homes `prom` 1.01x,
+    `boot` 0.99x, `cpu` 1.01x, `fs` 1.00x: the homes gained nothing and were removed
+    (`GuestRegisters` is tier 1's again, with the planning record and the group register);
+    without T3's edge checks `cpu` 0.97x, the rest 1.00-1.01x: kept.
+  - Threshold (release, best of 2 or 3, against tier 2 off): 1,000 entries `prom` 1.00x,
+    `boot` 0.98x, `cpu` 1.14x, `fs` 0.96x; 10,000: 0.99x, 1.01x, 1.12x, 0.98x; 100,000: 0.99x,
+    1.01x, 1.09x, 0.99x. **Default 10,000.**
+  - Result, PGO, best of 3 (`local/bench/t2/pgo-t4-10000.json`), against tier 2 off and
+    against 0.1.3 (`local/bench/r3600/r013-tier1.json`): `prom` 1.01x / 1.01x, `boot` 1.00x /
+    1.01x, `cpu` 1.13x / 1.17x (4.98 times real time), `fs` 0.99x / 1.00x. Every digest
+    equal: the eleven one- to four-CPU workloads with tier 2 on (release, one run: `cpu2`
+    1.13x, `mix2` 1.05-1.08x, `cpu4` 1.06x, `reboot2` 1.05x, the boots 0.99-1.02x).
+    `--parallel` (PGO, best of 2): `cpu2` 1.13x, `mix2` 1.05x, `boot4` 1.00x, its output the
+    same.
+* **Found by `boot8` (2026-11-23), before the commit: T3 skipped an interrupt.** With
+  tier 2 on, `boot8`'s digest changed (4.5 million cycles more) while the eleven one- to
+  four-CPU digests and `cpu8` did not. T3's argument was that the pending-exception flag
+  changes only in a helper, which is checked after; but tier 1 checks after a helper only
+  when its operation is not the block's last, leaving the next block's entry check to catch
+  the rest. A load in a delay slot whose slow path reaches a device that raises an interrupt
+  is such a last operation, and T3's forward edge entered the next block without the check
+  (the rack boot's router and MicroLAN traffic). Now, in tier 2, a helper that is its
+  block's last operation is followed by the check as well (`call_operation`'s
+  `edge_checks`). Test `mips.tier2.interrupt_raised_by_a_block's_last_access` (an interrupt
+  from a device read in a branch's delay slot, the target joined in the region: taken before
+  the target runs; without the check the target runs first). `boot8` then identical
+  (`74ef1eba2f27f541`). The differential suites had not reached this shape: a device that
+  raises an interrupt, in a delay slot, before a joined block.
+* **End of the milestone (2026-11-23), at its stop rule.** T4 was the last lever with a
+  measured upper bound above 3%. What tier 2 leaves, measured: code that repeats work where
+  the CPU spends little else (`cpu`, an interpreter's loop: function prologues and epilogues
+  of a dozen stores and loads through the stack pointer) gains 13-17%; code whose time is in
+  cold paths gains nothing, because tier 2 does not touch them: in `boot` the engine's loop
+  and tier 0 (cold code; 7.1 million blocks built, mean reuse 5) are 15-20% of host time, in
+  `fs` the host kernel loading the 560 MB snapshot 15%. Further levers, not built, with their
+  measured or estimated size: a cheaper per-access test for accesses tier 2 cannot group
+  (the remaining dozen instructions each; nothing found under 10 that keeps every test);
+  blocks shared across address spaces where the same frames are mapped (exec-heavy `boot`'s
+  rebuilt blocks; an ASID-independent block key would need a TLB lookup at entry); and for
+  many CPUs in the reference schedule, the cost of switching CPUs every 180 cycles, which is
+  not code quality at all.

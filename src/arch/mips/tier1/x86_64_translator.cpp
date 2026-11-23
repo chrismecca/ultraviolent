@@ -31,7 +31,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <numeric>
 #include <optional>
 #include <span>
 #include <utility>
@@ -138,28 +137,58 @@ constexpr unsigned guest_hi = 32;
 constexpr unsigned guest_lo = 33;
 constexpr unsigned guest_count = 34;
 
-// What tier 2's planning pass counts (TIER2.adoc "T2"): each guest value's reads and writes
-// in the region, and whether it is written.
-struct GuestUse {
-    std::array<std::uint32_t, guest_count> uses{};
-    std::array<bool, guest_count> written{};
-    // The most pool registers one operation held at once (its temporaries and the guest
-    // values it read or replaced): what pinning must leave free.
-    std::size_t peak{};
+// Tier 2's shared host page tests (TIER2.adoc "T4"). The planning pass records, block by
+// block, each access through a guest register plus a constant, each guest register write,
+// and each helper; accesses through one base, with no write to it and no helper between them,
+// form a group whose page is tested once.
+struct PlanEvent {
+    enum class Kind : std::uint8_t { block, access, write, helper };
+    Kind kind;
+    unsigned guest{};
+    std::uint64_t pc{};
+    std::int32_t offset{};
+    std::uint8_t size{};
+    bool store{};
 };
+// A group: base + [low, high) lies in one page, and every member is naturally aligned when the
+// access at base + reference is aligned to `widest` bytes (each member's distance from it is
+// a multiple of its size). `store`: some member stores (the store tag is tested).
+struct AccessGroup {
+    unsigned guest;
+    std::int32_t low;
+    std::int32_t high;
+    std::int32_t reference;
+    std::uint8_t widest;
+    bool store;
+};
+struct GroupMember {
+    std::size_t block;
+    std::uint64_t pc;
+    std::size_t group;
+    bool first;
+};
+struct AccessGroups {
+    std::vector<AccessGroup> groups;
+    std::vector<GroupMember> members;
+    [[nodiscard]] const GroupMember* member(std::size_t block, std::uint64_t pc) const {
+        for (const GroupMember& m : members) {
+            if (m.block == block && m.pc == pc) {
+                return &m;
+            }
+        }
+        return nullptr;
+    }
+};
+// The register a group's addend lives in while its members run: callee-saved, so that a
+// member's slow path (a helper call) keeps it; never a temporary in a block with groups.
+constexpr Reg group_register = Reg::r14;
 
-// Tier 2's region-wide choice (TIER2.adoc "T2"): guest registers that live in a home host
-// register at every boundary of the region, and which of them the region writes.
-struct Pinning {
-    // Reg::rsp: not pinned.
-    std::array<Reg, guest_count> home{};
-    std::array<bool, guest_count> written{};
-    Pinning() {
-        home.fill(Reg::rsp);
-    }
-    [[nodiscard]] bool pinned(unsigned g) const {
-        return home[g] != Reg::rsp;
-    }
+// What tier 2's planning pass records (TIER2.adoc "T4"): the events access groups are formed
+// from, and the most pool registers one operation held at once (its temporaries and the guest
+// values it read or replaced), which decides whether the groups' register can leave the pool.
+struct PlanRecord {
+    std::vector<PlanEvent> events;
+    std::size_t peak{};
 };
 
 class GuestRegisters {
@@ -171,33 +200,16 @@ class GuestRegisters {
         Reg reg{};
         std::uint64_t constant{};
         std::size_t last_use{};
-        // Tier 2: the host register this guest value lives in at every boundary (TIER2.adoc
-        // "T2"); Reg::rsp when it has none. Within an operation a write goes to a temporary
-        // (a value the operation read must stay intact), moved home when the operation ends.
-        Reg home{Reg::rsp};
     };
     // Where every guest value is at one point of the translation.
     using State = std::array<Slot, guest_count>;
 
-    // With `pinning` (tier 2), a block of a region: pinned values start in their homes, dirty
-    // when the region writes them anywhere (a superset of those that differ from the Cpu, so
-    // writing them back is always right). `use`, when given, counts each guest value's reads
-    // and writes (tier 2's planning pass).
-    GuestRegisters(Assembler& a, const Cpu::NativeLayout& layout, const Pinning* pinning = nullptr,
-                   GuestUse* use = nullptr)
-        : a_{a}, layout_{layout}, use_{use} {
+    // `plan`, when given, records guest writes and the operations' register peak (tier 2's
+    // planning pass).
+    GuestRegisters(Assembler& a, const Cpu::NativeLayout& layout, PlanRecord* plan = nullptr)
+        : a_{a}, layout_{layout}, plan_{plan} {
         for (const Reg r : pool) {
             hosts_[static_cast<unsigned>(r)].use = Use::free;
-        }
-        if (pinning != nullptr) {
-            for (unsigned g = 0; g < guest_count; ++g) {
-                if (pinning->pinned(g)) {
-                    const Reg home = pinning->home[g];
-                    guests_[g] = {.where = Where::host, .dirty = pinning->written[g], .reg = home,
-                                  .home = home};
-                    hosts_[static_cast<unsigned>(home)] = {.use = Use::home, .guest = g};
-                }
-            }
         }
     }
 
@@ -209,19 +221,11 @@ class GuestRegisters {
     }
 
     // An operation's values live until end_operation: host registers it read or released stay
-    // untouched until then, and its temporaries are freed. A pinned value written during the
-    // operation moves to its home here.
+    // untouched until then, and its temporaries are freed.
     void begin_operation(std::size_t index) {
         operation_ = index;
     }
     void end_operation() {
-        for (unsigned g = 0; g < guest_count; ++g) {
-            Slot& s = guests_[g];
-            if (s.home != Reg::rsp && s.where == Where::host && s.reg != s.home) {
-                a_.mov(s.home, s.reg);
-                s.reg = s.home;
-            }
-        }
         for (Host& h : hosts_) {
             if (h.use == Use::temp || h.use == Use::released) {
                 h.use = Use::free;
@@ -232,22 +236,13 @@ class GuestRegisters {
 
     // The host register holding guest g (not a constant), loaded from the Cpu if needed.
     Reg read(unsigned g) {
-        count(g, false);
         Slot& s = guests_[g];
         invariant(s.where != Where::constant, "a constant guest value is not read from a register");
         if (s.where == Where::cpu) {
-            if (s.home != Reg::rsp) {
-                // Reloaded after a helper: into its home.
-                a_.mov(s.home, Mem{Reg::rbx, offset(g)});
-                s.where = Where::host;
-                s.dirty = false;
-                s.reg = s.home;
-            } else {
-                const Reg r = allocate();
-                a_.mov(r, Mem{Reg::rbx, offset(g)});
-                s = {.where = Where::host, .dirty = false, .reg = r};
-                hosts_[static_cast<unsigned>(r)] = {.use = Use::guest, .guest = g};
-            }
+            const Reg r = allocate();
+            a_.mov(r, Mem{Reg::rbx, offset(g)});
+            s = {.where = Where::host, .dirty = false, .reg = r};
+            hosts_[static_cast<unsigned>(r)] = {.use = Use::guest, .guest = g};
         }
         s.last_use = operation_;
         hosts_[static_cast<unsigned>(s.reg)].pinned = true;
@@ -255,27 +250,18 @@ class GuestRegisters {
         return s.reg;
     }
     void write_constant(unsigned g, std::uint64_t value) {
-        count(g, true);
+        note_write(g);
         release(g);
-        guests_[g].where = Where::constant;
-        guests_[g].dirty = true;
-        guests_[g].constant = value;
-        guests_[g].last_use = operation_;
+        guests_[g] = {.where = Where::constant, .dirty = true, .constant = value,
+                      .last_use = operation_};
     }
-    // `temp` (from temp()) becomes guest g's register (for a pinned value, until the
-    // operation ends).
+    // `temp` (from temp()) becomes guest g's register.
     void write_register(unsigned g, Reg temp) {
-        count(g, true);
+        note_write(g);
         invariant(is_temp(temp), "a guest register takes a temporary");
         release(g);
-        Slot& s = guests_[g];
-        s.where = Where::host;
-        s.dirty = true;
-        s.reg = temp;
-        s.last_use = operation_;
-        if (s.home == Reg::rsp) {
-            hosts_[static_cast<unsigned>(temp)] = {.use = Use::guest, .guest = g, .pinned = true};
-        }
+        guests_[g] = {.where = Where::host, .dirty = true, .reg = temp, .last_use = operation_};
+        hosts_[static_cast<unsigned>(temp)] = {.use = Use::guest, .guest = g, .pinned = true};
     }
     [[nodiscard]] bool is_temp(Reg r) const {
         return hosts_[static_cast<unsigned>(r)].use == Use::temp;
@@ -294,17 +280,14 @@ class GuestRegisters {
     }
 
     // Writes every dirty value back and forgets them all: the Cpu is exact and no host
-    // register holds a guest value (before a helper call, which may read or write any). Pinned
-    // values are reloaded into their homes where next read (read), or at the block's end
-    // (settle).
+    // register holds a guest value (before a helper call, which may read or write any). A
+    // helper also ends an access group's test (T4).
     void flush() {
+        active_group_ = no_group;
         write_back(a_, layout_, guests_);
-        for (unsigned g = 0; g < guest_count; ++g) {
-            const Reg home = guests_[g].home;
-            guests_[g] = {.home = home};
-        }
+        guests_ = {};
         for (const Reg r : pool) {
-            if (hosts_[static_cast<unsigned>(r)].use != Use::home) {
+            if (hosts_[static_cast<unsigned>(r)].use != Use::reserved) {
                 hosts_[static_cast<unsigned>(r)] = {.use = Use::free};
             }
         }
@@ -319,13 +302,11 @@ class GuestRegisters {
                : g == guest_lo ? layout.lo
                                : layout.gpr + 8 * static_cast<std::int32_t>(g);
     }
-    // Emits stores of `state`'s dirty values into the Cpu (uses rcx); with `pinned` false,
-    // only those without a home.
-    static void write_back(Assembler& a, const Cpu::NativeLayout& layout, const State& state,
-                           bool pinned = true) {
+    // Emits stores of `state`'s dirty values into the Cpu (uses rcx).
+    static void write_back(Assembler& a, const Cpu::NativeLayout& layout, const State& state) {
         for (unsigned g = 0; g < guest_count; ++g) {
             const Slot& s = state[g];
-            if (!s.dirty || (!pinned && s.home != Reg::rsp)) {
+            if (!s.dirty) {
                 continue;
             }
             const Mem m{Reg::rbx, offset(layout, g)};
@@ -347,28 +328,24 @@ class GuestRegisters {
             }
         }
     }
-    // Tier 2, where a block's end jumps to another block of the region: every pinned value
-    // brought into its home (loaded after a helper, a constant materialized, or moved), as
-    // the next block expects it. Dirtiness carries over: the next block assumes it.
-    static void settle(Assembler& a, const Cpu::NativeLayout& layout, const State& state) {
-        for (unsigned g = 0; g < guest_count; ++g) {
-            const Slot& s = state[g];
-            if (s.home == Reg::rsp) {
-                continue;
-            }
-            if (s.where == Where::cpu) {
-                a.mov(s.home, Mem{Reg::rbx, offset(layout, g)});
-            } else if (s.where == Where::constant) {
-                a.mov(s.home, s.constant);
-            } else if (s.reg != s.home) {
-                a.mov(s.home, s.reg);
-            }
-        }
+
+    // Tier 2's planning pass, when this is it.
+    [[nodiscard]] PlanRecord* planning() const {
+        return plan_;
     }
-    // Tier 2: whether any value has a home.
-    [[nodiscard]] static bool has_homes(const State& state) {
-        return std::ranges::any_of(state, [](const Slot& s) { return s.home != Reg::rsp; });
+    // Tier 2 (T4): `r` out of the pool for the block (group_register).
+    void reserve(Reg r) {
+        hosts_[static_cast<unsigned>(r)].use = Use::reserved;
     }
+    // The access group whose test has run in this block and still holds (T4): its addend is in
+    // group_register. A helper ends it.
+    [[nodiscard]] std::size_t active_group() const {
+        return active_group_;
+    }
+    void set_active_group(std::size_t g) {
+        active_group_ = g;
+    }
+    static constexpr std::size_t no_group = ~std::size_t{0};
 
     // Every register but rbx, r12, and r15 (the Cpu, the context, the cycle count), rsp, and
     // the scratch registers rax, rcx, and rdx (shift counts, wide constants, and the fixed
@@ -385,8 +362,8 @@ class GuestRegisters {
         guest,
         // Held a guest value this operation replaced; may still be read until it ends.
         released,
-        // A pinned guest value's home (tier 2): never allocated.
-        home,
+        // Tier 2's group_register in a block with access groups (T4): never allocated.
+        reserved,
     };
     struct Host {
         Use use{Use::unavailable};
@@ -394,32 +371,30 @@ class GuestRegisters {
         bool pinned{};
     };
 
+    void note_write(unsigned g) {
+        if (plan_ != nullptr) {
+            plan_->events.push_back({.kind = PlanEvent::Kind::write, .guest = g});
+        }
+    }
     void note_peak() {
-        if (use_ == nullptr) {
+        if (plan_ == nullptr) {
             return;
         }
         std::size_t held = 0;
         for (const Reg r : pool) {
             const Host& h = hosts_[static_cast<unsigned>(r)];
-            held += h.use == Use::temp || h.use == Use::released || h.use == Use::home ||
+            held += h.use == Use::temp || h.use == Use::released ||
                     (h.use == Use::guest && h.pinned);
         }
-        use_->peak = std::max(use_->peak, held);
+        plan_->peak = std::max(plan_->peak, held);
     }
-    void count(unsigned g, bool write) {
-        if (use_ != nullptr) {
-            ++use_->uses[g];
-            use_->written[g] = use_->written[g] || write;
-        }
-    }
-    // Guest g no longer lives in its host register (a home stays its own).
+    // Guest g no longer lives in its host register.
     void release(unsigned g) {
         Slot& s = guests_[g];
-        if (s.where == Where::host && hosts_[static_cast<unsigned>(s.reg)].use != Use::home) {
+        if (s.where == Where::host) {
             hosts_[static_cast<unsigned>(s.reg)].use = Use::released;
         }
-        const Reg home = s.home;
-        s = {.home = home};
+        s = {};
     }
     // A free register, or the least recently used guest register not in use by this operation
     // (written back first when dirty).
@@ -450,7 +425,8 @@ class GuestRegisters {
 
     Assembler& a_;
     const Cpu::NativeLayout& layout_;
-    GuestUse* use_;
+    PlanRecord* plan_;
+    std::size_t active_group_{no_group};
     State guests_{};
     std::array<Host, 16> hosts_{};
     std::size_t operation_{};
@@ -465,6 +441,10 @@ class EmitBuilder {
         bool is_constant{true};
         std::uint64_t constant{};
         Reg reg{Reg::rax};
+        // Where a register value came from, for tier 2's access groups (T4): guest `base` (or
+        // -1) plus `offset`.
+        int base{-1};
+        std::int32_t offset{};
     };
     using Condition = Value; // 0 or 1
     struct Result {
@@ -508,12 +488,100 @@ class EmitBuilder {
         bool store;
     };
 
+    // The memory instruction of a load or store, which a grouped access emits twice (T4): the
+    // load into `reg` (before byte order and extension), or the store of `reg` (already in
+    // memory order, or the value for MOVBE) or of `byte`.
+    struct AccessCode {
+        AccessWidth width;
+        bool store;
+        bool sign_extend;
+        bool movbe;
+        Reg reg;
+        std::optional<std::uint8_t> byte;
+    };
+    static void emit_memory_instruction(Assembler& a, const AccessCode& c, Mem m) {
+        const unsigned bytes = static_cast<unsigned>(byte_count(c.width));
+        if (!c.store) {
+            switch (c.width) {
+            case AccessWidth::bits8:
+                if (c.sign_extend) {
+                    a.movsx_byte(c.reg, m);
+                } else {
+                    a.movzx_byte(c.reg, m);
+                }
+                return;
+            case AccessWidth::bits16:
+                a.movzx_word(c.reg, m);
+                return;
+            case AccessWidth::bits32:
+                if (c.movbe) {
+                    a.movbe(c.reg, m, 4);
+                } else {
+                    a.mov32(c.reg, m);
+                }
+                return;
+            default:
+                if (c.movbe) {
+                    a.movbe(c.reg, m, 8);
+                } else {
+                    a.mov(c.reg, m);
+                }
+                return;
+            }
+        }
+        if (c.width == AccessWidth::bits8) {
+            if (c.byte) {
+                a.mov_byte(m, *c.byte);
+            } else {
+                a.mov_byte(m, c.reg);
+            }
+        } else if (c.movbe) {
+            a.movbe(m, c.reg, bytes);
+        } else if (c.width == AccessWidth::bits16) {
+            a.mov16(m, c.reg);
+        } else if (c.width == AccessWidth::bits32) {
+            a.mov32(m, c.reg);
+        } else {
+            a.mov(m, c.reg);
+        }
+    }
+    // A grouped access's own page test, out of line (T4): taken when its group's test failed
+    // (the addend 0), it is tier 1's (the entry for `address` in `entry`, the tag then the
+    // addend in `tag`, a first-way miss to `second`), then the memory instruction through it at
+    // `rejoin`, and back to `merge`.
+    struct GroupedAccess {
+        Label alternative;
+        Label second;
+        Label rejoin;
+        Label merge;
+        Reg address;
+        Reg entry;
+        Reg tag;
+        AccessCode code;
+    };
+    // A group's test that missed the first way (T4): the second way, with `tag` in rax and the
+    // entry in group_register; a hit swaps the ways and continues at `ok` with the addend in
+    // group_register, a miss at `invalid`, which makes it 0.
+    struct GroupCheck {
+        Label second;
+        Label invalid;
+        Label ok;
+        bool store;
+    };
+    // Tier 2's plan for the block being emitted (T4).
+    struct Groups {
+        const AccessGroups* plan{};
+        std::size_t block{};
+        std::vector<GroupedAccess>* accesses{};
+        std::vector<GroupCheck>* checks{};
+    };
+
     EmitBuilder(Assembler& a, GuestRegisters& registers, const Cpu::NativeLayout& layout,
                 bool movbe, std::uint64_t pc, std::vector<SideExit>& raises,
                 std::vector<SideExit>& slow, std::vector<HeldCheck>& held,
-                std::vector<SecondWay>& second_ways)
+                std::vector<SecondWay>& second_ways, Groups groups)
         : a_{a}, registers_{registers}, layout_{layout}, movbe_{movbe}, pc_{pc}, raises_{raises},
-          slow_{slow}, held_{held}, second_ways_{second_ways} {}
+          slow_{slow}, held_{held}, second_ways_{second_ways}, groups_{groups} {}
 
     [[nodiscard]] std::uint64_t pc() const {
         return pc_;
@@ -553,7 +621,12 @@ class EmitBuilder {
             const Reg r = registers_.temp();
             a_.lea(r, y.is_constant ? Mem{x.reg, static_cast<std::int32_t>(y.constant)}
                                     : Mem{x.reg, 0, y.reg});
-            return reg(r);
+            Value v = reg(r);
+            if (y.is_constant && x.base >= 0 && x.offset == 0) {
+                v.base = x.base;
+                v.offset = static_cast<std::int32_t>(y.constant);
+            }
+            return v;
         }
         return binary(x, y, semantics::DirectBuilder::add, &Assembler::add, &Assembler::add);
     }
@@ -727,17 +800,18 @@ class EmitBuilder {
     // an evicted guest value, which must come before the branch the held path leaves by.
     template <AccessWidth W, bool SignExtend> std::optional<Value> load(Value address) {
         const Reg r = registers_.temp();
+        note_access(address, W, false);
         const Label check = a_.label();
-        const auto [m, va, slow] = host_address(address, byte_count(W), false, check);
         const bool swap = layout_.byte_order == ByteOrder::big;
-        if constexpr (W == AccessWidth::bits8) {
-            if (SignExtend) {
-                a_.movsx_byte(r, m);
-            } else {
-                a_.movzx_byte(r, m);
-            }
-        } else if constexpr (W == AccessWidth::bits16) {
-            a_.movzx_word(r, m);
+        const AccessCode code{.width = W,
+                              .store = false,
+                              .sign_extend = SignExtend,
+                              .movbe = swap && movbe_ && W != AccessWidth::bits8 &&
+                                       W != AccessWidth::bits16,
+                              .reg = r,
+                              .byte = std::nullopt};
+        const auto [va, slow] = memory(address, code, check);
+        if constexpr (W == AccessWidth::bits16) {
             if (swap) {
                 a_.rol16(r, 8);
             }
@@ -745,22 +819,14 @@ class EmitBuilder {
                 a_.movsx_word(r, r);
             }
         } else if constexpr (W == AccessWidth::bits32) {
-            if (swap && movbe_) {
-                a_.movbe(r, m, 4);
-            } else {
-                a_.mov32(r, m);
-                if (swap) {
-                    a_.bswap32(r);
-                }
+            if (swap && !movbe_) {
+                a_.bswap32(r);
             }
             if (SignExtend) {
                 a_.movsxd(r, r);
             }
-        } else if (swap && movbe_) {
-            a_.movbe(r, m, 8);
-        } else {
-            a_.mov(r, m);
-            if (swap) {
+        } else if constexpr (W == AccessWidth::bits64) {
+            if (swap && !movbe_) {
                 a_.bswap64(r);
             }
         }
@@ -770,45 +836,61 @@ class EmitBuilder {
         return reg(r);
     }
     template <AccessWidth W> bool store(Value address, Value value) {
-        const Mem m = host_address(address, byte_count(W), true).bytes;
+        note_access(address, W, true);
         const bool swap = layout_.byte_order == ByteOrder::big;
+        AccessCode code{.width = W,
+                        .store = true,
+                        .sign_extend = false,
+                        .movbe = false,
+                        .reg = Reg::rax,
+                        .byte = std::nullopt};
         if constexpr (W == AccessWidth::bits8) {
             if (value.is_constant) {
-                a_.mov_byte(m, static_cast<std::uint8_t>(value.constant));
+                code.byte = static_cast<std::uint8_t>(value.constant);
             } else {
-                a_.mov_byte(m, value.reg);
+                code.reg = value.reg;
             }
+            memory(address, code);
             return false;
         }
         if (swap && movbe_ && !value.is_constant) {
-            a_.movbe(m, value.reg, byte_count(W));
+            code.movbe = true;
+            code.reg = value.reg;
+            memory(address, code);
             return false;
         }
-        // The value in memory order, in a temporary.
-        const Reg r = registers_.temp();
-        if (value.is_constant) {
-            using Word = UnsignedOf<W>;
-            const auto word = static_cast<Word>(value.constant);
-            a_.mov(r, std::uint64_t{swap ? std::byteswap(word) : word});
-        } else {
-            a_.mov(r, value.reg);
-            if (swap) {
-                if constexpr (W == AccessWidth::bits16) {
-                    a_.rol16(r, 8);
-                } else if constexpr (W == AccessWidth::bits32) {
-                    a_.bswap32(r);
-                } else {
-                    a_.bswap64(r);
+        // The value in memory order, in a temporary, before the access (tier 1 takes it
+        // after the page test, which only orders its instructions).
+        const auto prepare = [&](Reg r) {
+            if (value.is_constant) {
+                using Word = UnsignedOf<W>;
+                const auto word = static_cast<Word>(value.constant);
+                a_.mov(r, std::uint64_t{swap ? std::byteswap(word) : word});
+            } else {
+                a_.mov(r, value.reg);
+                if (swap) {
+                    if constexpr (W == AccessWidth::bits16) {
+                        a_.rol16(r, 8);
+                    } else if constexpr (W == AccessWidth::bits32) {
+                        a_.bswap32(r);
+                    } else {
+                        a_.bswap64(r);
+                    }
                 }
             }
+        };
+        if (grouped(address) == nullptr) {
+            const Mem m = host_address(address, byte_count(W), true).bytes;
+            const Reg r = registers_.temp();
+            prepare(r);
+            code.reg = r;
+            emit_memory_instruction(a_, code, m);
+            return false;
         }
-        if constexpr (W == AccessWidth::bits16) {
-            a_.mov16(m, r);
-        } else if constexpr (W == AccessWidth::bits32) {
-            a_.mov32(m, r);
-        } else {
-            a_.mov(m, r);
-        }
+        const Reg r = registers_.temp();
+        prepare(r);
+        code.reg = r;
+        memory(address, code);
         return false;
     }
 
@@ -1026,7 +1108,9 @@ class EmitBuilder {
         if (s.where == GuestRegisters::Where::constant) {
             return constant(s.constant);
         }
-        return reg(registers_.read(g));
+        Value v = reg(registers_.read(g));
+        v.base = static_cast<int>(g);
+        return v;
     }
     void set_guest(unsigned g, Value v) {
         if (v.is_constant) {
@@ -1059,6 +1143,120 @@ class EmitBuilder {
         Reg address;
         Label slow;
     };
+    struct Accessed {
+        Reg address;
+        Label slow;
+    };
+
+    // Tier 2's planning pass: the access, when its address is a guest register plus a
+    // constant (T4).
+    void note_access(Value address, AccessWidth w, bool store) {
+        PlanRecord* use = registers_.planning();
+        if (use == nullptr || address.is_constant || address.base < 0) {
+            return;
+        }
+        use->events.push_back({.kind = PlanEvent::Kind::access,
+                               .guest = static_cast<unsigned>(address.base),
+                               .pc = pc_,
+                               .offset = address.offset,
+                               .size = static_cast<std::uint8_t>(byte_count(w)),
+                               .store = store});
+    }
+    // The group plan's member for this access, when it is one and can be emitted grouped: its
+    // address is its group's base plus its offset, and its group's test has run in this
+    // block or this is the group's first access, whose base is in a register.
+    const GroupMember* grouped(Value address) const {
+        if (groups_.plan == nullptr || address.is_constant) {
+            return nullptr;
+        }
+        const GroupMember* m = groups_.plan->member(groups_.block, pc_);
+        if (m == nullptr) {
+            return nullptr;
+        }
+        const AccessGroup& g = groups_.plan->groups[m->group];
+        if (address.base != static_cast<int>(g.guest)) {
+            return nullptr;
+        }
+        if (m->first) {
+            const GuestRegisters::Slot& base = registers_.slot(g.guest);
+            return base.where == GuestRegisters::Where::host ? m : nullptr;
+        }
+        return registers_.active_group() == m->group ? m : nullptr;
+    }
+
+    // A load's or store's page test and memory instruction (`code`), tier 1's or, for a
+    // member of an access group, the group's (T4). A load's first-way and second-way misses
+    // go to `miss` (its held-read check).
+    Accessed memory(Value address, const AccessCode& code, std::optional<Label> miss = {}) {
+        const GroupMember* member = grouped(address);
+        if (member == nullptr) {
+            const auto [m, va, slow] = host_address(address, byte_count(code.width), code.store, miss);
+            emit_memory_instruction(a_, code, m);
+            return {va, slow};
+        }
+        const AccessGroup& group = groups_.plan->groups[member->group];
+        if (member->first) {
+            group_check(group, member->group);
+        }
+        // The group's addend, or 0 when its test failed: then this access's own test, out of
+        // line, with the temporaries it would take inline.
+        const Reg va = materialize(address);
+        const Reg entry = registers_.temp();
+        const Reg tag = registers_.temp();
+        const Label slow = a_.label();
+        slow_.push_back({slow, registers_.state()});
+        GroupedAccess access{.alternative = a_.label(),
+                             .second = a_.label(),
+                             .rejoin = a_.label(),
+                             .merge = a_.label(),
+                             .address = va,
+                             .entry = entry,
+                             .tag = tag,
+                             .code = code};
+        a_.test(group_register, group_register);
+        a_.jcc(Cond::e, access.alternative);
+        emit_memory_instruction(a_, code, Mem{group_register, 0, va});
+        a_.bind(access.merge);
+        second_ways_.push_back({access.second, access.rejoin, miss.value_or(slow), tag, entry,
+                                code.store});
+        groups_.accesses->push_back(access);
+        return {va, slow};
+    }
+
+    // A group's page test (T4), at its first access, with the base in its register: base +
+    // [low, high) in one page; the reference address aligned to `widest` and its page in the
+    // host page cache in this context (Cpu::data_page's test, the store tag when the group
+    // stores). The addend into group_register, or 0. Uses rax and rcx.
+    void group_check(const AccessGroup& group, std::size_t index) {
+        const Reg base = registers_.slot(group.guest).reg;
+        const auto entry_bits = static_cast<unsigned>(std::countr_zero(layout_.host_page_size));
+        const GroupCheck check{.second = a_.label(),
+                               .invalid = a_.label(),
+                               .ok = a_.label(),
+                               .store = group.store};
+        a_.lea(Reg::rcx, Mem{base, group.low});
+        a_.lea(Reg::rax, Mem{base, group.high - 1});
+        a_.xor_(Reg::rax, Reg::rcx);
+        a_.shr(Reg::rax, 12);
+        a_.jcc(Cond::ne, check.invalid);
+        a_.lea(Reg::rax, Mem{base, group.reference});
+        a_.mov(group_register, Reg::rax);
+        a_.shr(group_register, static_cast<std::uint8_t>(12 - entry_bits));
+        a_.and_(group_register,
+                static_cast<std::int32_t>((layout_.host_page_count - 1) << entry_bits));
+        a_.and_(Reg::rax, static_cast<std::int32_t>(~std::uint64_t{0xfff} | (group.widest - 1)));
+        a_.or_(Reg::rax, Mem{Reg::rbx, layout_.context_tag});
+        a_.cmp(Reg::rax, Mem{Reg::rbx,
+                             layout_.data_pages + (group.store ? layout_.host_page_store_page
+                                                              : layout_.host_page_page),
+                             group_register});
+        a_.jcc(Cond::ne, check.second);
+        a_.mov(group_register,
+               Mem{Reg::rbx, layout_.data_pages + layout_.host_page_addend, group_register});
+        a_.bind(check.ok);
+        groups_.checks->push_back(check);
+        registers_.set_active_group(index);
+    }
     HostAddress host_address(Value address, std::size_t size, bool store,
                              std::optional<Label> miss = {}) {
         const Reg va = materialize(address);
@@ -1343,6 +1541,7 @@ class EmitBuilder {
     std::vector<SideExit>& slow_;
     std::vector<HeldCheck>& held_;
     std::vector<SecondWay>& second_ways_;
+    Groups groups_;
 };
 
 class X86_64NativeCode final : public NativeCode {
@@ -1659,10 +1858,10 @@ class X86_64NativeCode final : public NativeCode {
         std::vector<RegionBlock> blocks;
         // pcs `more` had no block for.
         std::vector<std::uint64_t> refused;
-        // Tier 2 (TIER2.adoc "T2"): the planning pass counts guest values' uses into `use`;
-        // the emitting pass gives the pinned ones their homes.
-        GuestUse* use{};
-        const Pinning* pinning{};
+        // Tier 2: the planning pass records into `plan`; the emitting pass emits the access
+        // groups formed from it (T4).
+        PlanRecord* plan{};
+        const AccessGroups* groups{};
         // Tier 2 (TIER2.adoc "T3"): blocks are entered from the region after their entry
         // checks, each edge checking for its target instead; `current` is the block being
         // emitted (an edge to it or an earlier one may close a loop).
@@ -1705,32 +1904,10 @@ class X86_64NativeCode final : public NativeCode {
     // check instead, leaving pc and next pc for that block to write where they are observed.
     // After a helper (`helpers`) the translation context is checked first: only a state change,
     // which ends its block, changes it, but the jump needs no such argument.
-    // Tier 2: `state` after GuestRegisters::settle, its pinned values in their homes.
-    static GuestRegisters::State settled(const GuestRegisters::State& state) {
-        GuestRegisters::State out{};
-        for (unsigned g = 0; g < guest_count; ++g) {
-            const auto& s = state[g];
-            if (s.home != Reg::rsp) {
-                out[g] = {.where = GuestRegisters::Where::host,
-                          .dirty = s.where != GuestRegisters::Where::cpu && s.dirty,
-                          .reg = s.home,
-                          .home = s.home};
-            }
-        }
-        return out;
-    }
     void end_block(Assembler& a, Region& region, const GuestRegisters::State& registers,
                    Final final, std::uint64_t pc, std::span<const std::uint64_t> targets,
                    std::size_t ran, const Boundary& b, bool delay_written, bool helpers) {
-        // Tier 2: pinned values stay in their homes for a jump within the region and are
-        // written back before leaving it; after a helper last (Final::cpu: no jump) at once.
-        const bool homes = final != Final::cpu && GuestRegisters::has_homes(registers);
-        if (homes) {
-            GuestRegisters::write_back(a, layout_, registers, false);
-            GuestRegisters::settle(a, layout_, registers);
-        } else {
-            GuestRegisters::write_back(a, layout_, registers);
-        }
+        GuestRegisters::write_back(a, layout_, registers);
         switch (final) {
         case Final::constant:
             a.mov(Reg::rax, pc);
@@ -1825,9 +2002,6 @@ class X86_64NativeCode final : public NativeCode {
                 }
                 a.bind(generic);
             }
-            if (homes) {
-                GuestRegisters::write_back(a, layout_, settled(registers));
-            }
             a.mov(field(layout_.pc), Reg::rax);
             a.lea(Reg::rcx, Mem{Reg::rax, 4});
             a.mov(field(layout_.next_pc), Reg::rcx);
@@ -1876,7 +2050,11 @@ class X86_64NativeCode final : public NativeCode {
         a.jcc_to(Cond::ne, exit(reason));
     }
 
-    void call_operation(Assembler& a, const Block& block, std::size_t index, Boundary b) {
+    // `edge_checks` (tier 2, T3): the next block may be entered from the region without its
+    // own pending-exception check, so a helper that is the block's last operation is checked
+    // here too (a device it reached may have raised an interrupt).
+    void call_operation(Assembler& a, const Block& block, std::size_t index, Boundary b,
+                        bool edge_checks = false) {
         const std::size_t count = block.operations.size();
         materialize(a, block, index, b);
         a.mov(Reg::rdi, Reg::rbx);
@@ -1905,6 +2083,9 @@ class X86_64NativeCode final : public NativeCode {
             a.lea(Reg::rcx, Mem{Reg::r15, static_cast<std::int32_t>(count - index - 1)});
             a.cmp(Reg::rcx, Reg::rax);
             a.jcc_to(Cond::a, exit(BlockExit::run_limit));
+        } else if (edge_checks) {
+            a.cmp_byte(field(layout_.interrupt_check), 0);
+            a.jcc_to(Cond::ne, exit(BlockExit::pending_exception));
         }
     }
 
@@ -1925,6 +2106,51 @@ class X86_64NativeCode final : public NativeCode {
         a.call_to(swap);
         a.mov(w.tag, Mem{Reg::rbx, layout_.data_pages + layout_.host_page_addend, w.entry});
         a.jmp(w.rejoin);
+    }
+
+    // A group's test that missed the first way (T4, EmitBuilder::GroupCheck): the second way,
+    // swapped on a hit as emit_second_way does; otherwise the group's addend is 0, and each of
+    // its accesses takes its own test.
+    void emit_group_second_way(Assembler& a, const EmitBuilder::GroupCheck& c) const {
+        a.bind(c.second);
+        a.cmp(Reg::rax, Mem{Reg::rbx,
+                            layout_.second_data_pages +
+                                (c.store ? layout_.host_page_store_page : layout_.host_page_page),
+                            group_register});
+        a.jcc(Cond::ne, c.invalid);
+        const std::uint64_t swap = swap_ways_[static_cast<std::size_t>(group_register)];
+        invariant(swap != 0, "a swap for the group's register");
+        a.call_to(swap);
+        a.mov(group_register,
+              Mem{Reg::rbx, layout_.data_pages + layout_.host_page_addend, group_register});
+        a.jmp(c.ok);
+        a.bind(c.invalid);
+        a.mov(group_register, std::uint64_t{0});
+        a.jmp(c.ok);
+    }
+
+    // A grouped access whose group's test failed (T4, EmitBuilder::GroupedAccess): its own
+    // test, as EmitBuilder::host_address makes it inline, then its memory instruction, and
+    // back. Misses go to the second way it recorded, and on to its held check or slow path.
+    void emit_grouped_alternative(Assembler& a, const EmitBuilder::GroupedAccess& g) const {
+        const auto entry_bits = static_cast<unsigned>(std::countr_zero(layout_.host_page_size));
+        const std::size_t size = byte_count(g.code.width);
+        a.bind(g.alternative);
+        a.mov(g.entry, g.address);
+        a.shr(g.entry, static_cast<std::uint8_t>(12 - entry_bits));
+        a.and_(g.entry, static_cast<std::int32_t>((layout_.host_page_count - 1) << entry_bits));
+        a.mov(g.tag, g.address);
+        a.and_(g.tag, static_cast<std::int32_t>(~std::uint64_t{0xfff} | (size - 1)));
+        a.or_(g.tag, Mem{Reg::rbx, layout_.context_tag});
+        a.cmp(g.tag, Mem{Reg::rbx,
+                         layout_.data_pages +
+                             (g.code.store ? layout_.host_page_store_page : layout_.host_page_page),
+                         g.entry});
+        a.jcc(Cond::ne, g.second);
+        a.mov(g.tag, Mem{Reg::rbx, layout_.data_pages + layout_.host_page_addend, g.entry});
+        a.bind(g.rejoin);
+        EmitBuilder::emit_memory_instruction(a, g.code, Mem{g.tag, 0, g.address});
+        a.jmp(g.merge);
     }
 
     // A load's held-read check (EmitBuilder::HeldCheck), as Cpu::device_page and device_read
@@ -2014,20 +2240,20 @@ class X86_64NativeCode final : public NativeCode {
         a.jmp(h.done);
     }
 
-    // Tier 2's planning pass (TIER2.adoc "T2"): the region as tier 1 would emit it, into a
-    // scratch assembler, with every guest value's uses counted; its blocks, in emission order,
-    // and the guest values most used, pinned in homes.
+    // Tier 2's planning pass (TIER2.adoc "What tier 2 is"): the region as tier 1 would emit
+    // it, into a scratch assembler, recording its blocks (in emission order) and what access
+    // groups are formed from (T4).
     void plan(const Block& first, BlockSource& more, std::size_t max_blocks,
-              std::vector<const Block*>& blocks, Pinning& pinning) {
+              std::vector<const Block*>& blocks, AccessGroups& groups) {
         Assembler scratch{next_address()};
-        GuestUse use;
+        PlanRecord record;
         Region region{.a = scratch,
                       .more = more,
                       .max_blocks = max_blocks,
                       .blocks = {{&first, scratch.label()}},
                       .refused = {},
-                      .use = &use,
-                      .pinning = nullptr};
+                      .plan = &record,
+                      .groups = nullptr};
         for (std::size_t k = 0; k < region.blocks.size(); ++k) {
             const RegionBlock b = region.blocks[k];
             region.current = k;
@@ -2037,25 +2263,92 @@ class X86_64NativeCode final : public NativeCode {
         for (const RegionBlock& b : region.blocks) {
             blocks.push_back(b.block);
         }
-        std::array<unsigned, guest_count - 1> order{};
-        std::iota(order.begin(), order.end(), 1u);
-        std::ranges::stable_sort(order, [&](unsigned x, unsigned y) { return use.uses[x] > use.uses[y]; });
-        // As many homes as the busiest operation leaves free.
-        const std::size_t room = GuestRegisters::pool.size() - std::min(use.peak, GuestRegisters::pool.size());
-        const std::size_t most = std::min(homes.size(), room);
-        statistics_.optimized_homes += most;
-        std::size_t k = 0;
-        for (const unsigned g : order) {
-            if (k == most || use.uses[g] < 2) {
-                break;
-            }
-            pinning.home[g] = homes[k++];
-            pinning.written[g] = use.written[g];
+        form_groups(record.events, groups);
+        // The groups' register comes out of the pool, so only where the busiest operation
+        // leaves one free. Its peak depends on what the cache holds, which one register fewer
+        // changes: an operation that writes a guest value whose old value is still in a
+        // register keeps that register until it ends (at most two, HI and LO).
+        if (record.peak + peak_margin + 1 > GuestRegisters::pool.size()) {
+            groups = {};
         }
     }
-    // Tier 2's homes, taken out of GuestRegisters' pool for the region (the rest remain for
-    // an operation's temporaries: up to four, a load's or store's).
-    static constexpr std::array<Reg, 4> homes = {Reg::rbp, Reg::r13, Reg::r14, Reg::r11};
+    static constexpr std::size_t peak_margin = 2;
+
+    // Access groups from the planning pass's events (T4): per block, consecutive accesses
+    // through one base with no write to it and no helper between them (accesses through
+    // another base in between are left alone), of two or more members once those whose
+    // distance from the widest access is not a multiple of their size are left out, within
+    // one page's span.
+    static void form_groups(const std::vector<PlanEvent>& events, AccessGroups& out) {
+        out = {};
+        std::size_t block = 0;
+        bool started = false;
+        std::vector<PlanEvent> open;
+        const auto close = [&] {
+            if (open.size() >= 2) {
+                std::uint8_t widest = 0;
+                std::int32_t reference = 0;
+                for (const PlanEvent& e : open) {
+                    if (e.size > widest) {
+                        widest = e.size;
+                        reference = e.offset;
+                    }
+                }
+                std::vector<PlanEvent> kept;
+                for (const PlanEvent& e : open) {
+                    const std::int64_t distance = std::int64_t{e.offset} - reference;
+                    if (distance % e.size == 0) {
+                        kept.push_back(e);
+                    }
+                }
+                std::int64_t low = kept.empty() ? 0 : kept.front().offset;
+                std::int64_t high = low;
+                bool store = false;
+                for (const PlanEvent& e : kept) {
+                    low = std::min<std::int64_t>(low, e.offset);
+                    high = std::max<std::int64_t>(high, std::int64_t{e.offset} + e.size);
+                    store = store || e.store;
+                }
+                if (kept.size() >= 2 && high - low <= 4096 && fits_int32(static_cast<std::uint64_t>(high))) {
+                    const std::size_t index = out.groups.size();
+                    out.groups.push_back({.guest = kept.front().guest,
+                                          .low = static_cast<std::int32_t>(low),
+                                          .high = static_cast<std::int32_t>(high),
+                                          .reference = reference,
+                                          .widest = widest,
+                                          .store = store});
+                    for (std::size_t k = 0; k < kept.size(); ++k) {
+                        out.members.push_back(
+                            {.block = block, .pc = kept[k].pc, .group = index, .first = k == 0});
+                    }
+                }
+            }
+            open.clear();
+        };
+        for (const PlanEvent& e : events) {
+            switch (e.kind) {
+            case PlanEvent::Kind::block:
+                close();
+                block = started ? block + 1 : 0;
+                started = true;
+                break;
+            case PlanEvent::Kind::helper:
+                close();
+                break;
+            case PlanEvent::Kind::write:
+                if (!open.empty() && open.front().guest == e.guest) {
+                    close();
+                }
+                break;
+            case PlanEvent::Kind::access:
+                if (open.empty() || open.front().guest == e.guest) {
+                    open.push_back(e);
+                }
+                break;
+            }
+        }
+        close();
+    }
 
     // The region starting with `first` in the code region, or null when it does not fit.
     const void* emit_region(const Block& first, BlockSource& more,
@@ -2070,20 +2363,22 @@ class X86_64NativeCode final : public NativeCode {
             heat = reinterpret_cast<std::uint64_t>(&heat_[heat_used_++]);
         }
         // Tier 2 plans the region first (TIER2.adoc "What tier 2 is"): which blocks it joins and
-        // which guest values its operations use, from the emitter itself, into a scratch
-        // assembler. Then the region is emitted with those blocks and the plan's homes.
-        Pinning pinning;
+        // its accesses, from the emitter itself, into a scratch assembler. Then the region is
+        // emitted with those blocks and the plan's access groups.
+        AccessGroups groups;
         std::vector<const Block*> planned;
         if (shape.optimize) {
-            plan(first, more, shape.max_blocks, planned, pinning);
+            plan(first, more, shape.max_blocks, planned, groups);
+            statistics_.optimized_groups += groups.groups.size();
+            statistics_.optimized_grouped += groups.members.size();
         }
         Region region{.a = a,
                       .more = more,
                       .max_blocks = shape.optimize ? planned.size() : shape.max_blocks,
                       .blocks = {},
                       .refused = {},
-                      .use = nullptr,
-                      .pinning = shape.optimize ? &pinning : nullptr,
+                      .plan = nullptr,
+                      .groups = shape.optimize ? &groups : nullptr,
                       .edge_checks = shape.optimize};
         if (shape.optimize) {
             for (const Block* b : planned) {
@@ -2100,14 +2395,9 @@ class X86_64NativeCode final : public NativeCode {
         for (std::size_t k = 0; k < region.blocks.size(); ++k) {
             const RegionBlock b = region.blocks[k];
             // Dispatch enters at the start, joins from the region's other blocks (the same
-            // code page) at the label. Tier 2's pinned values are loaded on the way in.
+            // code page) at the label.
             starts.push_back(a.here());
             check_tlb_generation(a, *b.block, BlockExit::completed);
-            for (unsigned g = 0; g < guest_count; ++g) {
-                if (pinning.pinned(g)) {
-                    a.mov(pinning.home[g], field(GuestRegisters::offset(layout_, g)));
-                }
-            }
             region.current = k;
             mark(a, mark_entry);
             native_count += emit_block(a, region, *b.block, b.label, k == 0 ? heat : 0);
@@ -2172,14 +2462,21 @@ class X86_64NativeCode final : public NativeCode {
     // Emits `block` at the current position (its label bound there), with its out-of-line
     // exits after it. Returns how many of its operations are native.
     // `heat`, when not 0, is the address of the region's entry counter (the first block's).
-    // `label` is where the region's other blocks jump in: before the entry checks in tier 1,
+    // `joined_at` is where the region's other blocks jump in: before the entry checks in tier 1,
     // after them in tier 2, where each edge checks for its target (TIER2.adoc "T3").
-    std::uint64_t emit_block(Assembler& a, Region& region, const Block& block, Label label,
+    std::uint64_t emit_block(Assembler& a, Region& region, const Block& block, Label joined_at,
                              std::uint64_t heat) {
-        GuestRegisters registers{a, layout_, region.pinning, region.use};
-        // Tier 2: pinned values may be dirty at entry; an exit before the block runs writes
-        // them back.
-        const GuestRegisters::State entry_state = registers.state();
+        GuestRegisters registers{a, layout_, region.plan};
+        if (region.plan != nullptr) {
+            region.plan->events.push_back({.kind = PlanEvent::Kind::block});
+        }
+        // Tier 2's access groups (T4): their addend's register is no temporary here.
+        const bool grouping = region.groups != nullptr && !region.groups->groups.empty();
+        if (grouping) {
+            registers.reserve(group_register);
+        }
+        std::vector<EmitBuilder::GroupedAccess> grouped_accesses;
+        std::vector<EmitBuilder::GroupCheck> group_checks;
         const auto& operations = block.operations;
         const std::size_t count = operations.size();
         const std::uint64_t start = block.start_pc;
@@ -2234,7 +2531,7 @@ class X86_64NativeCode final : public NativeCode {
         const Label pending = a.label();
         const Label limit = a.label();
         if (!region.edge_checks) {
-            a.bind(label);
+            a.bind(joined_at);
         }
         a.cmp_byte(field(layout_.interrupt_check), 0);
         a.jcc(Cond::ne, pending);
@@ -2250,7 +2547,7 @@ class X86_64NativeCode final : public NativeCode {
             a.jcc(Cond::e, hot);
         }
         if (region.edge_checks) {
-            a.bind(label);
+            a.bind(joined_at);
         }
 
         Boundary boundary{.exact = false};
@@ -2266,7 +2563,19 @@ class X86_64NativeCode final : public NativeCode {
                 std::vector<EmitBuilder::HeldCheck> held;
                 std::vector<EmitBuilder::SecondWay> ways;
                 registers.begin_operation(i);
-                EmitBuilder b{a, registers, layout_, movbe_, pc, raises, slow, held, ways};
+                EmitBuilder b{a,
+                              registers,
+                              layout_,
+                              movbe_,
+                              pc,
+                              raises,
+                              slow,
+                              held,
+                              ways,
+                              {.plan = grouping ? region.groups : nullptr,
+                               .block = region.current,
+                               .accesses = &grouped_accesses,
+                               .checks = &group_checks}};
                 auto result = operations::translate(b, op.opcode, op.instruction);
                 if (!result && op.opcode == DecodedOpcode::cop1 && cpu_.coprocessor_usable(1)) {
                     result = b.cop1(op.instruction, cpu_.fpu_64bit_registers(),
@@ -2361,9 +2670,12 @@ class X86_64NativeCode final : public NativeCode {
             }
             // call_semantics: every guest value into the CPU first.
             helpers = true;
+            if (region.plan != nullptr) {
+                region.plan->events.push_back({.kind = PlanEvent::Kind::helper});
+            }
             registers.flush();
             delay_written = delay_written || boundary.delay_slot;
-            call_operation(a, block, i, boundary);
+            call_operation(a, block, i, boundary, region.edge_checks);
             boundary = {.next_in_memory = false, .delay_slot = false, .exact = true, .cycles = i + 1};
             final = Final::cpu;
             if (!last) {
@@ -2398,7 +2710,6 @@ class X86_64NativeCode final : public NativeCode {
                 continue;
             }
             a.bind(label);
-            GuestRegisters::write_back(a, layout_, entry_state);
             store_constant(a, layout_.pc, start);
             store_constant(a, layout_.next_pc, start + 4);
             a.mov_byte(field(layout_.delay_slot), 0);
@@ -2417,6 +2728,12 @@ class X86_64NativeCode final : public NativeCode {
             call_helper(a, helper_raise);
             a.jmp_to(exit(BlockExit::exception));
         }
+        for (const EmitBuilder::GroupCheck& c : group_checks) {
+            emit_group_second_way(a, c);
+        }
+        for (const EmitBuilder::GroupedAccess& g : grouped_accesses) {
+            emit_grouped_alternative(a, g);
+        }
         for (const EmitBuilder::SecondWay& w : second_ways) {
             emit_second_way(a, w);
         }
@@ -2430,7 +2747,7 @@ class X86_64NativeCode final : public NativeCode {
             // reloaded.
             a.bind(p.exit.label);
             GuestRegisters::write_back(a, layout_, p.exit.registers);
-            call_operation(a, block, p.index, p.boundary);
+            call_operation(a, block, p.index, p.boundary, region.edge_checks);
             a.sub(Reg::r15, static_cast<std::int32_t>(p.index + 1 - p.boundary.cycles));
             if (p.boundary.delay_slot) {
                 a.mov(Reg::rax, field(layout_.pc));

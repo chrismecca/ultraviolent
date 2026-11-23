@@ -1,5 +1,8 @@
 = Tier 1: Native Execution Engine Design
 
+Tier 2, which translates hot regions again from this tier's own emitter, is doc/TIER2.adoc
+(2026-11-23).
+
 Status: accepted (2026-10-10: the builder approach, the J0 scope, an in-house encoder, and
 compile policy left to measurement). J0-J4 are implemented, with dispatch inside native code
 and per-block boundary checks (parts of J5 and J6) moved ahead of J3 on measurement

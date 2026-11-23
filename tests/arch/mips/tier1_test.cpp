@@ -1270,4 +1270,92 @@ const test::Registration tier_up{"mips.tier2.tier_up", [](test::Context& t) {
 #endif
 }};
 
+// Tier 2's shared host page tests (TIER2.adoc "T4"): a loop's stores and loads through one
+// base form a group tested once. Its frame walks across a page boundary (base 0xf80 on, by
+// 0x18: the passes at 0xfe0 and 0xff8 straddle it), so the group's test fails there and each
+// access takes its own test, and passes elsewhere; all against the reference.
+// `mapped`: the frame in kseg2, its two pages mapped by one TLB entry to frames that are not
+// adjacent, so an access across the boundary through the first page's addend would reach the
+// wrong memory (in kseg0 the next frame happens to follow it in host memory as well).
+void access_groups(test::Context& t, bool mapped) {
+    DifferentialWith<Tier2Engine> d;
+    d.max_chunk = 1000;
+    const std::vector<std::uint32_t> loop = {
+        sd(t0, 0, s0),  sd(t1, 8, s0),  sd(t2, 16, s0), sd(t3, 24, s0), sd(t4, 32, s0),
+        sd(t5, 40, s0), ld(a0, 40, s0), ld(a1, 32, s0), ld(a2, 24, s0), ld(a3, 0, s0),
+        daddu(v0, v0, a0), daddu(v0, v0, a1), daddu(v0, v0, a2), daddu(v0, v0, a3),
+        daddiu(s0, s0, 0x18), addiu(s1, s1, -1), bne(s1, zero, -4 * 17), nop(),
+        beq(zero, zero, -4), nop()};
+    for (std::size_t i = 0; i < loop.size(); ++i) {
+        d.load(System::code + 4 * i, kseg0(System::code) + 4 * i, {loop[i]});
+    }
+    constexpr std::uint64_t kseg2_frame = 0xffff'ffff'c001'0000;
+    d.both([&](System& s) {
+        s.start_kernel();
+        std::uint64_t base = kseg0(System::data) + 0xf80;
+        if (mapped) {
+            const std::uint64_t flags =
+                (3u << entry_lo::c_shift) | entry_lo::d | entry_lo::v | entry_lo::g;
+            s.cpu.dmtc0(cp0::entry_hi, kseg2_frame);
+            s.cpu.dmtc0(cp0::entry_lo0, (std::uint64_t{System::data >> 12} << entry_lo::pfn_shift) | flags);
+            s.cpu.dmtc0(cp0::entry_lo1,
+                        (std::uint64_t{(System::data + 0x2000) >> 12} << entry_lo::pfn_shift) | flags);
+            s.cpu.mtc0(cp0::page_mask, 0);
+            s.cpu.mtc0(cp0::index, 1);
+            s.cpu.tlb_write_indexed();
+            base = kseg2_frame + 0xf80;
+        }
+        s.set(s0, base);
+        s.set(s1, 12);
+        for (unsigned r = t0; r <= t5; ++r) {
+            s.set(r, 0x0101'0101'0101'0101 * r);
+        }
+    });
+    t.check(d.run(t, 1000), "matches the reference");
+#ifdef ULTRAVIOLENT_TIER1
+    const NativeStatistics& n = d.engine.native()->statistics();
+    t.check(n.optimized_groups >= 1, "an access group");
+    t.check(n.optimized_grouped >= 10, "the loop's ten accesses grouped");
+#endif
+}
+// A write to a group's base ends the group (the planning pass's rule): here the base moves to
+// the next page, whose frame is not adjacent, between accesses through it. A loop, so that
+// later passes find the pages cached and the group's test passes.
+const test::Registration access_groups_base_written{
+    "mips.tier2.access_groups.base_written", [](test::Context& t) {
+        DifferentialWith<Tier2Engine> d;
+        d.max_chunk = 200;
+        const std::vector<std::uint32_t> code = {
+            sd(t0, 0x10, s0), sd(t1, 0x18, s0), daddiu(s0, s0, 0x1000), sd(t2, 0x10, s0),
+            sd(t3, 0x18, s0), ld(a0, 0x10, s0), ld(a1, 0x18, s0), daddiu(s0, s0, -0x1000),
+            ld(a2, 0x10, s0), ld(a3, 0x18, s0), daddiu(t0, t0, 1), addiu(s1, s1, -1),
+            bne(s1, zero, -4 * 14), nop(), beq(zero, zero, -4), nop()};
+        for (std::size_t i = 0; i < code.size(); ++i) {
+            d.load(System::code + 4 * i, kseg0(System::code) + 4 * i, {code[i]});
+        }
+        constexpr std::uint64_t kseg2_frame = 0xffff'ffff'c001'0000;
+        d.both([&](System& s) {
+            s.start_kernel();
+            const std::uint64_t flags =
+                (3u << entry_lo::c_shift) | entry_lo::d | entry_lo::v | entry_lo::g;
+            s.cpu.dmtc0(cp0::entry_hi, kseg2_frame);
+            s.cpu.dmtc0(cp0::entry_lo0, (std::uint64_t{System::data >> 12} << entry_lo::pfn_shift) | flags);
+            s.cpu.dmtc0(cp0::entry_lo1,
+                        (std::uint64_t{(System::data + 0x2000) >> 12} << entry_lo::pfn_shift) | flags);
+            s.cpu.mtc0(cp0::page_mask, 0);
+            s.cpu.mtc0(cp0::index, 1);
+            s.cpu.tlb_write_indexed();
+            s.set(s0, kseg2_frame);
+            s.set(s1, 6);
+            for (unsigned r = t0; r <= t3; ++r) {
+                s.set(r, 0x0101'0101'0101'0101 * r);
+            }
+        });
+        t.check(d.run(t, 200), "matches the reference");
+    }};
+const test::Registration access_groups_kseg0{"mips.tier2.access_groups",
+                                             [](test::Context& t) { access_groups(t, false); }};
+const test::Registration access_groups_mapped{"mips.tier2.access_groups.mapped",
+                                              [](test::Context& t) { access_groups(t, true); }};
+
 } // namespace

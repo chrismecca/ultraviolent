@@ -146,7 +146,9 @@ class BlockInterpreter {
     // is translated again as a whole, optimized. 0 translates every region with tier 2 at once
     // (tests); tier2_off never.
     static constexpr std::uint64_t tier2_off = ~std::uint64_t{0};
-    static constexpr std::uint64_t default_tier2_threshold = tier2_off;
+    // Measured (TIER2.adoc "T4"): at 1,000 entries `boot` and `fs` lost to translating twice
+    // for little reuse; at 100,000 `cpu` gained less.
+    static constexpr std::uint64_t default_tier2_threshold = 10000;
     void set_tier2_threshold(std::uint64_t entries) {
         tier2_threshold_ = entries;
     }
