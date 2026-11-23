@@ -99,6 +99,7 @@ Start here, in order:
 . `doc/MIPS.adoc`
 . `doc/IR.adoc`
 . `doc/JIT.adoc`
+. `doc/TIER2.adoc`
 . `doc/SMP.adoc`
 . `doc/MULTINODE.adoc`
 . `doc/IP27.adoc`

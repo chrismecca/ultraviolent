@@ -1,0 +1,133 @@
+= Tier 2: Optimizing Translation of Hot Regions
+
+Status: started 2026-11-23 (the user: "start tier2 ... execute ... think about your code from
+an architecture perspective as well"). ROADMAP "JIT": "optional optimizing tier later";
+JIT.adoc's tier 1 is the base. Plan and progress in this document; STATUS points here.
+
+== Why: what tier 1's code spends its time on
+
+Measured 2026-11-23 on the reference host, PGO build at 0.1.3 (`perf record` with the code
+dump of the same run, each sample placed by the dump's marks; `tools/jit_profile.py`).
+
+Host time by where it is spent:
+
+[cols="1,1,1,1",options="header"]
+|===
+| Workload | Generated code | C++ (engine, helpers, devices) | Host kernel
+| `cpu`  | 87% | 7%  | 6%
+| `prom` | 77% | 21% | 2%
+| `boot` | 64% | 33% | 1%
+| `fs`   | 50% | 33% | 17%
+|===
+
+Generated code is concentrated: in `boot` the 1,000 hottest translations take 91% of its
+samples, in `cpu` the ten hottest 80%.
+
+Generated code's samples by role (the dump's marks):
+
+[cols="1,1,1,1,1",options="header"]
+|===
+| Workload | Operations | Block entry checks (incl. dispatch's TLB test) | Block ends | Out of line
+| `cpu`  | 70% | 11% | 19% | 0%
+| `boot` | 59% | 23% | 11% | 8%
+| `fs`   | 59% | 21% | 18% | 2%
+| `prom` | 69% | 10% | 7%  | 14%
+|===
+
+Loads and stores are most of the operations' share (`cpu`: 54% of generated code; their
+address arithmetic, host page test, and the guest registers they read from the CPU), and in
+`prom` DDIVU (17%; the firmware's delay loops).
+
+How blocks are entered (throwaway counters in generated code): `cpu` 473 million block
+entries for 2.9 G cycles (one every six cycles), 77% of them from another block of the same
+region and 23% through dispatch; `fs` 89% from the region; `prom` 84%. So most boundaries are
+inside a region, and each costs the guest values written back at the end, the cycle count
+added, a deadline comparison, the next block's own interrupt and deadline checks, and the
+guest values loaded again: work that is needed only because each block is translated alone.
+
+Tier 1 measured carrying guest values across region edges (2026-11-02, JIT.adoc "Regions")
+and did not keep it: more code and more translation time, at a threshold of 64 hits, cost
+more than they saved. A tier that translates only code already proven hot (hundreds of
+thousands of executions) pays translation once for a great deal of execution; that is the
+difference this tier exploits.
+
+== What tier 2 is
+
+Tier 2 translates a hot region again, as a whole, with optimizations that need to see the
+whole region before emitting code. It is part of the native engine, not a fourth engine:
+the same code memory, dispatch table, validity rules, helpers, exits, and lifetime as tier 1
+(JIT.adoc "Native code", "Dispatch"); a tier-2 region replaces the tier-1 code for the same
+pcs in the dispatch table and is valid exactly when that code was.
+
+----
+decoded blocks (tier 0)
+   |  128 hits
+tier 1: one pass, block by block           EmitBuilder -> x86-64
+   |  hot (the region's entry count)
+tier 2: region -> IR -> passes -> x86-64   IrBuilder -> ir::Region -> lowering
+----
+
+* **One source of semantics.** `IrBuilder` is a third builder for `operations.hpp`: the
+  operation templates that the interpreters execute (DirectBuilder) and tier 1 emits
+  (EmitBuilder) record IR through it. No operation is written again for tier 2. Operations
+  not in builder form are an IR `call_semantics`, as in tier 1.
+* **The IR** (`src/arch/mips/ir/`) is small and architectural, not a general compiler IR:
+  a region is a list of blocks, each a list of instructions over 64-bit values numbered in
+  definition order (SSA within a block), reads and writes of guest registers as
+  instructions, and a terminator. Each guest operation starts with a marker that names it,
+  so exits know the pc, delay slot, and completed operations. It is host-independent; the
+  x86-64 lowering is the first consumer (ARCHITECTURE "Future JIT architecture").
+* **Passes** use what one-pass emission cannot see:
+  - *Guest registers in host registers across the region*: the most used guest registers
+    get a host register for the whole region, loaded where the region is entered and written
+    back only where the CPU must be exact (a helper, a side exit, leaving the region).
+  - *Boundary checks where they are needed*: the interrupt and deadline checks at the
+    region's entries and at loop back-edges only, each checking the longest stretch of
+    operations to the next check (JIT.adoc "Commit regions", made concrete); cycles counted
+    statically along each path.
+  - *Shared host page tests*: accesses through the same base value with no helper between
+    them use one page test for the whole range of their offsets.
+  - Loads of CPU fields that only helpers change (the translation context's tag) kept in
+    registers.
+* **Lowering** emits x86-64 through the existing assembler, reusing tier 1's sequences
+  (helpers, exits, dispatch, the host page path's second way and held reads) rather than
+  copies of them.
+* **Tiering.** A tier-1 region counts its first block's entries; at the tier-2 threshold
+  it leaves with a tier-up exit, the engine translates the region with tier 2 and installs
+  it, and execution continues in it. `--tier2-threshold N` (0: every region at tier 2 at
+  once, as the tests run it; `off`: none).
+
+Invariants kept from tier 1: exact boundaries for every exit (an exception, an interrupt, the
+run limit, a barrier) as tier 0 would stop; every benchmark digest and same-cycle snapshot
+identical on the reference interpreter, tier 0, tier 1, and tier 2; the processor
+personality asked only in semantic terms (ADR-022); the interpreter permanent.
+
+== Stages
+
+Each stage is one or more commits, with its gates; speed is a gate where stated.
+
+T0. Measurement (above) and the profiling tool, `tools/jit_profile.py`.
+
+T1. The IR, `IrBuilder`, and a direct lowering with no optimization: guest registers
+    through the CPU, tier 1's boundary protocol, every operation tier 1 emits natively also
+    native (the FPU excepted: a region with native FPU operations stays tier 1 until T5).
+    The engine translates with tier 2 at a threshold. Gates: the differential suites on tier
+    2 (every region at tier 2 on first execution), mutation checks, all presets, all digests
+    at thresholds 0 and default. Speed not a gate.
+
+T2. Guest registers across the region. Gate: speed (`cpu`, `boot`, `fs`, `prom`) and all T1
+    gates.
+
+T3. Boundary checks at entries and back-edges only. Gates as T2, plus exact stop cycles
+    under every run limit (the boundary tests with limits one cycle apart).
+
+T4. Shared host page tests and CPU fields in registers. Gates as T2.
+
+T5. The FPU in tier 2, if the profile still asks for it.
+
+Stop rule: a stage that gains less than 3% on every workload, after its gates, ends the
+milestone after it; what remains is written down as measured.
+
+== Progress
+
+* **T0 (2026-11-23).** Measurements above.
