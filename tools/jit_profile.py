@@ -140,7 +140,8 @@ def where(samples, perf_map, top):
             if k >= 0 and ip < perf_map[k][0] + perf_map[k][1]:
                 name = perf_map[k][2]
                 if name.startswith("uv:block_"):
-                    kinds["generated code: translations"] += 1
+                    kinds["generated code: tier 2" if name.endswith("_t2")
+                          else "generated code: tier 1"] += 1
                     translations[name] += 1
                 else:
                     kinds["generated code: shared"] += 1

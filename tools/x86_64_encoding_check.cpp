@@ -192,6 +192,8 @@ int main() {
                     const Mem m{static_cast<Reg>(b), d, static_cast<Reg>(i)};
                     add(std::format("mov {}, {}", names64[r], mem(m)),
                         [=](Assembler& a) { a.mov(reg, m); });
+                    add(std::format("lea {}, {}", names64[r], mem(m, "QWORD").substr(10)),
+                        [=](Assembler& a) { a.lea(reg, m); });
                     add(std::format("mov {}, {}", mem(m), names64[r]),
                         [=](Assembler& a) { a.mov(m, reg); });
                     add(std::format("cmp {}, {}", names64[r], mem(m)),

@@ -903,9 +903,10 @@ int main(int argc, char** argv) {
                          static_cast<unsigned long long>(n.native_operations),
                          static_cast<unsigned long long>(n.helper_operations));
             std::fprintf(stderr,
-                         "tier2: %llu regions (%llu blocks), %llu native bytes\n",
+                         "tier2: %llu regions (%llu blocks, %llu homes), %llu native bytes\n",
                          static_cast<unsigned long long>(n.optimized_regions),
                          static_cast<unsigned long long>(n.optimized_blocks),
+                         static_cast<unsigned long long>(n.optimized_homes),
                          static_cast<unsigned long long>(n.optimized_bytes));
         }
     }

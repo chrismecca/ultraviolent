@@ -118,7 +118,9 @@ T3. Boundary checks at entries and back-edges only. Gates as T2, plus exact stop
 T4. Shared host page tests and CPU fields in registers. Gates as T2.
 
 Stop rule: a stage that gains less than 3% on every workload, after its gates, ends the
-milestone after it; what remains is written down as measured.
+milestone after it unless a lever still open has a measured upper bound above that; what
+remains is written down as measured. (T2 and T3 each gained less; T4's upper bound is about
+15% on `cpu`, so T4 is the last stage.)
 
 == Progress
 
@@ -133,3 +135,34 @@ milestone after it; what remains is written down as measured.
   the run identical to the reference across the switch). All presets; digests of `prom`,
   `boot`, `cpu`, `fs` identical at tier-2 thresholds 0 and 1,000, speed unchanged
   (0.98-1.05x, noise), as expected before T2.
+* **T2 and T3 (2026-11-23): correct, and nearly no faster.** T2: a planning pass (the
+  region emitted as tier 1 would emit it, into a scratch assembler, counting each guest
+  value's reads and writes and the most pool registers one operation holds); the most used
+  guest values (up to four, as many as that peak leaves free) live in home registers for the
+  whole region (`Pinning`, `GuestRegisters` homes: loaded where dispatch enters a block,
+  kept across the region's edges, written back before a helper, a side exit, or leaving; a
+  write within an operation goes to a temporary and moves home when it ends, so that a value
+  the operation read stays intact, as JALR with rd = rs needs). T3: each tier-2 block has two
+  entries, dispatch's before its entry checks and the region's after them; an edge checks its
+  target's operations against the deadline itself, and for an edge to the same or an earlier
+  block (every loop has one) the pending-exception flag, which otherwise changes only in a
+  helper, after which it is checked anyway (or, with `--parallel`, from another thread: at
+  most one loop pass later). Exact at every boundary: the 65 tier-2 suites stop runs at
+  random points and compare. Result (release, best of 3, tier 2 from 1,000 entries, against
+  tier 2 off): T2 alone `prom` 1.00x, `boot` 0.98x, `cpu` 1.00x, `fs` 0.95x; with T3 1.01x,
+  0.99x, 1.02x, 0.95x. Host counters (`cpu`, 86% of its host time in tier-2 code): 12.6 to 12.4
+  host instructions per guest cycle at IPC 2.8. So tier 2 removed few instructions, and the
+  time it saved matches them. **Disproven:** that the samples in boundary code (30-40% of
+  generated code) measure what removing it saves; the core overlaps that work with the
+  operations', and what costs is the operations' own instructions, chiefly the memory
+  path's dozen per access. `fs` loses 5% to translating twice (the planning pass) for
+  little reuse.
+* **LEA (2026-11-23, tier 1 and 2):** an add of a constant or of two registers is one LEA
+  into a temporary instead of a copy and an ADD (every address, ADDIU). Release, best of 3,
+  tier 2 off: `prom` 1.01x, `boot` 1.01x, `cpu` 1.03x, `fs` 1.01x; every digest equal; LEA
+  with an index added to the encoding check against GNU as.
+* **Next: T4**, the lever that removes instructions where they are: shared host page tests.
+  Upper bound from the profile (the share of memory-operation samples whose access shares
+  its base register, unchanged, with an earlier access of its block, times the two thirds of
+  a dozen instructions a shared test saves): `cpu` about 15% of host time, `fs` and `boot`
+  2-3%.

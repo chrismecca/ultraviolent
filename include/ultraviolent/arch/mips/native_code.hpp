@@ -85,6 +85,8 @@ struct NativeStatistics {
     std::uint64_t optimized_regions{};
     std::uint64_t optimized_blocks{};
     std::uint64_t optimized_bytes{};
+    // Homes tier 2's regions could give guest values (TIER2.adoc "T2"), summed.
+    std::uint64_t optimized_homes{};
 };
 
 class NativeCode {
