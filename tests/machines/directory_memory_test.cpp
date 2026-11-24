@@ -110,8 +110,9 @@ const test::Registration word_halves{
         t.check(!b.directory.mmio_write(0x0, AccessWidth::bits16, 0).has_value());
     }};
 
-// The window holds each entry as read, big-endian, at every address that reaches it: the
-// machine maps it as memory, so loads never reach the directory.
+// The window holds each entry as read, big-endian, where the bank's directory starts: the
+// machine maps that as memory, so loads there never reach the directory. Reads of aliases
+// reach it and fold.
 std::uint64_t window_entry(DirectoryMemory& directory, std::uint64_t offset) {
     std::uint64_t value = 0;
     for (std::size_t i = 0; i < 8; ++i) {
@@ -125,12 +126,13 @@ const test::Registration window{
         Bench b{DirectoryDimms::premium, 256 * mb};
         t.check_equal(b.directory.window().size(), std::size_t{DirectoryMemory::window_size});
         t.check(b.write(64 * mb + 0x18, force_ecc | 0x1234'5678'9abc'def0));
-        // Both aliases in the 256 MB bank's 128 MB slice.
+        // Both aliases in the 256 MB bank's 128 MB slice; only the first is in the window.
         t.check_equal(window_entry(b.directory, 0x18), std::uint64_t{0x5678'9abc'def0});
-        t.check_equal(window_entry(b.directory, 64 * mb + 0x18), std::uint64_t{0x5678'9abc'def0});
+        t.check_equal(window_entry(b.directory, 64 * mb + 0x18), std::uint64_t{0});
+        t.check_equal(b.read(64 * mb + 0x18), std::uint64_t{0x5678'9abc'def0});
         // Standard mode reads 16 bits; the window follows, and back.
         b.directory.set_premium_mode(false);
-        t.check_equal(window_entry(b.directory, 64 * mb + 0x18), std::uint64_t{0xdef0});
+        t.check_equal(b.read(64 * mb + 0x18), std::uint64_t{0xdef0});
         t.check_equal(window_entry(b.directory, 0x18), std::uint64_t{0xdef0});
         b.directory.set_premium_mode(true);
         t.check_equal(window_entry(b.directory, 0x18), std::uint64_t{0x5678'9abc'def0});
@@ -143,21 +145,47 @@ const test::Registration window{
         t.check(c.write(0x20, 0x77));
         c.directory.save_state(image);
         b.directory.load_state(image);
-        t.check_equal(window_entry(b.directory, 64 * mb + 0x20), std::uint64_t{0x77});
+        t.check_equal(b.read(64 * mb + 0x20), std::uint64_t{0x77});
         t.check_equal(window_entry(b.directory, 0x18), std::uint64_t{0});
     }};
 
-// A write to a window frame that holds decoded code reports it (MemoryBlock::note_write), at
-// every alias it changes.
+// A write to a window frame that holds decoded code reports it (MemoryBlock::note_write),
+// including a write through an alias.
 const test::Registration window_code{
     "ip27.directory.window_writes_note_code", [](test::Context& t) {
         Bench b{DirectoryDimms::standard, 256 * mb};
-        b.directory.window().mark_code(64 * mb);
-        const auto* generation = b.directory.window().code_generation(64 * mb);
-        t.check(b.write(0x8, 0x1));
+        b.directory.window().mark_code(0);
+        const auto* generation = b.directory.window().code_generation(0);
+        t.check(b.write(64 * mb + 0x8, 0x1));
         t.check_equal(generation->load(), std::uint64_t{1});
-        t.check(!b.directory.window().holds_code(64 * mb));
+        t.check(!b.directory.window().holds_code(0));
     }};
+
+// The window's regions for the machine to map: each bank's directory as memory, the rest
+// (aliases, empty banks) as the directory, whose views take offsets from the region's start.
+const test::Registration regions{"ip27.directory.regions", [](test::Context& t) {
+    VirtualClock clock;
+    Tracer tracer{clock};
+    DirectoryMemory d{tracer, {64 * mb, 0, 512 * mb, 0, 0, 0, 0, 0}, DirectoryDimms::standard};
+    const auto& r = d.regions();
+    if (!t.check_equal(r.size(), std::size_t{4})) {
+        return;
+    }
+    t.check(r[0].offset == 0 && r[0].size == 16 * mb && r[0].memory, "bank 0's directory");
+    t.check(r[1].offset == 16 * mb && r[1].size == 2 * bank_slice - 16 * mb && !r[1].memory,
+            "bank 0's aliases and empty bank 1");
+    t.check(r[2].offset == 2 * bank_slice && r[2].size == bank_slice && r[2].memory,
+            "bank 2's directory, no aliases");
+    t.check(r[3].offset == 3 * bank_slice && r[3].size == 5 * bank_slice && !r[3].memory,
+            "the empty banks after it");
+    t.check(r[2].target->mmio_write(0x18, AccessWidth::bits64, 0x4444).has_value());
+    t.check_equal(d.mmio_read(2 * bank_slice + 0x18, AccessWidth::bits64).value_or(0),
+                  std::uint64_t{0x4444});
+    t.check(r[0].target->mmio_write(0x20, AccessWidth::bits64, 0x55).has_value());
+    // 16 MB into region 1 is bank 0's second alias.
+    t.check_equal(r[1].target->mmio_read(0x20, AccessWidth::bits64).value_or(0),
+                  std::uint64_t{0x55});
+}};
 
 const test::Registration snapshot{"ip27.directory.snapshot", [](test::Context& t) {
                                       Bench a{DirectoryDimms::premium};

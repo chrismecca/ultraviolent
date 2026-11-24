@@ -170,7 +170,8 @@ Enter.
 * **Two CPUs:** `scripts/boot.sh local/vm --cpus 2 --parallel`, each CPU on its own host
   thread. Changing the count between boots is like adding or removing a CPU.
 * **A rack module** (`doc/MULTINODE.adoc`): the same disk boots on four node boards of two
-  CPUs joined by two routers, or on two modules of four (sixteen CPUs, `--nodes 8`). Each
+  CPUs joined by two routers, on two modules of four (sixteen CPUs, `--nodes 8`), or on
+  four (32 CPUs, `--nodes 16`, routers in a cube; give `--memory 128`). Each
   node board has its own flash PROM, whose log holds its module number, so first give every
   node a copy of the machine's (otherwise the PROM stops with "Boards in same module show
   different moduleids"):
@@ -185,9 +186,12 @@ The first boot in a new configuration lists the boards as new ("Please use the '
 command"): choose 5 (Command Monitor), type `update`, then `exit` and 1, as a real
 machine's operator would after moving boards; moving back to the deskside needs the same.
 IRIX warns "Cannot read router nic" for each router (harmless; `doc/MULTINODE.adoc`). On
-the reference host (six cores) eight CPUs boot to `login:` in about a minute and sixteen in
-under two; give the machine about 5 GB of host memory for eight CPUs and 9 GB for
-sixteen.
+the reference host (six cores) eight CPUs boot to `login:` in about a minute, sixteen in
+under two, and 32 (with `--memory 128`) in about three; give the machine about 5 GB of
+host memory for eight CPUs, 9 GB for sixteen, and 7 GB for 32. Eight modules (`--nodes
+32`, 64 CPUs, a hypercube of sixteen routers) pass the PROM's discovery and diagnostics with
+`--memory 64` (6 GB of host memory) but have not booted IRIX (Known limits). Past 32 CPUs,
+`--parallel` runs several CPUs on each host thread (`--parallel-threads`).
 * **Ctrl-] commands:** `off` turns the keyswitch off (above), `q` stops the machine at
   once, `cdrom FILE` inserts a disc image, `eject` empties the drive, `?` lists them. Every
   other key, Ctrl-C included, goes to the guest.
@@ -348,9 +352,12 @@ are for experiments; the disk, NVRAM, and flash files are the machine's lasting 
   displaying on another machine over the network should work but have not been tried.)
 * One CD-ROM drive. Disks: up to 14 on the first SCSI controller and 15 on the second.
 * Two CPUs on one node board. Two node boards (`--nodes 2`) boot, with an "Error in
-  ust_change" message from IRIX (`STATUS.adoc`). Rack modules (`--module rack --nodes 1-8`,
-  two modules past four nodes) boot IRIX on up to sixteen CPUs, slower than real time past
-  eight, and IRIX warns that it cannot read the routers' NICs (`doc/MULTINODE.adoc`).
+  ust_change" message from IRIX (`STATUS.adoc`). Rack modules (`--module rack --nodes
+  1-32`, a module per four nodes) boot IRIX on up to 32 CPUs, slower than real time past
+  eight, and IRIX warns that it cannot read the routers' NICs (`doc/MULTINODE.adoc`). With
+  eight modules (64 CPUs) the PROM runs to its menu, but IRIX has not been seen to boot:
+  after "Starting up the system..." nothing more appears (`STATUS.adoc` "Current
+  blocker").
 * IRIX prints "Inventory table ID value is 0", "Some CPUs have old firmware", and, with one
   CPU, "update_klcfg_cpuinfo: Couldn't find my structure" at boot; all are harmless. With
   two CPUs, the keyswitch's power-off ends with "WARNING: llp_pfail_barrier: expired", also

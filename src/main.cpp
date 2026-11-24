@@ -80,7 +80,7 @@ void usage() {
         "                    [--tier0-cache-entries N] [--tier1-threshold N]\n"
         "                    [--tier2-threshold N|off]\n"
         "                    [--cpus 1|2] [--cpu-slice CYCLES]\n"
-        "                    [--parallel] [--parallel-window CYCLES]\n"
+        "                    [--parallel] [--parallel-window CYCLES] [--parallel-threads N]\n"
         "                    [--module rack|deskside] [--nodes 1-32] [--express-links]\n"
         "                    [--cpu r10000|r12000]\n"
         "\n"
@@ -156,6 +156,9 @@ void usage() {
         "CPU's cycles. --parallel runs each CPU on its own host thread instead, at most\n"
         "--parallel-window cycles ahead of the slowest (default 10000; doc/SMP.adoc \"S4\"):\n"
         "faster, not deterministic, and without --trace cpu, --probe, or --sample-pc.\n"
+        "--parallel-threads N runs them on N host threads (at least 2, at most one per\n"
+        "CPU), each taking several CPUs in turns when there are more CPUs (default: one per\n"
+        "CPU up to 32 CPUs, one per host core beyond).\n"
         "--module rack puts the node in a rack module (default deskside, as slate;\n"
         "doc/IP27.adoc \"Machine type\"). --nodes 2 adds a second node board in n2 "
         "(doc/SMP.adoc);\n"
@@ -304,6 +307,7 @@ struct Options {
     std::uint64_t cpu_slice{180};
     bool parallel{};
     std::uint64_t parallel_window{ip27::Ip27Machine::default_parallel_window};
+    unsigned parallel_threads{};
     std::uint64_t cycles{1'000'000};
     std::vector<TraceCategory> trace;
     std::vector<std::uint64_t> probes;
@@ -541,6 +545,13 @@ std::optional<Options> parse(std::span<char*> arguments) {
                 return std::nullopt;
             }
             options.parallel_window = *number;
+        } else if (flag == "--parallel-threads") {
+            const auto number = parse_number(value);
+            if (!number || *number == 0 || *number > 1024) {
+                std::fprintf(stderr, "--parallel-threads takes a number of threads, 1 to 1024\n");
+                return std::nullopt;
+            }
+            options.parallel_threads = static_cast<unsigned>(*number);
         } else if (flag == "--tier1-threshold") {
             const auto number = parse_number(value);
             if (!number) {
@@ -647,6 +658,9 @@ int main(int argc, char** argv) {
     config.cpus = options->cpus;
     config.module = options->module;
     config.nodes = options->nodes;
+    if (options->nodes > ip27::standard_directory_max_nodes) {
+        config.directory = ip27::DirectoryDimms::premium;
+    }
     config.express_links = options->express_links;
     if (options->processor == ip27::ProcessorType::r12000) {
         config.processor = ip27::ProcessorType::r12000;
@@ -699,7 +713,7 @@ int main(int argc, char** argv) {
                                  "--sample-pc\n");
             return exit_usage;
         }
-        machine.set_parallel(true, options->parallel_window);
+        machine.set_parallel(true, options->parallel_window, options->parallel_threads);
     }
     backends::StreamTraceSink sink{stderr};
     machine.tracer().set_sink(&sink);

@@ -393,6 +393,32 @@ tens of megabytes per node.
   the cube and the hypercube, the cube's Xpress link, the missing fourth module of three,
   module 8's controller number); `ip27.system_controller_configuration` (9 and 32 nodes
   valid, 33 not; Xpress links with 16 nodes but not 12).
+  Gates (2026-11-24, release build, `--parallel`, six cores; `local/bench/push/`): `prom32`
+  (four modules, the cube) finds 24 objects (16 Hubs, 8 routers) and 32 CPUs on 16 nodes,
+  all diagnostics pass, 88.5 s; `prom64` (eight modules, the hypercube) finds 48 objects (32
+  Hubs, 16 routers) and 64 CPUs on 32 nodes, all diagnostics pass, 368 s; IRIX boots to
+  `login:` on sixteen nodes (`boot32`, 168 s, 0.41 times real time) and the 32-CPU
+  workload runs (`cpu32`, 32 awk loops, 30.3 s). Found on the way, each with a test:
+  ** `observed`: with 32 nodes of standard directory DIMMs the PROM prints "This
+     configuration requires all nodes to have premium DIMMS" and stops, while sixteen run.
+     The command line gives systems of more than 16 nodes premium directory DIMMs
+     (`standard_directory_max_nodes`), which the model already had (IP27.adoc "Directory
+     memory").
+  ** Host memory. A shared AddressSpace kept every version of its mappings for readers on
+     other threads, and each flash write publishes two (array mode off and on): with 32
+     nodes' larger tables the run passed 13 GB within a minute of discovery (perf of page
+     faults: 90% in `AddressSpace::publish`). Versions are now freed once every CPU thread
+     has been quiescent since they were replaced (SMP.adoc "S4.5"). And the directory window
+     no longer holds a copy of each entry at every alias, which touched a whole 128 MB slice
+     per node; aliases are read through the directory (`DirectoryMemory::regions`; the
+     one-CPU PROM at `--memory 64` gives the same console output and stops at the same cycle,
+     3,477,413,970, before and after). Peaks:
+     `prom64` 5.8 GB, `boot32` 6.1 GB.
+  ** Speed: 64 CPUs on six threads (SMP.adoc "S4.5").
+  ** Open: IRIX on 64 CPUs. The PROM reaches its menu (about 3 minutes grouped on six
+     threads) and "Starting up the system...", then nothing more is printed, with CPUs
+     grouped or a thread each (stopped at virtual 298.7 s, CPU 0 at pc
+     `0xffffffff80000d2c`; STATUS "Current blocker").
 
 == Decisions (the user, 2026-11-18)
 

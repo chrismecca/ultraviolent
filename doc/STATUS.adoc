@@ -14,7 +14,14 @@ nodes and 64 CPUs, MULTINODE.adoc), and storage (O1). arm64 hosts are dropped (R
 (`ultraviolent disk`), positioned I/O (a faster backend measured as not worth it: disk copies
 are about 2% of `fs`), a virtual Ethernet switch (`ultraviolent switch`, `--ethernet
 switch:`), `--ethernet-address`, `--console-socket`, `--suspend`, and `scripts/uvctl.py`;
-the two-machine acceptance (`scripts/fleet-demo.py`) passes 9 of 9. Next: see Next task.
+the two-machine acceptance (`scripts/fleet-demo.py`) passes 9 of 9. Speed for large
+machines (SMP.adoc "S4.5") and N4 (MULTINODE.adoc) are done (2026-11-24): past 32 CPUs,
+`--parallel` groups CPUs on host threads (64 CPUs' PROM 368 s instead of 866); a 32-node
+machine fits in about 6 GB (shared address maps free old versions; directory aliases are
+read, not copied); premium directory DIMMs past sixteen nodes, which the PROM requires. The
+PROM discovers and passes diagnostics on 32 and 64 CPUs (cube and hypercube), and IRIX
+boots on 32 CPUs (`boot32` 168 s) and runs `cpu32`. IRIX on 64 CPUs stops after "Starting
+up the system..." (see Current blocker). Next: see Next task.
 
 Before it, tier 2:
 
@@ -429,7 +436,17 @@ Remote telnet login to an unmodified, installed IRIX guest.
 
 == Current blocker
 
-None. On `uv-dev01` the `uv0` TAP device exists as the private link below (made 2026-11-02;
+None for the release. Open after N4 (2026-11-24): IRIX on eight rack modules (`--nodes 32
+--cpus 2 --memory 64 --parallel`, 64 CPUs) passes the PROM's diagnostics and starts the
+system, then prints nothing more (50 minutes on six threads; the CPUs were polling
+PI_INT_PEND0 and PI_RT_COUNT, all waiting for an interrupt). With a host thread per CPU
+it stops the same way (ended by the time limit at virtual 298.7 s, CPU 0 at pc
+`0xffffffff80000d2c`; a whole `boot32` takes 69 virtual seconds), so the grouping is not
+the cause. On four modules IRIX prints its router NIC warnings right after "Starting up
+the system...". Not yet known whether the IO6PROM's load or the kernel's first steps stop. Next step: the guest PCs at the stop
+(a reference-mode run from a snapshot taken at the menu would allow `--sample-pc`).
+
+On `uv-dev01` the `uv0` TAP device exists as the private link below (made 2026-11-02;
 runtime state, gone after a host reboot); the LAN setup (forwarding, proxy ARP, route; M8
 above) was made on the old host only.
 
@@ -495,14 +512,13 @@ Housekeeping:
 Agreed order (with the user, 2026-09-28): interactive console, M8, RC-IP27, then performance.
 All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is public.
 
-. **The "can start now" push (the user, 2026-11-23; STATUS "Current milestone").** Order:
-  O1-O4 (done, ORCHESTRATION.adoc "Progress"), then speed for large machines (measure
-  `--parallel` at 8 and 16 CPUs on the six-core host first; stop rule as in TIER2.adoc), then
-  N4 (MULTINODE.adoc: the hypercube wiring and 32-node limits are in, tested by
-  `ip27.rack.hypercube`; next the PROM's discovery at 16 and 32 nodes on tier 1 with
-  `--parallel` and small `--memory`, then IRIX on 16 nodes if the host allows), then
-  release 0.1.4 (release notes, the four presets, a fresh install from blank, the fleet
-  demonstration, the benchmark digests).
+. **The "can start now" push (the user, 2026-11-23; STATUS "Current milestone").** O1-O4
+  (ORCHESTRATION.adoc "Progress"), speed for large machines (SMP.adoc "S4.5"), and N4
+  (MULTINODE.adoc) are done; then release 0.1.4 (`doc/RELEASE-NOTES-0.1.4.adoc`: the four
+  presets, a fresh install from blank, the fleet demonstration, the benchmark digests:
+  all done 2026-11-24, `local/release-check-014`); the user tags and publishes it.
+  After it, open: IRIX on 64 CPUs (Current blocker); a reset rendezvous that does not
+  block its host thread, which would allow CPUs to move between threads.
 . **Tier 2 (doc/TIER2.adoc; the user, 2026-11-23): complete.** T0 measurement and
   `tools/jit_profile.py`; T1 tiering; T2 registers across regions (measured, removed); T3
   edge checks; T4 shared host page tests; LEA. Ended at its stop rule; what remains is
@@ -2629,4 +2645,38 @@ Disproven: that boundary samples are boundary cost (T2 and T3 removed 0.2 of 12.
 Unknowns: none new.
 Best checkpoint: unchanged (local/release-check-013).
 Next step: the user's next milestone (STATUS "Next task").
+----
+
+----
+Date: 2026-11-23 to 2026-11-24
+Milestone: the "can start now" push (orchestration O1-O4, large-machine speed S4.5, N4),
+  then release 0.1.4
+Hypothesis: many machines and larger racks need no new SGI evidence: overlays, a switch,
+  sockets and suspend on the host side; the hypercube from the manuals' cabling; and
+  64 CPUs fit the six-core, 15 GB host if CPUs share threads.
+Evidence: ORCHESTRATION.adoc "Progress"; perf (kernel time at the window's yield; page
+  faults in AddressSpace::publish); RSS sampling; the PROM's own refusal of standard
+  directory DIMMs at 32 nodes.
+Changed: CowBlockStore, `ultraviolent disk`, FileBlockStore by pread/pwrite, more disks on
+  both buses; the Ethernet switch, `--ethernet switch:`, `--ethernet-address`,
+  `--console-socket`, `--suspend`, scripts/uvctl.py, scripts/fleet-demo.py; `--nodes` to 32,
+  the hypercube (connect_routers), Coherence to 64 CPUs; premium directory DIMMs past 16
+  nodes; DirectoryMemory::regions (aliases read, not copied); AddressSpace::free_versions
+  and Ip27Machine::reclaim_mappings; run_group and `--parallel-threads` (grouped past 32
+  CPUs); bench workloads prom32, boot32, cpu32, prom64, boot64; RELEASE-NOTES-0.1.4.adoc.
+Tests: cow_block_store, ethernet_switch, console_socket suites; ip27.disks_on_both_scsi_buses,
+  ip27.rack.hypercube, the 9/32/33-node configurations; address_space.free_versions;
+  ip27.directory.regions (and the window tests for folded aliases); all four presets.
+Newly proven: two machines on a switch ping, telnet, suspend, snapshot, resume, and
+  restore (9 of 9); the PROM discovers 32 and 64 CPUs (cube, hypercube) with all diagnostics
+  passed; IRIX boots on 32 CPUs (168 s); 64 CPUs' PROM 368 s grouped on six threads against
+  866 s with a thread each; 32 nodes in 5.8 GB; one- to four-CPU digests unchanged; a fresh
+  install from blank passes (0.28 h).
+Disproven: that a futex sleep at the window beats yield (it is 1.4-1.8x slower); that more
+  threads than cores is harmless past 32 CPUs; that the directory aliases were what put 32
+  nodes over the host's memory (it was the kept address-map versions).
+Unknowns: why IRIX on 64 CPUs stops after "Starting up the system..." (Current blocker).
+Best checkpoint: local/release-check-014 (installed from blank with 0.1.4's code).
+Next step: the user tags and publishes 0.1.4; then IRIX on 64 CPUs, or the user's next
+  milestone.
 ----

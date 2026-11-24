@@ -163,7 +163,10 @@ doublewords (one per region), then (address bit 9) 32 directory entries of two d
 one per 128-byte line. Bank b's entries start at b × 128 MB.
 
 * Directory DIMMs are standard (`Ip27Config::directory`, default; `hypothesis`: the
-  configuration that needs no directory DIMMs) or premium. An entry holds 16 bits
+  configuration that needs no directory DIMMs) or premium; the command line gives premium
+  to systems of more than 16 nodes (`standard_directory_max_nodes`; `observed`: with 32
+  nodes of standard DIMMs the PROM prints "This configuration requires all nodes to have
+  premium DIMMS" and stops). An entry holds 16 bits
   (MD_SDIR_MASK) or, with premium DIMMs while MD_MEMORY_CONFIG DIR_PREMIUM is set, 48 bits
   (MD_PDIR_MASK). Bits beyond the entry, including MD_DIR_FORCE_ECC, are not stored.
 * `hypothesis`: a bank's DIMMs ignore address bits above their size, so back-door addresses
@@ -172,8 +175,12 @@ one per 128-byte line. Bank b's entries start at b × 128 MB.
 * `hypothesis`: ECC fields hold what is written; hardware ECC generation and checking are
   not modeled. The ECC back door (HSPEC + 2 GB) is not modeled.
 * The window is read as memory: `DirectoryMemory::window()` holds every entry as a read
-  returns it, big-endian, at each address that reaches it, and the machine maps it
-  read-only with the directory taking the writes (as the flash, "Boot PROM"). A word read is
+  returns it, big-endian, where its bank's directory starts, and the machine maps each
+  bank's installed directory read-only with the directory taking the writes (as the flash,
+  "Boot PROM"). The rest of the window, a small bank's aliases and the empty banks, is
+  mapped to the directory, whose reads fold the address (`DirectoryMemory::regions`).
+  Measured (MULTINODE.adoc "N4"): writing each entry at every alias instead touched a whole
+  128 MB slice per node, whatever the node's memory (3.5 GB more for 32 nodes of 64 MB). A word read is
   its half of the entry (`observed`: the IRIX kernel reads protection entries a word at a
   time); `hypothesis`: narrower reads are the entry's bytes likewise. Doubleword and word
   writes are modeled; narrower writes are lost. Measured: the PROM's directory test writes

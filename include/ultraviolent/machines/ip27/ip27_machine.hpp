@@ -69,12 +69,17 @@ enum class ProcessorType : std::uint8_t {
     r12000,
 };
 
+// observed: with 32 nodes of standard directory DIMMs the PROM prints "This configuration
+// requires all nodes to have premium DIMMS" and stops; with 16 it runs (MULTINODE.adoc "N4").
+inline constexpr unsigned standard_directory_max_nodes = 16;
+
 struct Ip27Config {
     // Installed memory, filling 512 MB banks from bank 0; a final partial bank must be a power
     // of two of at least 8 MB (memory_bank_sizes).
     std::uint64_t memory_bytes{512ull << 20};
     // hypothesis: standard directory memory, the configuration that needs no directory DIMMs
-    // (PRM 1.4; IP27.adoc "Memory and directory").
+    // (PRM 1.4; IP27.adoc "Memory and directory"). Systems of more than
+    // standard_directory_max_nodes need premium (the command line chooses it for them).
     DirectoryDimms directory{DirectoryDimms::standard};
     // observed: the user's PROM describes a 180 MHz processor (IP27.adoc "Reset mode bits").
     Frequency cpu_clock{180'000'000};
@@ -243,9 +248,13 @@ class Ip27Machine {
     // not part of snapshots. PC probes and instruction tracing need reference mode: with
     // them run() takes turns as before.
     static constexpr std::uint64_t default_parallel_window = 10'000;
-    void set_parallel(bool parallel, std::uint64_t window = default_parallel_window) {
+    // `threads` host threads run the CPUs (0: as many as the host has cores, at most one per
+    // CPU); with fewer threads than CPUs each thread takes several in turns (SMP.adoc "S4.5").
+    void set_parallel(bool parallel, std::uint64_t window = default_parallel_window,
+                      unsigned threads = 0) {
         parallel_ = parallel;
         parallel_window_ = window;
+        parallel_threads_ = threads;
     }
     // Tier 0's block cache size, a power of two (IR.adoc "Keeping blocks valid").
     void set_block_cache_entries(std::size_t entries) {
@@ -474,6 +483,9 @@ class Ip27Machine {
         // On host threads: the cycle count where its engine last returned, for the others'
         // window.
         std::atomic<std::uint64_t> published{};
+        // On host threads: reclaim_epoch_ as its thread last read it holding no mappings
+        // (reclaim_mappings); the maximum once its run is over.
+        std::atomic<std::uint64_t> quiescent{};
     };
 
     // A lock for very short critical sections between host threads: device accesses.
@@ -529,6 +541,8 @@ class Ip27Machine {
     // reached `end` or a stop.
     void run_parallel(std::uint64_t cycles);
     void run_thread(Processor& processor, unsigned index, std::uint64_t end);
+    // Several CPUs (installed_ indices `members`) on one host thread, in turns.
+    void run_group(std::span<const unsigned> members, std::uint64_t end);
     // The lowest cycle count the CPUs other than installed_[index] have published.
     [[nodiscard]] std::uint64_t lowest_published_other(unsigned index) const;
     // On host threads, under the device lock: device time moves to the CPU's time if that is
@@ -537,6 +551,13 @@ class Ip27Machine {
     // hold_host_until's time while it is still ahead of the host's clock.
     [[nodiscard]] std::optional<std::chrono::steady_clock::time_point> host_hold() const;
     void publish_next_event();
+    // A CPU's thread, between engine runs, holds no version of any node's mappings.
+    void note_quiescent(Processor& processor);
+    // Under the device lock, now and then: frees the versions of the nodes' mappings that
+    // every CPU's thread has been quiescent since they were replaced. A shared AddressSpace
+    // keeps each version a reader may hold; a version replaced before the last epoch began
+    // is held by no thread whose quiescent mark is at that epoch.
+    void reclaim_mappings();
     // A device access by the calling thread's CPU, under the device lock.
     template <typename Access> auto locked_access(Access access);
     // Runs installed_[running_] up to stop_cycle_.
@@ -756,7 +777,10 @@ class Ip27Machine {
     // Host-parallel CPUs (SMP.adoc "S4"). parallel_running_ changes only while no CPU thread
     // runs.
     bool parallel_{};
+    // Above this many CPUs, host-parallel CPUs share host threads by default (run_parallel).
+    static constexpr unsigned grouped_cpus = 32;
     std::uint64_t parallel_window_{default_parallel_window};
+    unsigned parallel_threads_{};
     bool parallel_running_{};
     SpinLock device_lock_;
     std::atomic<std::uint64_t> parallel_next_event_{};
@@ -765,6 +789,11 @@ class Ip27Machine {
     std::atomic<std::chrono::steady_clock::rep> host_hold_{};
     // CPU threads that have finished their run.
     std::atomic<unsigned> parallel_finished_{};
+    // reclaim_mappings: the epoch, each node's retired versions when it began, and a count
+    // of calls (it checks every 256th).
+    std::atomic<std::uint64_t> reclaim_epoch_{1};
+    std::vector<std::size_t> reclaim_marks_;
+    unsigned reclaim_calls_{};
     // The CPU the calling host thread runs, while CPUs run on threads.
     static thread_local Processor* current_;
     // First CPU cycle count at which a pending event is due.

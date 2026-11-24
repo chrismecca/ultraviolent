@@ -210,6 +210,8 @@ def base_command(args, scratch, cpus=1):
                 ["--parallel"] if cpus != 1 and args.parallel else []) + (
                 ["--parallel-window", str(args.parallel_window)]
                 if cpus != 1 and args.parallel and args.parallel_window else []) + (
+                ["--parallel-threads", str(args.parallel_threads)]
+                if cpus != 1 and args.parallel and args.parallel_threads else []) + (
                 ["--tier0-cache-entries", str(args.cache_entries)] if args.cache_entries else []) + (
                 ["--tier1-threshold", str(args.tier1_threshold)]
                 if args.tier1_threshold is not None else []) + (
@@ -479,6 +481,8 @@ def main():
                         "not deterministic, so digests differ run to run")
     common.add_argument("--parallel-window", type=int,
                         help="with --parallel: cycles a CPU may run ahead of the slowest")
+    common.add_argument("--parallel-threads", type=int,
+                        help="with --parallel: host threads (default: the emulator's, SMP.adoc \"S4.5\")")
     common.add_argument("--express-links", action="store_true",
                         help="sixteen-CPU workloads: cable the two modules' Xpress links too")
     commands = parser.add_subparsers(dest="command", required=True)

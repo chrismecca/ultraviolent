@@ -700,12 +700,17 @@ void Ip27Machine::Node::map_resources(Node& node, std::uint64_t base) {
                           node.synchronized_flash_commands),
              "boot PROM command window");
     // HSPEC back door: directory and protection memory at 3 GB (IP27.adoc "Memory and
-    // directory"), read as memory, its writes through the directory.
-    must_map(bus.map_memory({PhysicalAddress{uncached_window(hspec_attribute) + base +
-                                             DirectoryMemory::window_offset},
-                             DirectoryMemory::window_size},
-                            node.directory.window(), 0, MemoryAccess::read_only, &node.directory),
-             "back-door directory window");
+    // directory"). Each bank's installed directory is read as memory, its writes through the
+    // directory; the rest of the window (aliases, empty banks) is the directory's to read.
+    const std::uint64_t back_door =
+        uncached_window(hspec_attribute) + base + DirectoryMemory::window_offset;
+    for (const DirectoryMemory::Region& region : node.directory.regions()) {
+        const PhysicalRange range{PhysicalAddress{back_door + region.offset}, region.size};
+        must_map(region.memory ? bus.map_memory(range, node.directory.window(), region.offset,
+                                                MemoryAccess::read_only, region.target)
+                               : bus.map_mmio(range, *region.target),
+                 "back-door directory window");
+    }
     // IO: the node's Hub registers at the remote-Hub alias (widget 1 window + 0x800000, LINUX
     // REMOTE_HUB_ADDR; observed: the PROM uses it for its own NASID 0). A remote request comes
     // over the link rather than from a processor: hypothesis, the Hub answers it as from
@@ -1495,11 +1500,15 @@ void Ip27Machine::run_parallel(std::uint64_t cycles) {
     // SMP.adoc "S4". Everything the threads share is made safe for them here, before they
     // start: the views publish versions, and the CPUs switch to compare-and-swap LL/SC.
     const std::uint64_t end = lowest_cycles() + cycles;
+    // No thread reads the mappings yet: versions retired before go now.
+    reclaim_marks_.assign(nodes_.size(), 0);
     for (auto& node : nodes_) {
         node->bus.set_shared(true);
+        node->bus.free_versions(node->bus.retired_versions());
     }
     for (unsigned i = 0; i < cpu_count_; ++i) {
         Processor& p = *installed_[i];
+        p.quiescent.store(0, std::memory_order_relaxed);
         p.cpu.set_parallel(true);
         p.pins.set_levels(p.cpu.external_interrupt_levels());
         p.published.store(p.cpu.cycles(), std::memory_order_relaxed);
@@ -1510,12 +1519,31 @@ void Ip27Machine::run_parallel(std::uint64_t cycles) {
     parallel_finished_.store(0, std::memory_order_relaxed);
     parallel_running_ = true;
     publish_next_event();
-    {
-        std::vector<std::jthread> threads;
+    // A thread per CPU up to grouped_cpus, beyond that one per host core (SMP.adoc "S4.5";
+    // measured: 64 CPUs on 6 cores, the PROM in 368 s on 6 threads and 866 s on 64; 16 and
+    // 32 CPUs within 5% either way). CPU i goes to thread i % threads, so with at least two
+    // threads a node's two CPUs (indices 2n and 2n + 1) are on different threads and can meet
+    // at a reset (NodeReset::arrive waits for the other).
+    unsigned threads = parallel_threads_ != 0    ? parallel_threads_
+                       : cpu_count_ <= grouped_cpus ? cpu_count_
+                                                    : std::thread::hardware_concurrency();
+    threads = std::min(std::max(threads, 2u), cpu_count_);
+    if (threads >= cpu_count_) {
+        std::vector<std::jthread> workers;
         for (unsigned i = 1; i < cpu_count_; ++i) {
-            threads.emplace_back([this, i, end] { run_thread(*installed_[i], i, end); });
+            workers.emplace_back([this, i, end] { run_thread(*installed_[i], i, end); });
         }
         run_thread(*installed_[0], 0, end);
+    } else {
+        std::vector<std::vector<unsigned>> groups(threads);
+        for (unsigned i = 0; i < cpu_count_; ++i) {
+            groups[i % threads].push_back(i);
+        }
+        std::vector<std::jthread> workers;
+        for (unsigned g = 1; g < threads; ++g) {
+            workers.emplace_back([this, &groups, g, end] { run_group(groups[g], end); });
+        }
+        run_group(groups[0], end);
     }
     parallel_running_ = false;
     // What other threads posted at the end is applied now, on this one.
@@ -1527,9 +1555,33 @@ void Ip27Machine::run_parallel(std::uint64_t cycles) {
     }
     for (auto& node : nodes_) {
         node->reset_rendezvous.clear();
+        node->bus.free_versions(node->bus.retired_versions());
     }
     stop_requested_ = false;
     update_next_event();
+}
+
+void Ip27Machine::note_quiescent(Processor& processor) {
+    // Sequentially consistent with reclaim_mappings' increment: a mark at an epoch is read
+    // after that epoch began, so after every version retired before it was replaced.
+    processor.quiescent.store(reclaim_epoch_.load());
+}
+
+void Ip27Machine::reclaim_mappings() {
+    if (++reclaim_calls_ % 256 != 0) {
+        return;
+    }
+    const std::uint64_t epoch = reclaim_epoch_.load();
+    for (unsigned i = 0; i < cpu_count_; ++i) {
+        if (installed_[i]->quiescent.load() < epoch) {
+            return;
+        }
+    }
+    for (std::size_t n = 0; n < nodes_.size(); ++n) {
+        nodes_[n]->bus.free_versions(reclaim_marks_[n]);
+        reclaim_marks_[n] = nodes_[n]->bus.retired_versions();
+    }
+    reclaim_epoch_.fetch_add(1);
 }
 
 void Ip27Machine::run_thread(Processor& processor, unsigned index, std::uint64_t end) {
@@ -1538,6 +1590,7 @@ void Ip27Machine::run_thread(Processor& processor, unsigned index, std::uint64_t
     cpu.unpark();
     std::uint64_t limit = 0;
     while (true) {
+        note_quiescent(processor);
         if (cpu.attention_raised()) {
             cpu.attend();
         }
@@ -1559,6 +1612,7 @@ void Ip27Machine::run_thread(Processor& processor, unsigned index, std::uint64_t
             cpu.unpark();
             advance_device_time(cycles);
             publish_next_event();
+            reclaim_mappings();
             device_lock_.unlock();
             continue;
         }
@@ -1570,6 +1624,7 @@ void Ip27Machine::run_thread(Processor& processor, unsigned index, std::uint64_t
             while (cycles >= lowest_published_other(index) + parallel_window_ &&
                    !parallel_stop_.load(std::memory_order_relaxed) && !cpu.attention_raised() &&
                    !host_hold()) {
+                note_quiescent(processor);
                 std::this_thread::yield();
             }
             cpu.unpark();
@@ -1583,8 +1638,100 @@ void Ip27Machine::run_thread(Processor& processor, unsigned index, std::uint64_t
         }
     }
     processor.published.store(cpu.cycles(), std::memory_order_release);
+    processor.quiescent.store(std::numeric_limits<std::uint64_t>::max());
     cpu.park();
     parallel_finished_.fetch_add(1, std::memory_order_relaxed);
+    current_ = nullptr;
+}
+
+void Ip27Machine::run_group(std::span<const unsigned> members, std::uint64_t end) {
+    // As run_thread, for each CPU in turn: the lowest first, for at most a quarter window,
+    // so a CPU spinning on a lock its group's other CPU holds soon gives way to it. A CPU
+    // not running is parked (it stores nothing), so a CPU marking code does not wait for it.
+    std::vector<Processor*> cpus;
+    for (const unsigned i : members) {
+        cpus.push_back(installed_[i]);
+    }
+    std::vector<bool> done(cpus.size());
+    std::size_t remaining = cpus.size();
+    const std::uint64_t quantum = std::max<std::uint64_t>(parallel_window_ / 4, 1);
+    const auto finish = [&](std::size_t k) {
+        cpus[k]->published.store(cpus[k]->cpu.cycles(), std::memory_order_release);
+        cpus[k]->quiescent.store(std::numeric_limits<std::uint64_t>::max());
+        done[k] = true;
+        --remaining;
+        parallel_finished_.fetch_add(1, std::memory_order_relaxed);
+    };
+    while (remaining != 0) {
+        for (std::size_t k = 0; k < cpus.size(); ++k) {
+            if (!done[k]) {
+                note_quiescent(*cpus[k]);
+            }
+        }
+        // Attention first, whichever CPU it is for: a reset's other CPU may be waiting.
+        for (std::size_t k = 0; k < cpus.size(); ++k) {
+            Processor& p = *cpus[k];
+            if (!done[k] && p.cpu.attention_raised()) {
+                current_ = &p;
+                p.cpu.unpark();
+                p.cpu.attend();
+                p.published.store(p.cpu.cycles(), std::memory_order_release);
+                p.cpu.park();
+            }
+        }
+        if (parallel_stop_.load(std::memory_order_relaxed)) {
+            for (std::size_t k = 0; k < cpus.size(); ++k) {
+                if (!done[k]) {
+                    finish(k);
+                }
+            }
+            break;
+        }
+        if (const auto until = host_hold()) {
+            std::this_thread::sleep_until(*until);
+            continue;
+        }
+        std::size_t k = cpus.size();
+        for (std::size_t j = 0; j < cpus.size(); ++j) {
+            if (!done[j] && (k == cpus.size() || cpus[j]->cpu.cycles() < cpus[k]->cpu.cycles())) {
+                k = j;
+            }
+        }
+        Processor& p = *cpus[k];
+        const std::uint64_t cycles = p.cpu.cycles();
+        p.published.store(cycles, std::memory_order_release);
+        if (cycles >= end) {
+            finish(k);
+            continue;
+        }
+        current_ = &p;
+        const std::uint64_t next_event = parallel_next_event_.load(std::memory_order_acquire);
+        if (cycles >= next_event) {
+            device_lock_.lock();
+            p.cpu.unpark();
+            advance_device_time(cycles);
+            publish_next_event();
+            reclaim_mappings();
+            device_lock_.unlock();
+            p.cpu.park();
+            continue;
+        }
+        // This group's lowest CPU, held by another group's: let other threads run.
+        const std::uint64_t window_end = lowest_published_other(members[k]) + parallel_window_;
+        if (cycles >= window_end) {
+            std::this_thread::yield();
+            continue;
+        }
+        const std::uint64_t limit = std::min({end, next_event, window_end, cycles + quantum});
+        p.cpu.unpark();
+        if (engine_ != mips::ExecutionEngine::reference) {
+            p.blocks.run_until(limit);
+        } else {
+            p.interpreter.run_until(limit);
+        }
+        p.published.store(p.cpu.cycles(), std::memory_order_release);
+        p.cpu.park();
+    }
     current_ = nullptr;
 }
 

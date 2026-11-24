@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <vector>
 
 namespace ultraviolent::ip27 {
@@ -26,13 +27,18 @@ enum class DirectoryDimms : std::uint8_t { standard, premium };
 // (IP27.adoc "Directory memory"). Each 4 KB page of memory has 1 KB here: 64 protection
 // doublewords, then 32 two-doubleword directory entries.
 //
-// Reads are of window(), which holds every entry as a read returns it at each address that
-// reaches it; the machine maps it read-only with this target taking the writes. Doubleword
-// and word writes are modeled. The ECC back door (HSPEC + 2 GB) is not.
+// Reads are of window(), which holds every entry as a read returns it where the bank's
+// directory starts (bank b at b * bank_slice); the machine maps that much of each bank,
+// installed(b) bytes, read-only with this target taking the writes. The rest of each slice
+// (aliases of a small bank's directory, and empty banks) is mapped to this target, whose
+// reads fold the address. Doubleword and word writes are modeled. The ECC back door
+// (HSPEC + 2 GB) is not.
 class DirectoryMemory final : public MmioTarget {
   public:
     static constexpr std::uint64_t window_offset = 0xc000'0000;
     static constexpr std::uint64_t window_size = 0x4000'0000;
+    // Back-door space per bank: a quarter of the bank window (1 KB per 4 KB page).
+    static constexpr std::uint64_t bank_slice = bank_window / 4;
 
     // `bank_bytes[b]` is the memory installed in bank b (0 for empty). Each nonzero size is a
     // power of two from 8 MB to 512 MB.
@@ -42,6 +48,25 @@ class DirectoryMemory final : public MmioTarget {
     // Whether the MD addresses the directory as premium (MD_MEMORY_CONFIG DIR_PREMIUM). The
     // Hub sets it; entries are 48 bits wide only with premium DIMMs in premium mode.
     void set_premium_mode(bool premium);
+
+    // Bytes of bank `bank`'s directory, from the start of its slice (0 for an empty bank).
+    [[nodiscard]] std::uint64_t installed(std::size_t bank) const {
+        return bank_bytes_[bank] / 4;
+    }
+
+    // How the machine maps the window, in order and covering it: a bank's installed
+    // directory as memory (window() at `offset`, read-only, writes to `target`), or
+    // aliases and empty banks as `target` alone. `target` takes offsets from the region's
+    // start, as an address space gives them.
+    struct Region {
+        std::uint64_t offset;
+        std::uint64_t size;
+        bool memory;
+        MmioTarget* target;
+    };
+    [[nodiscard]] const std::vector<Region>& regions() const {
+        return regions_;
+    }
 
     // What reads of the window return, big-endian (window_size bytes): memory loads, so a CPU
     // reads it as RAM (measured: the PROM's directory test reads all of it three times).
@@ -59,6 +84,26 @@ class DirectoryMemory final : public MmioTarget {
                                                 std::uint64_t value) override;
 
   private:
+    // This directory at an offset in the window (Region::target).
+    class View final : public MmioTarget {
+      public:
+        View(DirectoryMemory& directory, std::uint64_t base)
+            : directory_{directory}, base_{base} {}
+        std::expected<std::uint64_t, AccessFault> mmio_read(std::uint64_t offset,
+                                                            AccessWidth width) override {
+            return directory_.mmio_read(base_ + offset, width);
+        }
+        std::expected<void, AccessFault> mmio_write(std::uint64_t offset, AccessWidth width,
+                                                    std::uint64_t value) override {
+            return directory_.mmio_write(base_ + offset, width, value);
+        }
+
+      private:
+        DirectoryMemory& directory_;
+        std::uint64_t base_;
+    };
+
+    void add_region(std::uint64_t offset, std::uint64_t size, bool memory);
     [[nodiscard]] std::uint64_t entry_mask() const;
     // Entry `index` of bank `bank` reads as `value` at every address that reaches it.
     void show(std::size_t bank, std::uint64_t index, std::uint64_t value);
@@ -79,6 +124,8 @@ class DirectoryMemory final : public MmioTarget {
     MemoryBlock window_{window_size};
     // Premium DIMMs only: each entry's 48 bits, which standard mode reads 16 of.
     std::vector<std::uint64_t> entries_;
+    std::vector<std::unique_ptr<View>> views_;
+    std::vector<Region> regions_;
 };
 
 } // namespace ultraviolent::ip27

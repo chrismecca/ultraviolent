@@ -190,11 +190,23 @@ void AddressSpace::set_shared(bool shared) {
     publish();
 }
 
+std::size_t AddressSpace::retired_versions() const {
+    const std::lock_guard lock{versions_mutex_};
+    return versions_.empty() ? 0 : versions_.size() - 1;
+}
+
+void AddressSpace::free_versions(std::size_t count) {
+    const std::lock_guard lock{versions_mutex_};
+    invariant(count < versions_.size() || count == 0, "freeing the current version");
+    versions_.erase(versions_.begin(), versions_.begin() + static_cast<std::ptrdiff_t>(count));
+}
+
 void AddressSpace::publish() {
     if (updating_ != 0) {
         return;
     }
     if (shared_) {
+        const std::lock_guard lock{versions_mutex_};
         versions_.push_back(std::make_unique<const Mappings>(mappings_));
         current_.store(versions_.back().get(), std::memory_order_release);
     } else {

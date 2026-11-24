@@ -238,6 +238,10 @@ node boards of two CPUs each, built from R10000s first and as IP31 / R12000 seco
 * guest-visible directory/coherence semantics;
 * partition/topology work as required.
 
+Done through N4 (MULTINODE.adoc, 2026-11-24): rack modules to eight (32 nodes, 64 CPUs) in
+a cube or hypercube of routers; IRIX boots on up to 32 CPUs. Open: IRIX on 64 CPUs; N5
+(Cray Routers, to 128 CPUs) if wanted and observable.
+
 === IP35 / Origin 3000 family
 
 IP35 is a new machine personality, not an enlarged IP27.
@@ -267,5 +271,6 @@ required for the faithful machine path.
 
 Support many independent Ultraviolent instances on Linux/Proxmox, shared virtual
 networking, snapshots, and eventually specialized virtual interconnect services.
-Started 2026-11-23 (ORCHESTRATION.adoc): more disks and copy-on-write overlays, a virtual
-Ethernet switch, the console on a socket, suspend and resume, and `uvctl`.
+Done 2026-11-23 (ORCHESTRATION.adoc O1-O4, release 0.1.4): more disks and copy-on-write
+overlays, a virtual Ethernet switch, the console on a socket, suspend and resume, and
+`uvctl`. Later: Proxmox integration and specialized interconnect services.

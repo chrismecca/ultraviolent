@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <utility>
@@ -161,6 +162,12 @@ class AddressSpace {
     // Changes still come from one thread at a time. Unshared, readers see the table being
     // changed, as when one thread does everything.
     void set_shared(bool shared);
+    // Shared: how many versions are no longer current, and freeing the oldest `count` of
+    // them, which the caller knows no reader still holds (Ip27Machine reclaims them at its
+    // CPU threads' quiescent points). Measured: keeping every version took a 32-node machine
+    // over 13 GB, two versions of a node's large table per flash write (MULTINODE.adoc "N4").
+    [[nodiscard]] std::size_t retired_versions() const;
+    void free_versions(std::size_t count);
 
     std::expected<std::uint64_t, AccessFault> read(PhysicalAddress address, AccessWidth width,
                                                    unsigned requester = 0);
@@ -259,7 +266,10 @@ class AddressSpace {
     Mappings mappings_;
     // What readers decode with: mappings_ itself, or when shared, the latest version.
     std::atomic<const Mappings*> current_{&mappings_};
+    // Shared: every version not yet freed, oldest first; the last is current_. Guarded by
+    // versions_mutex_, as a node's reset may publish while another thread frees.
     std::vector<std::unique_ptr<const Mappings>> versions_;
+    mutable std::mutex versions_mutex_;
     bool shared_{};
     unsigned updating_{};
     // Index of the mapping that decoded the last access, tried first. Transparent because

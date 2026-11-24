@@ -507,6 +507,31 @@ ADR-022).
   the rest spread over slow paths (the IO6PROM's SCSI polling through the Bridge 1.3%), so
   parallel speed now follows generated code's, as one CPU's does.
 
+* **S4.5 (2026-11-24): large machines on few cores** (the "can start now" push; release,
+  one or two runs each, six cores). Sixteen CPUs ran at 0.77 times real time with a thread
+  each; perf put 35% of the host's time in the kernel, switching threads at the window's
+  `yield`. Measured and not kept: a futex sleep at the window instead of `yield` (`cpu16`
+  15.4 / 15.7 s -> 27.5 / 25.8 s, `prom16` 56.1 / 58.3 s -> 80.9 / 82.3 s: the wake-up
+  latency costs more than the switches). Kept: **CPUs grouped on host threads**
+  (`Ip27Machine::run_group`, `--parallel-threads N`): CPU i runs on thread i mod N, which
+  runs its lowest CPU for at most a quarter window at a time and parks the others (a parked
+  CPU stores nothing, so code marking never waits for it); attention (a reset, a level) is
+  attended whichever CPU it is for. Six threads against one per CPU: `cpu16` 17.2 / 17.2 s
+  against 17.3 / 17.1 s, `prom16` 63.0 / 63.1 s against 58.0 / 57.3 s (kernel time 23%; the
+  PROM's master CPU's discovery is the critical path, and a group of three CPUs lags a group
+  of two), `prom32` 91.1 against 88.5 s, `prom64` **368 against 866 s**. So the default is a
+  thread per CPU up to 32 CPUs and a thread per host core beyond (`grouped_cpus`), at least
+  two (a node's two CPUs, 2n and 2n + 1, are then on different threads and can meet at a
+  reset). `hypothesis`, not seen: resets of several nodes arriving in different orders on
+  different threads could leave two threads each waiting in `NodeReset::arrive` for a CPU
+  the other runs; IRIX on 64 CPUs, which resets them, has not run (host memory). Not built:
+  a pool that steals CPUs between threads, which needs a reset rendezvous that does not
+  block its thread. Host memory for 32 nodes (MULTINODE.adoc "N4"): a shared AddressSpace
+  kept every version of its mappings, and each flash write publishes two (array mode off
+  and on), which took 32 nodes past 13 GB within a minute of discovery; versions are now
+  freed at the CPU threads' quiescent points (`Ip27Machine::reclaim_mappings`,
+  `address_space.free_versions`), and `prom64` peaks at 5.8 GB.
+
 Reproduce (the cold boot to a two-CPU root shell; copy the disk and state first as in
 STATUS "How to reproduce"):
 

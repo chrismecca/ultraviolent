@@ -14,8 +14,6 @@ namespace ultraviolent::ip27 {
 
 namespace {
 
-// Back-door space per bank: a quarter of the bank window (1 KB per 4 KB page).
-constexpr std::uint64_t bank_slice = bank_window / 4;
 // MD_PDIR_MASK and MD_SDIR_MASK; premium DIMMs widen the standard bits.
 constexpr std::uint64_t premium_bits = 0xffff'ffff'ffff;
 constexpr std::uint64_t standard_bits = 0xffff;
@@ -43,6 +41,27 @@ DirectoryMemory::DirectoryMemory(Tracer& tracer,
     if (dimms_ == DirectoryDimms::premium) {
         entries_.assign(entry_count_, 0);
     }
+    std::uint64_t unmapped = 0; // where the window's aliases not yet in a region start
+    for (std::size_t bank = 0; bank < memory_banks; ++bank) {
+        const std::uint64_t start = bank * bank_slice;
+        if (installed(bank) == 0) {
+            continue;
+        }
+        if (unmapped < start) {
+            add_region(unmapped, start - unmapped, false);
+        }
+        add_region(start, installed(bank), true);
+        unmapped = start + installed(bank);
+    }
+    if (unmapped < window_size) {
+        add_region(unmapped, window_size - unmapped, false);
+    }
+}
+
+void DirectoryMemory::add_region(std::uint64_t offset, std::uint64_t size, bool memory) {
+    views_.push_back(std::make_unique<View>(*this, offset));
+    regions_.push_back({.offset = offset, .size = size, .memory = memory,
+                        .target = views_.back().get()});
 }
 
 std::uint64_t DirectoryMemory::entry_mask() const {
@@ -58,18 +77,15 @@ void DirectoryMemory::set_premium_mode(bool premium) {
 }
 
 void DirectoryMemory::show(std::size_t bank, std::uint64_t index, std::uint64_t value) {
-    // hypothesis: a bank's DIMMs ignore address bits above their size, so back-door
-    // addresses beyond the installed directory alias within it. The PROM sizes each bank
-    // by testing for this aliasing (observed; IP27.adoc "Directory memory").
-    const std::uint64_t span = bank_bytes_[bank] / 4;
-    for (std::uint64_t at = bank * bank_slice + index * entry_bytes; at < (bank + 1) * bank_slice;
-         at += span) {
-        const auto bytes = window_.bytes().subspan(at, entry_bytes);
-        // Unchanged entries are not written, so pages that stay zero take no host memory.
-        if (load_unsigned(bytes, ByteOrder::big) != value) {
-            window_.note_write(at, entry_bytes);
-            store_unsigned(bytes, value, ByteOrder::big);
-        }
+    // Only where the bank's directory starts: reads of its aliases fold to here (mmio_read).
+    // Measured: writing every alias touched a whole 128 MB slice per node whatever its
+    // memory, 3.5 GB more host memory for 32 nodes of 64 MB (MULTINODE.adoc "N4").
+    const std::uint64_t at = bank * bank_slice + index * entry_bytes;
+    const auto bytes = window_.bytes().subspan(at, entry_bytes);
+    // Unchanged entries are not written, so pages that stay zero take no host memory.
+    if (load_unsigned(bytes, ByteOrder::big) != value) {
+        window_.note_write(at, entry_bytes);
+        store_unsigned(bytes, value, ByteOrder::big);
     }
 }
 
@@ -104,7 +120,17 @@ std::expected<std::uint64_t, AccessFault> DirectoryMemory::mmio_read(std::uint64
     // narrower reads are the entry's bytes likewise. An empty bank's directory reads as zero
     // (hypothesis: the PROM's probe treats a mismatched read-back as an empty bank, observed,
     // so the read completes).
-    return load_unsigned(window_.bytes().subspan(offset, byte_count(width)), ByteOrder::big);
+    //
+    // hypothesis: a bank's DIMMs ignore address bits above their size, so back-door addresses
+    // beyond the installed directory alias within it. The PROM sizes each bank by testing for
+    // this aliasing (observed; IP27.adoc "Directory memory").
+    const std::size_t bank = offset / bank_slice;
+    const std::uint64_t span = installed(bank);
+    if (span == 0) {
+        return 0;
+    }
+    const std::uint64_t at = bank * bank_slice + offset % bank_slice % span;
+    return load_unsigned(window_.bytes().subspan(at, byte_count(width)), ByteOrder::big);
 }
 
 std::expected<void, AccessFault>

@@ -50,11 +50,13 @@ or an FPGA later. IRIX must continue to see the same hardware contract.
 
 == What the machine has
 
-* one IP27 node board (two with `--nodes 2`), each with one or two R10000 CPUs and 512 MB
-  of memory by default
+* one IP27 node board (two with `--nodes 2`, or up to 32 in rack modules joined by
+  routers), each with one or two R10000 CPUs and 512 MB of memory by default
 * Hub, Crossbow, and a BaseIO board: Bridge/PCI, two QL1040B SCSI controllers, IOC3 serial
   console and Fast Ethernet, the M48T35 timekeeper and NVRAM
-* a SCSI system disk and CD-ROM drive, backed by files
+* SCSI disks and a CD-ROM drive, backed by files or copy-on-write overlays
+* several machines on one host, on a virtual Ethernet switch, run and snapshotted with
+  `scripts/uvctl.py` (`doc/ORCHESTRATION.adoc`)
 * the flash PROM log and NVRAM kept in files between runs
 * the module's system controller, far enough for its keyswitch to shut IRIX down and
   remove power
@@ -102,10 +104,12 @@ Start here, in order:
 . `doc/TIER2.adoc`
 . `doc/SMP.adoc`
 . `doc/MULTINODE.adoc`
+. `doc/ORCHESTRATION.adoc`
 . `doc/IP27.adoc`
 . `doc/IP27-TARGET.adoc`
 . `doc/ROADMAP.adoc`
 . `doc/RC-IP27.adoc`
+. `doc/RELEASE-NOTES-0.1.4.adoc`
 . `doc/RELEASE-NOTES-0.1.3.adoc`
 . `doc/RELEASE-NOTES-0.1.2.adoc`
 . `doc/RELEASE-NOTES-0.1.1.adoc`

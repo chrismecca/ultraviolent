@@ -372,6 +372,28 @@ const test::Registration shared_versions{
         t.check_equal(torn.load(), 0u); // every read decoded a whole mapping
     }};
 
+// Shared: replaced versions stay until the owner, knowing no reader holds them, frees them;
+// the current one stays.
+const test::Registration free_versions{"address_space.free_versions", [](test::Context& t) {
+    MemoryBlock first{0x1000};
+    MemoryBlock second{0x1000};
+    std::ranges::fill(second.bytes(), std::byte{0x22});
+    AddressSpace space{ByteOrder::big};
+    t.check(space.map_memory({ram_base, 0x1000}, first, 0, MemoryAccess::read_write).has_value());
+    space.set_shared(true);
+    t.check_equal(space.retired_versions(), std::size_t{0});
+    for (unsigned i = 0; i < 3; ++i) {
+        t.check(space.remap_memory({ram_base, 0x1000}, second, 0, MemoryAccess::read_write)
+                    .has_value());
+    }
+    t.check_equal(space.retired_versions(), std::size_t{3});
+    space.free_versions(2);
+    t.check_equal(space.retired_versions(), std::size_t{1});
+    space.free_versions(space.retired_versions());
+    t.check_equal(space.retired_versions(), std::size_t{0});
+    t.check_equal(space.read(ram_base, AccessWidth::bits32).value_or(0), std::uint64_t{0x2222'2222});
+}};
+
 // Only a frame's first mark reports itself (Cpu::claim_code_frame tells other CPUs then);
 // a write to a marked frame clears the mark and advances the frame's generation.
 const test::Registration code_marks{
