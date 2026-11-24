@@ -21,7 +21,8 @@ machine fits in about 6 GB (shared address maps free old versions; directory ali
 read, not copied); premium directory DIMMs past sixteen nodes, which the PROM requires. The
 PROM discovers and passes diagnostics on 32 and 64 CPUs (cube and hypercube), and IRIX
 boots on 32 CPUs (`boot32` 168 s) and runs `cpu32`. IRIX on 64 CPUs stops after "Starting
-up the system..." (see Current blocker). Next: see Next task.
+up the system..." (see Current blocker). **Release 0.1.4** (`doc/RELEASE-NOTES-0.1.4.adoc`)
+was pushed by the user (2026-11-24). Next: see Next task.
 
 Before it, tier 2:
 
@@ -516,7 +517,7 @@ All are done up to the end of tier 0 (stage H, 2026-10-08); the repository is pu
   (ORCHESTRATION.adoc "Progress"), speed for large machines (SMP.adoc "S4.5"), and N4
   (MULTINODE.adoc) are done; then release 0.1.4 (`doc/RELEASE-NOTES-0.1.4.adoc`: the four
   presets, a fresh install from blank, the fleet demonstration, the benchmark digests:
-  all done 2026-11-24, `local/release-check-014`); the user tags and publishes it.
+  all done 2026-11-24, `local/release-check-014`); the user pushed it (2026-11-24).
   After it, open: IRIX on 64 CPUs (Current blocker); a reset rendezvous that does not
   block its host thread, which would allow CPUs to move between threads.
 . **Tier 2 (doc/TIER2.adoc; the user, 2026-11-23): complete.** T0 measurement and
@@ -2677,6 +2678,6 @@ Disproven: that a futex sleep at the window beats yield (it is 1.4-1.8x slower);
   nodes over the host's memory (it was the kept address-map versions).
 Unknowns: why IRIX on 64 CPUs stops after "Starting up the system..." (Current blocker).
 Best checkpoint: local/release-check-014 (installed from blank with 0.1.4's code).
-Next step: the user tags and publishes 0.1.4; then IRIX on 64 CPUs, or the user's next
-  milestone.
+Next step: IRIX on 64 CPUs, or the user's next milestone (0.1.4 pushed by the user,
+  2026-11-24).
 ----
